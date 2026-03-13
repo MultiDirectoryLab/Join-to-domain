@@ -1,0 +1,141 @@
+# =========================
+# OS
+# =========================
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+Icon?
+._*
+
+# =========================
+# Logs
+# =========================
+*.log
+logs/
+*.pid
+*.seed
+*.pid.lock
+
+# =========================
+# Environment variables
+# =========================
+.env
+.env.*
+*.env
+
+# =========================
+# Python
+# =========================
+__pycache__/
+*.py[cod]
+*$py.class
+
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+
+*.egg-info/
+.installed.cfg
+*.egg
+
+venv/
+.venv/
+ENV/
+env/
+
+pip-log.txt
+pip-delete-this-directory.txt
+
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# =========================
+# Node
+# =========================
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# =========================
+# Docker
+# =========================
+docker-compose.override.yml
+*.tar
+*.tar.gz
+
+# =========================
+# IDE
+# =========================
+.vscode/
+.idea/
+*.iml
+
+# =========================
+# Build artifacts
+# =========================
+*.out
+*.exe
+*.dll
+*.class
+*.jar
+*.war
+
+# =========================
+# Coverage
+# =========================
+coverage/
+htmlcov/
+.coverage
+.coverage.*
+
+# =========================
+# Temporary files
+# =========================
+tmp/
+temp/
+*.tmp
+*.swp
+*.swo
+*~
+
+# =========================
+# Secrets
+# =========================
+secrets/
+*.key
+*.pem
+*.crt
+*.p12
+*.kdb
+*.kdbx
+
+# =========================
+# Database
+# =========================
+*.sqlite
+*.db
+
+# =========================
+# Archives
+# =========================
+*.zip
+*.rar
+*.7z
+*.gz
+*.bz2
+*.tar
