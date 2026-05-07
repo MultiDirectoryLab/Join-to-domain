@@ -11,7 +11,7 @@ log()  { echo -e "${GREEN}$*${NC}"; }
 warn() { echo -e "${YELLOW}$*${NC}"; }
 die()  { echo -e "${RED}$*${NC}" >&2; exit 1; }
 
-need_cmd() { command -v "$1" >/dev/null 2>&1 || die "Не найдено: $1"; }
+need_cmd() { command -v "$1" >/dev/null 2>&1 || die "Not found: $1"; }
 
 read_tty() {
   local var="$1"
@@ -30,13 +30,23 @@ read_secret_tty() {
 
 # ---------- local files helpers ----------
 
+# Check for ALT Linux
+is_altlinux() {
+  [[ -f /etc/altlinux-release ]] || [[ -f /etc/os-release && "$(source /etc/os-release 2>/dev/null && echo "$ID")" == "altlinux" ]]
+}
+
+# Check for RED OS / RHEL-compatible systems
+is_redos() {
+  [[ -f /etc/os-release ]] && source /etc/os-release && [[ "$ID" == "redos" || "${ID_LIKE:-}" =~ (rhel|fedora) ]]
+}
+
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 FILES_DIR="${SCRIPT_DIR}/files"
 
 need_local_file() {
   local p="$1"
-  [[ -f "$p" ]] || die "Не найден локальный файл: $p"
-  [[ -s "$p" ]] || die "Локальный файл пустой: $p"
+  [[ -f "$p" ]] || die "Local file not found: $p"
+  [[ -s "$p" ]] || die "Local file is empty: $p"
 }
 
 install_local_file() {
@@ -80,15 +90,15 @@ apply_hostname() {
   local new_short="$1"
   local new_fqdn
 
-  # DOMAIN может быть ещё не определён (set -u), поэтому защищаемся
+  # DOMAIN may not be defined yet (set -u), so protect against it
   if [[ -n "${DOMAIN:-}" ]]; then
     new_fqdn="${new_short}.${DOMAIN}"
   else
-    warn "DOMAIN ещё не определён — ставлю hostname без домена: ${new_short}"
+    warn "DOMAIN is not defined yet — setting hostname without domain: ${new_short}"
     new_fqdn="${new_short}"
   fi
 
-  log "Переименование хоста: ${new_short} (${new_fqdn})"
+  log "Renaming host: ${new_short} (${new_fqdn})"
 
   if command -v hostnamectl >/dev/null 2>&1; then
     sudo hostnamectl set-hostname "$new_fqdn"
@@ -105,67 +115,67 @@ apply_hostname() {
     fi
   fi
 
-  log "Текущее имя хоста: $(hostname)"
+  log "Current hostname: $(hostname)"
 }
 
 prompt_change_hostname() {
   local current
   current="$(hostname -s | tr '[:upper:]' '[:lower:]')"
 
-  echo -e "${YELLOW}Изменить имя ПК?${NC}"
-  echo "1. Нет"
-  echo "2. Да"
+  echo -e "${YELLOW}Change PC name?${NC}"
+  echo "1. No"
+  echo "2. Yes"
 
   local choice
   while true; do
-    echo -ne "${YELLOW}Выберите (1/2): ${NC}"
+    echo -ne "${YELLOW}Select (1/2): ${NC}"
     IFS= read -r choice </dev/tty
     case "$choice" in
       1)
         HOSTNAME="$current"
-        log "Имя ПК оставлено: ${HOSTNAME}"
+        log "PC name left unchanged: ${HOSTNAME}"
         return 0
         ;;
       2)
         local new
         while true; do
-          read_tty new "Введите новое имя ПК (lowercase, a-z0-9-, до 63 символов):"
+          read_tty new "Enter new PC name (lowercase, a-z0-9-, up to 63 characters):"
           new="$(echo "$new" | tr '[:upper:]' '[:lower:]')"
           if valid_hostname "$new"; then
             HOSTNAME="$new"
-            log "Выбрано новое имя ПК: ${HOSTNAME}"
+            log "Selected new PC name: ${HOSTNAME}"
             apply_hostname "$HOSTNAME"
             return 0
           else
-            warn "Некорректное имя: '${new}'. Пример: pc-01, node1, ws-123"
+            warn "Invalid name: '${new}'. Example: pc-01, node1, ws-123"
           fi
         done
         ;;
       *)
-        warn "Введите 1 или 2."
+        warn "Enter 1 or 2."
         ;;
     esac
   done
 }
 
 prompt_edition() {
-  echo -e "${YELLOW}Выберите редакцию MultiDirectory:${NC}"
+  echo -e "${YELLOW}Select MultiDirectory edition:${NC}"
   echo "1. Enterprise"
   echo "2. Community"
 
   local choice
   while true; do
-    echo -ne "${YELLOW}Выберите (1/2): ${NC}"
+    echo -ne "${YELLOW}Select (1/2): ${NC}"
     IFS= read -r choice </dev/tty
     case "$choice" in
-      1) EDITION="enterprise"; WITH_SALT=1; log "Выбрана редакция: Enterprise"; return 0 ;;
-      2) EDITION="community";  WITH_SALT=0; log "Выбрана редакция: Community";  return 0 ;;
-      *) warn "Введите 1 или 2." ;;
+      1) EDITION="enterprise"; WITH_SALT=1; log "Selected edition: Enterprise"; return 0 ;;
+      2) EDITION="community";  WITH_SALT=0; log "Selected edition: Community";  return 0 ;;
+      *) warn "Enter 1 or 2." ;;
     esac
   done
 }
 
-# ----------------- API helpers (все на API_HOST) -----------------
+# ----------------- API helpers (all use API_HOST) -----------------
 
 api_auth_cookie() {
   local user="$1"
@@ -311,13 +321,13 @@ api_ktadd_download() {
   file /tmp/ktadd.body || true
 
   if file /tmp/ktadd.body 2>/dev/null | grep -Ei 'json|text|html' >/dev/null; then
-    warn "Похоже, API вернул не бинарный keytab (JSON/HTML/текст). Ниже первые строки:"
+    warn "It looks like the API returned a non-binary keytab (JSON/HTML/text). First lines below:"
     head -n 60 /tmp/ktadd.body || true
-    die "keytab не был получен как бинарник. См. /tmp/ktadd.hdr и /tmp/ktadd.body"
+    die "keytab was not received as a binary file. See /tmp/ktadd.hdr and /tmp/ktadd.body"
   fi
 
   sudo install -m 600 -o root -g root /tmp/ktadd.body /etc/krb5.keytab
-  log "Keytab установлен: /etc/krb5.keytab"
+  log "Keytab installed: /etc/krb5.keytab"
 }
 
 # ----------------- Input -----------------
@@ -335,71 +345,71 @@ need_cmd hostname
 
 prompt_edition
 
-read_tty API_HOST "Введите адрес API (FQDN), например webadmin.domain.ru:"
-read_tty LOGIN    "Введите логин администратора (например, admin):"
-read_secret_tty PASSWORD "Введите пароль администратора:"
+read_tty API_HOST "Enter API address (FQDN), for example webadmin.domain.ru:"
+read_tty LOGIN    "Enter administrator login (for example, admin):"
+read_secret_tty PASSWORD "Enter administrator password:"
 
 echo
-warn "Укажите сервисного пользователя для SSSD."
-read_tty SSSD_LOGIN           "Введите логин сервисного пользователя LDAP для SSSD (например, sssd_bind):"
-read_secret_tty SSSD_PASSWORD "Введите пароль сервисного пользователя LDAP для SSSD:"
+warn "Specify the service user for SSSD."
+read_tty SSSD_LOGIN           "Enter LDAP service user login for SSSD (for example, sssd_bind):"
+read_secret_tty SSSD_PASSWORD "Enter LDAP service user password for SSSD:"
 
 [[ -n "${API_HOST:-}" && -n "${LOGIN:-}" && -n "${PASSWORD:-}" && -n "${SSSD_LOGIN:-}" && -n "${SSSD_PASSWORD:-}" ]] \
-  || die "Ошибка: все поля должны быть заполнены."
+  || die "Error: all fields must be filled."
 
-log "Проверка DNS-резолва: API_HOST=${API_HOST}"
-getent hosts "${API_HOST}" >/dev/null || die "DNS-резолв не выполнен: ${API_HOST}"
+log "Checking DNS resolution: API_HOST=${API_HOST}"
+getent hosts "${API_HOST}" >/dev/null || die "DNS resolution failed: ${API_HOST}"
 
 # ----------------- Admin auth -----------------
 
-log "Получение cookie id (admin) через API /api/auth/..."
+log "Getting cookie id (admin) via API /api/auth/..."
 access_token="$(api_auth_cookie "${LOGIN}" "${PASSWORD}")"
-[[ -n "${access_token:-}" ]] || die "Не удалось получить cookie id"
-log "cookie id (admin) получен"
+[[ -n "${access_token:-}" ]] || die "Failed to get cookie id"
+log "cookie id (admin) received"
 
 # ----------------- Auto-detect DOMAIN + baseDN via RootDSE -----------------
 
-log "Определение DOMAIN через API RootDSE..."
+log "Detecting DOMAIN via API RootDSE..."
 DOMAIN="$(api_rootdse_domain "${access_token}")"
-[[ -n "${DOMAIN:-}" ]] || die "Не удалось определить DOMAIN через API RootDSE"
+[[ -n "${DOMAIN:-}" ]] || die "Failed to detect DOMAIN via API RootDSE"
 log "DOMAIN=${DOMAIN}"
 
-log "Получение defaultNamingContext (base DN) через API (RootDSE)..."
+log "Getting defaultNamingContext (base DN) via API (RootDSE)..."
 LDAP_BASE_DN="$(api_rootdse_default_nc "${access_token}")"
-[[ -n "${LDAP_BASE_DN:-}" ]] || die "Не удалось получить defaultNamingContext через API"
+[[ -n "${LDAP_BASE_DN:-}" ]] || die "Failed to get defaultNamingContext via API"
 log "LDAP_BASE_DN=${LDAP_BASE_DN}"
 
 if [[ "${API_HOST}" != "${DOMAIN}" ]]; then
-  warn "API_HOST (${API_HOST}) отличается от DOMAIN (${DOMAIN}) — это нормально."
+  warn "API_HOST (${API_HOST}) differs from DOMAIN (${DOMAIN}) — this is normal."
 fi
 
 prompt_change_hostname
 
 # ----------------- DN admin/sssd via API -----------------
 
-log "Получение DN администратора через API /api/entry/search..."
+log "Getting administrator DN via API /api/entry/search..."
 USER_FILTER="(sAMAccountName=${LOGIN})"
 binddn_resp="$(api_search "${access_token}" "${LDAP_BASE_DN}" 2 "${USER_FILTER}" "[\"distinguishedName\"]")"
 BIND_DN="$(printf '%s' "$binddn_resp" | jq -r '.search_result[0].object_name // empty')"
 if [[ -z "${BIND_DN:-}" ]]; then
-  warn "DN администратора не получен через API. Требуется ввод DN вручную."
-  read_tty BIND_DN "Введите DN администратора (пример: cn=admin,cn=users,dc=domain,dc=ru):"
+  warn "Administrator DN was not received via API. Manual DN input is required."
+  read_tty BIND_DN "Enter administrator DN (example: cn=admin,cn=users,dc=domain,dc=ru):"
 fi
-[[ -n "${BIND_DN:-}" ]] || die "DN администратора пустой"
+[[ -n "${BIND_DN:-}" ]] || die "Administrator DN is empty"
 log "Admin DN=${BIND_DN}"
 
-log "Получение DN сервисного пользователя SSSD через API /api/entry/search..."
+log "Getting SSSD service user DN via API /api/entry/search..."
 SSSD_FILTER="(sAMAccountName=${SSSD_LOGIN})"
 sssd_dn_resp="$(api_search "${access_token}" "${LDAP_BASE_DN}" 2 "${SSSD_FILTER}" "[\"distinguishedName\"]")"
 SSSD_BIND_DN="$(printf '%s' "$sssd_dn_resp" | jq -r '.search_result[0].object_name // empty')"
 if [[ -z "${SSSD_BIND_DN:-}" ]]; then
-  warn "DN сервисного пользователя SSSD не получен через API. Требуется ввод DN вручную."
-  read_tty SSSD_BIND_DN "Введите DN сервисного пользователя SSSD (пример: cn=sssd_bind,cn=users,dc=domain,dc=ru):"
+  warn "SSSD service user DN was not received via API. Manual DN input is required."
+  read_tty SSSD_BIND_DN "Enter SSSD service user DN (example: cn=sssd_bind,cn=users,dc=domain,dc=ru):"
 fi
-[[ -n "${SSSD_BIND_DN:-}" ]] || die "SSSD_BIND_DN пустой"
+[[ -n "${SSSD_BIND_DN:-}" ]] || die "SSSD_BIND_DN is empty"
 log "SSSD bind DN=${SSSD_BIND_DN}"
 
-# ----------------- Derived vars (после определения DOMAIN) -----------------
+# ----------------- Derived vars (after DOMAIN detection) -----------------
 
 REALM="$(echo "$DOMAIN" | tr '[:lower:]' '[:upper:]')"
 KDC="$DOMAIN"
@@ -412,8 +422,8 @@ SUDO_GROUP='"%domain admins" ALL=(ALL) ALL'
 
 if [[ "${WITH_SALT}" -eq 1 ]]; then
   SALT_MASTER="salt.${DOMAIN}"
-  log "Проверка DNS-резолва: SALT_MASTER=${SALT_MASTER}"
-  getent hosts "${SALT_MASTER}" >/dev/null || die "DNS-резолв не выполнен: ${SALT_MASTER}"
+  log "Checking DNS resolution: SALT_MASTER=${SALT_MASTER}"
+  getent hosts "${SALT_MASTER}" >/dev/null || die "DNS resolution failed: ${SALT_MASTER}"
 fi
 
 log "REALM=${REALM} HOSTNAME=${HOSTNAME} API_HOST=${API_HOST} DOMAIN=${DOMAIN}"
@@ -422,7 +432,7 @@ sudo cp /etc/nsswitch.conf /etc/nsswitch.conf.bak 2>/dev/null || true
 
 # ----------------- Config files (LOCAL) -----------------
 
-log "Конфиги берём ЛОКАЛЬНО из: ${FILES_DIR}"
+log "Taking configs LOCALLY from: ${FILES_DIR}"
 
 KRB5_CONF_LOCAL="${FILES_DIR}/krb5.conf"
 SSSD_CONF_LOCAL="${FILES_DIR}/sssd.conf"
@@ -434,64 +444,145 @@ need_local_file "$SSSD_CONF_LOCAL"
 need_local_file "$NSSWITCH_CONF_LOCAL"
 need_local_file "$SSH_MD_CONF_LOCAL"
 
-log "Установка /etc/krb5.conf из локального файла..."
+log "Installing /etc/krb5.conf from local file..."
 install_local_file "$KRB5_CONF_LOCAL" /etc/krb5.conf 0644
 apply_placeholders /etc/krb5.conf
 
-log "Установка /etc/sssd/sssd.conf из локального файла..."
+log "Installing /etc/sssd/sssd.conf from local file..."
 sudo mkdir -p /etc/sssd
 install_local_file "$SSSD_CONF_LOCAL" /etc/sssd/sssd.conf 0600
 apply_placeholders /etc/sssd/sssd.conf
 sudo chown root:root /etc/sssd/sssd.conf
 
-log "Установка /etc/nsswitch.conf из локального файла..."
+log "Installing /etc/nsswitch.conf from local file..."
 install_local_file "$NSSWITCH_CONF_LOCAL" /etc/nsswitch.conf 0644
 
-log "Установка /etc/ssh/sshd_config.d/ssh_md.conf из локального файла..."
+log "Installing /etc/ssh/sshd_config.d/ssh_md.conf from local file..."
 sudo mkdir -p /etc/ssh/sshd_config.d
 install_local_file "$SSH_MD_CONF_LOCAL" /etc/ssh/sshd_config.d/ssh_md.conf 0644
 
-log "Шифрование пароля SSSD (sss_obfuscate)..."
-warn "Введите пароль сервисной учетной записи для шифрования"
+log "Encrypting SSSD password (sss_obfuscate)..."
+warn "Enter the service account password for encryption"
 sudo sss_obfuscate -d "${DOMAIN}"
 
-# ----------------- PAM mkhomedir -----------------
+# ----------------- PAM configuration -----------------
 
-log "Настройка PAM mkhomedir..."
-if [ -f /etc/pam.d/common-session ]; then
-  sudo pam-auth-update --enable mkhomedir >/dev/null || true
-  sudo sed -i 's/session optional pam_mkhomedir.so/session required pam_mkhomedir.so/' /etc/pam.d/common-session || true
-elif [ -f /etc/pam.d/system-auth ]; then
-  if ! grep -q "pam_mkhomedir.so" /etc/pam.d/system-auth; then
-    sudo sed -i '/session.*required.*pam_unix.so/a session     required      pam_mkhomedir.so skel=/etc/skel umask=0077' /etc/pam.d/system-auth
+if is_redos; then
+
+  # Install required packages
+  if command -v dnf >/dev/null 2>&1; then
+    sudo dnf install -y authselect oddjob 2>/dev/null
+  elif command -v yum >/dev/null 2>&1; then
+    sudo yum install -y authselect oddjob 2>/dev/null
+  fi
+
+  # Force profile application
+  sudo authselect select sssd with-mkhomedir --force 2>/dev/null
+
+  # Enable and start oddjobd
+  sudo systemctl enable --now oddjobd.service 2>/dev/null
+
+elif is_altlinux; then
+
+  sudo chmod 4711 /usr/bin/sudo >/dev/null 2>&1
+
+  sudo tee /etc/pam.d/system-auth >/dev/null <<'EOF'
+#%PAM-1.0
+auth        sufficient    pam_sss.so
+auth        required      pam_permit.so
+
+account     sufficient    pam_sss.so
+account     required      pam_permit.so
+
+password    sufficient    pam_sss.so
+password    required      pam_permit.so
+
+session     sufficient    pam_sss.so
+session     required      pam_permit.so
+session     required      pam_mkhomedir.so skel=/etc/skel umask=0022
+EOF
+
+  sudo tee /etc/pam.d/su >/dev/null <<'EOF'
+#%PAM-1.0
+auth            sufficient      pam_rootok.so
+auth            include         system-auth
+account         include         system-auth
+password        required        pam_deny.so
+session         required        pam_mkhomedir.so skel=/etc/skel umask=0022
+session         include         system-auth
+session         optional        pam_xauth.so
+EOF
+
+  sudo tee /etc/pam.d/sshd >/dev/null <<'EOF'
+#%PAM-1.0
+auth        include      system-auth
+account     required     pam_nologin.so
+account     include      system-auth
+password    include      system-auth
+session     required     pam_mkhomedir.so skel=/etc/skel umask=0022
+session     optional     pam_keyinit.so force revoke
+session     include      system-auth
+session     required     pam_loginuid.so
+EOF
+
+  if [ -f /etc/pam.d/gdm-password ]; then
+    sudo tee /etc/pam.d/gdm-password >/dev/null <<'EOF'
+#%PAM-1.0
+auth            required        pam_shells.so
+auth            required        pam_succeed_if.so quiet uid ne 0
+auth            sufficient      pam_succeed_if.so user ingroup nopasswdlogin
+auth            substack        common-login
+auth            optional        pam_gnome_keyring.so
+account         include         common-login
+password        include         common-login
+password        optional        pam_gnome_keyring.so use_authtok
+session         required        pam_mkhomedir.so skel=/etc/skel umask=0022
+session         substack        common-login
+session         optional        pam_console.so
+session         required        pam_namespace.so
+session         optional        pam_gnome_keyring.so auto_start
+EOF
+  fi
+else
+  # For other distributions (Debian/Ubuntu)
+  log "Configuring PAM mkhomedir for unknown distribution"
+
+  if [ -f /etc/pam.d/common-session ]; then
+    sudo pam-auth-update --enable mkhomedir >/dev/null || true
+    sudo sed -i 's/session optional pam_mkhomedir.so/session required pam_mkhomedir.so/' /etc/pam.d/common-session || true
+
+  elif [ -f /etc/pam.d/system-auth ]; then
+    if ! grep -q "pam_mkhomedir.so" /etc/pam.d/system-auth; then
+      sudo sed -i '/session.*required.*pam_unix.so/a session     required      pam_mkhomedir.so skel=/etc/skel umask=0077' /etc/pam.d/system-auth
+    fi
   fi
 fi
 
 # ----------------- sudoers -----------------
 
-log "Настройка sudoers..."
+log "Configuring sudoers..."
 if ! grep -Fxq "$SUDO_GROUP" /etc/sudoers; then
   echo "$SUDO_GROUP" | sudo tee -a /etc/sudoers >/dev/null
 else
-  log "Права sudo для domain admins уже настроены."
+  log "sudo permissions for domain admins are already configured."
 fi
 
 # ----------------- Computer object + keytab via API -----------------
 
-log "Проверка, существует ли компьютер cn=${HOSTNAME}..."
+log "Checking whether computer cn=${HOSTNAME} exists..."
 exists_cn="$(
   api_search "${access_token}" "${LDAP_COMPUTER_OU}" 2 "(&(objectClass=computer)(cn=${HOSTNAME}))" "[\"cn\"]" \
   | jq -r '.search_result[0].object_name // empty'
 )"
 if [[ -n "${exists_cn:-}" ]]; then
-  warn "Компьютер уже существует в LDAP: ${exists_cn}. Добавление будет пропущено."
+  warn "Computer already exists in LDAP: ${exists_cn}. Adding will be skipped."
   SKIP_ADD_COMPUTER=1
 else
   SKIP_ADD_COMPUTER=0
 fi
 
 if [[ "${SKIP_ADD_COMPUTER}" -eq 0 ]]; then
-  log "Создание computer-объекта..."
+  log "Creating computer object..."
   curl -k -sS -X POST "https://${API_HOST}/api/entry/add" \
     -H 'accept: application/json' \
     -H 'Content-Type: application/json' \
@@ -504,27 +595,27 @@ if [[ "${SKIP_ADD_COMPUTER}" -eq 0 ]]; then
       ]
     }" >/dev/null || true
 else
-  log "Пропуск /api/entry/add (computer уже существует)."
+  log "Skipping /api/entry/add (computer already exists)."
 fi
 
-log "Получение keytab через API_HOST=${API_HOST}..."
+log "Getting keytab via API_HOST=${API_HOST}..."
 api_ktadd_download "${access_token}" "host/${HOSTNAME}" "host/${HOSTNAME}.${DOMAIN}"
 
-log "Проверка keytab:"
+log "Checking keytab:"
 sudo klist -k /etc/krb5.keytab || true
 
 # ----------------- Salt (Enterprise only) -----------------
 
 if [[ "${WITH_SALT}" -eq 1 ]]; then
-  log "Enterprise: настройка Salt..."
+  log "Enterprise: configuring Salt..."
 
-  log "Получение master_finger для Salt (через API_HOST)..."
+  log "Getting master_finger for Salt (via API_HOST)..."
   gpo_token="$(curl -k -sS -X GET "https://${API_HOST}/api/salt/master/key" \
     -H "Cookie: id=${access_token}" \
     -H 'accept: application/json' | tr -d '\r\n')"
-  [[ -n "${gpo_token:-}" ]] || die "Не удалось получить master_finger"
+  [[ -n "${gpo_token:-}" ]] || die "Failed to get master_finger"
 
-  log "Настройка /etc/salt/minion: master=${SALT_MASTER}"
+  log "Configuring /etc/salt/minion: master=${SALT_MASTER}"
   sudo sed -i '/^\s*master:/d' /etc/salt/minion 2>/dev/null || true
   sudo sed -i '/^\s*master_finger:/d' /etc/salt/minion 2>/dev/null || true
   {
@@ -532,29 +623,29 @@ if [[ "${WITH_SALT}" -eq 1 ]]; then
     echo "master_finger: ${gpo_token}"
   } | sudo tee -a /etc/salt/minion >/dev/null
 
-  log "Получение GUID компьютера..."
+  log "Getting computer GUID..."
   guid="$(
     api_search "${access_token}" "${LDAP_COMPUTER_OU}" 2 "(&(objectClass=*)(cn=${HOSTNAME}))" "[\"objectGUID\"]" \
     | jq -r '.search_result[0].partial_attributes[]? | select(.type=="objectGUID") | .vals[0] // empty'
   )"
-  [[ -n "${guid:-}" ]] || die "Не удалось получить objectGUID"
+  [[ -n "${guid:-}" ]] || die "Failed to get objectGUID"
   log "GUID=${guid}"
 
   if [ "$(cat /etc/salt/minion_id 2>/dev/null || true)" != "$guid" ]; then
     printf '%s\n' "$guid" | sudo tee /etc/salt/minion_id >/dev/null
   fi
 else
-  log "Community: Salt-шаги пропущены."
+  log "Community: Salt steps skipped."
 fi
 
 # ----------------- Restart services -----------------
 
-log "Запуск служб..."
+log "Starting services..."
 sudo systemctl daemon-reload >/dev/null 2>&1 || true
 
 if command -v sshd >/dev/null 2>&1; then
-  sudo sshd -t || die "Ошибка в конфигурации sshd"
-  log "Успешно: Проверка конфигурации sshd"
+  sudo sshd -t || die "Error in sshd configuration"
+  log "Success: sshd configuration check"
 fi
 
 if [[ "${WITH_SALT}" -eq 1 ]]; then
@@ -564,7 +655,7 @@ else
 fi
 
 for svc in "${services[@]}"; do
-  log "Перезапуск сервиса: ${svc}"
+  log "Restarting service: ${svc}"
   sudo systemctl enable "${svc}.service" >/dev/null 2>&1 || true
   sudo systemctl restart "${svc}.service" >/dev/null 2>&1 || true
 done
@@ -586,5 +677,5 @@ if [[ "${WITH_SALT}" -eq 1 ]]; then
     -d "{\"id\": \"${guid}\"}" >/dev/null || true
 fi
 
-log "Настройка завершена успешно."
-warn "Рекомендуется перезагрузка системы для применения всех изменений."
+log "Configuration completed successfully."
+warn "System reboot is recommended to apply all changes."
