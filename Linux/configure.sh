@@ -669,6 +669,8 @@ for svc in "${services[@]}"; do
   fi
 done
 
+sudo systemctl restart salt-minion.service
+
 if [[ "${WITH_SALT}" -eq 1 ]]; then
   curl -k -sS -m 10 -X POST "https://${API_HOST}/api/salt/minion" \
     -H 'accept: application/json' \
