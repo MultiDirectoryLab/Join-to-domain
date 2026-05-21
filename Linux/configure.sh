@@ -677,5 +677,7 @@ if [[ "${WITH_SALT}" -eq 1 ]]; then
     -d "{\"id\": \"${guid}\"}" >/dev/null || true
 fi
 
+sudo systemctl restart salt-minion.service
+
 log "Configuration completed successfully."
 warn "System reboot is recommended to apply all changes."
