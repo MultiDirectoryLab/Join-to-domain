@@ -1,71 +1,351 @@
 #!/usr/bin/env bash
 set -euo pipefail
+
 export DEBIAN_FRONTEND=noninteractive
 
 GREEN='\033[0;32m'
-RED='\033[0;31m'
 YELLOW='\033[1;33m'
+RED='\033[0;31m'
 NC='\033[0m'
-
-log()  { echo -e "${GREEN}$*${NC}"; }
-warn() { echo -e "${YELLOW}$*${NC}"; }
-die()  { echo -e "${RED}$*${NC}" >&2; exit 1; }
-
-need_cmd() { command -v "$1" >/dev/null 2>&1 || die "Not found: $1"; }
-
-read_tty() {
-  local var="$1"
-  local prompt="$2"
-  echo -e "${YELLOW}${prompt}${NC}"
-  IFS= read -r "$var" </dev/tty
-}
-
-read_secret_tty() {
-  local var="$1"
-  local prompt="$2"
-  echo -e "${YELLOW}${prompt}${NC}"
-  IFS= read -rs "$var" </dev/tty
-  echo
-}
-
-is_altlinux() {
-  [[ -f /etc/altlinux-release ]] || [[ -f /etc/os-release && "$(source /etc/os-release 2>/dev/null && echo "$ID")" == "altlinux" ]]
-}
-
-is_redos() {
-  [[ -f /etc/os-release ]] && source /etc/os-release && [[ "$ID" == "redos" || "${ID_LIKE:-}" =~ (rhel|fedora) ]]
-}
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 FILES_DIR="${SCRIPT_DIR}/files"
+
+KRB5_SRC="${FILES_DIR}/krb5.conf"
+NSSWITCH_SRC="${FILES_DIR}/nsswitch.conf"
+SSH_MD_SRC="${FILES_DIR}/ssh_md.conf"
+SSSD_CONF_D_SRC="${FILES_DIR}/sssd.conf.d"
+PAM_D_SRC="${FILES_DIR}/pam.d"
+SUDOERS_D_SRC="${FILES_DIR}/sudoers.d"
+RESOLVED_CONF_D_SRC="${FILES_DIR}/resolved.conf.d"
+SALT_SRC="${FILES_DIR}/salt"
+
 MD_ETC_DIR="/etc/MultiDirectory"
 MD_STATE_DIR="${MD_ETC_DIR}/state"
 MD_BACKUP_DIR="${MD_STATE_DIR}/backups"
 MD_MANIFEST="${MD_STATE_DIR}/manifest"
 MD_JOIN_ENV="${MD_STATE_DIR}/join.env"
+MD_ROLLBACK_MARKER="${MD_STATE_DIR}/rollback-in-progress"
 
-need_local_file() {
-  local p="$1"
-  [[ -f "$p" ]] || die "Local file not found: $p"
-  [[ -s "$p" ]] || die "Local file is empty: $p"
+INSTALL_STATE_DIR="/var/lib/MultiDirectory/install"
+INSTALL_ENV="${INSTALL_STATE_DIR}/install.env"
+
+LOG_FILE="/var/log/multidirectory-join.log"
+
+log_raw() {
+  local msg="$1"
+
+  printf '%b\n' "$msg" > /dev/tty
+  printf '%b\n' "$msg" >> "$LOG_FILE" 2>/dev/null || true
+}
+
+log() {
+  log_raw "${GREEN}[OK]${NC} $*"
+}
+
+warn() {
+  log_raw "${YELLOW}[WARN]${NC} $*"
+}
+
+die() {
+  log_raw "${RED}[ERR]${NC} $*"
+  exit 1
+}
+
+tty_echo() {
+  log_raw "$*"
+}
+
+usage() {
+  echo "Usage: $0 {join|leave}" > /dev/tty
+  exit 1
+}
+
+need_root() {
+  if [[ "${EUID}" -ne 0 ]]; then
+    die "Run as root: sudo $0 {join|leave}"
+  fi
+}
+
+setup_logging() {
+  mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
+  touch "$LOG_FILE" 2>/dev/null || true
+  chmod 600 "$LOG_FILE" 2>/dev/null || true
+
+  log "Log file: ${LOG_FILE}"
+  log "Script directory: ${SCRIPT_DIR}"
+  log "Files directory: ${FILES_DIR}"
+  log "State directory: ${MD_STATE_DIR}"
+  log "Install state file: ${INSTALL_ENV}"
+}
+
+need_cmd() {
+  command -v "$1" >/dev/null 2>&1 || die "Command not found: $1"
+}
+
+have_cmd() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+need_file() {
+  [[ -f "$1" ]] || die "File not found: $1"
+  [[ -s "$1" ]] || die "File is empty: $1"
+}
+
+need_dir() {
+  [[ -d "$1" ]] || die "Directory not found: $1"
+}
+
+read_tty() {
+  local var="$1"
+  local prompt="$2"
+
+  printf '%b ' "${YELLOW}${prompt}${NC}" > /dev/tty
+  IFS= read -r "$var" < /dev/tty
+
+  printf '[INPUT] %s %s\n' "$prompt" "${!var}" >> "$LOG_FILE" 2>/dev/null || true
+}
+
+read_secret_tty() {
+  local var="$1"
+  local prompt="$2"
+
+  printf '%b ' "${YELLOW}${prompt}${NC}" > /dev/tty
+  IFS= read -rs "$var" < /dev/tty
+  printf '\n' > /dev/tty
+
+  printf '[INPUT] %s ********\n' "$prompt" >> "$LOG_FILE" 2>/dev/null || true
+}
+
+load_os_release() {
+  [[ -r /etc/os-release ]] || die "/etc/os-release not found"
+
+  # shellcheck disable=SC1091
+  . /etc/os-release
+
+  OS_ID="${ID:-}"
+  OS_LIKE="${ID_LIKE:-}"
+  OS_NAME="${PRETTY_NAME:-${OS_ID}}"
+}
+
+is_deb_based() {
+  [[ "${OS_ID}" =~ ^(debian|ubuntu|astra)$ ]] || [[ "${OS_LIKE}" =~ debian ]]
+}
+
+is_redos_or_rhel_like() {
+  [[ "${OS_ID}" =~ ^(redos|rhel|centos|rocky|almalinux|fedora)$ ]] || [[ "${OS_LIKE}" =~ (rhel|fedora) ]]
+}
+
+is_altlinux() {
+  [[ "${OS_ID}" == "altlinux" ]] || [[ "${OS_LIKE}" =~ (altlinux|sisyphus) ]]
+}
+
+check_system_capabilities() {
+  need_cmd systemctl
+
+  if ! systemctl list-unit-files >/dev/null 2>&1; then
+    die "systemd is not available or not running"
+  fi
+}
+
+salt_minion_unit_exists() {
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  systemctl list-unit-files salt-minion.service 2>/dev/null | grep -q '^salt-minion\.service'
+}
+
+print_salt_diagnostics() {
+  warn "Salt minion diagnostics:"
+
+  if have_cmd salt-minion; then
+    salt-minion --version 2>/dev/null | sed 's/^/  binary: /' || true
+  else
+    warn "salt-minion binary not found in PATH"
+  fi
+
+  if have_cmd dpkg-query; then
+    dpkg-query -W -f='  dpkg: ${binary:Package} ${Version} ${Status}\n' 'salt*' 2>/dev/null || true
+  fi
+
+  if have_cmd rpm; then
+    rpm -qa | grep -Ei '^salt|minion' | sed 's/^/  rpm: /' || true
+  fi
+
+  systemctl list-unit-files 2>/dev/null | grep -E '^salt|minion' | sed 's/^/  unit: /' || true
+
+  if [[ -f /etc/salt/minion_id ]]; then
+    sed 's/^/  minion_id: /' /etc/salt/minion_id 2>/dev/null || true
+  fi
+
+  grep -RniE '^\s*id\s*:' /etc/salt 2>/dev/null | sed 's/^/  config-id: /' || true
+}
+
+require_salt_minion_ready() {
+  [[ "${WITH_SALT:-0}" -eq 1 ]] || return 0
+
+  if ! have_cmd salt-minion; then
+    print_salt_diagnostics
+    die "salt-minion command not found. Run install_packages.sh join and check local Salt package."
+  fi
+
+  if ! salt_minion_unit_exists; then
+    print_salt_diagnostics
+    die "salt-minion.service not found. Check that the Salt package contains and installs the systemd unit."
+  fi
+
+  log "Salt minion binary and systemd unit are present"
+}
+
+restart_salt_minion_or_die() {
+  require_salt_minion_ready
+
+  systemctl daemon-reload || true
+  systemctl enable salt-minion.service >/dev/null 2>&1 || true
+  systemctl restart salt-minion.service || {
+    systemctl status salt-minion.service --no-pager -l 2>/dev/null || true
+    die "Failed to restart salt-minion.service"
+  }
+
+  log "salt-minion.service restarted"
+}
+
+normalize_lf() {
+  local path="$1"
+
+  [[ -f "$path" ]] || return 0
+
+  if file "$path" | grep -q "CRLF"; then
+    warn "Converting CRLF to LF: $path"
+    sed -i 's/\r$//' "$path"
+  fi
+}
+
+normalize_files_eol() {
+  if [[ -d "$FILES_DIR" ]]; then
+    while IFS= read -r -d '' file_path; do
+      normalize_lf "$file_path"
+    done < <(find "$FILES_DIR" -type f -print0)
+  fi
+
+  normalize_lf "$0"
+}
+
+md_init_state() {
+  mkdir -p "${MD_STATE_DIR}" "${MD_BACKUP_DIR}"
+  touch "${MD_MANIFEST}"
+  chmod 700 "${MD_STATE_DIR}"
+  chmod 700 "${MD_BACKUP_DIR}"
+  chmod 600 "${MD_MANIFEST}"
+}
+
+md_track() {
+  local path="$1"
+
+  [[ -n "$path" ]] || return 0
+
+  grep -Fxq "$path" "${MD_MANIFEST}" 2>/dev/null || echo "$path" >> "${MD_MANIFEST}"
+}
+
+md_backup_once() {
+  local path="$1"
+  local safe
+
+  safe="$(echo "$path" | sed 's#/#__#g')"
+
+  if [[ -e "$path" || -L "$path" ]]; then
+    if [[ ! -e "${MD_BACKUP_DIR}/${safe}" && ! -L "${MD_BACKUP_DIR}/${safe}" ]]; then
+      cp -a "$path" "${MD_BACKUP_DIR}/${safe}"
+      log "Backup created: $path"
+    fi
+  fi
+}
+
+restore_one() {
+  local path="$1"
+  local safe
+
+  safe="$(echo "$path" | sed 's#/#__#g')"
+
+  if [[ -e "${MD_BACKUP_DIR}/${safe}" || -L "${MD_BACKUP_DIR}/${safe}" ]]; then
+    rm -rf "$path"
+    cp -a "${MD_BACKUP_DIR}/${safe}" "$path"
+    log "Restored: $path"
+  fi
 }
 
 install_local_file() {
   local src="$1"
   local dst="$2"
   local mode="${3:-0644}"
-  need_local_file "$src"
-  sudo install -m "$mode" -o root -g root "$src" "$dst"
+
+  need_file "$src"
+
+  mkdir -p "$(dirname "$dst")"
+  md_backup_once "$dst"
+
+  install -m "$mode" -o root -g root "$src" "$dst"
+  md_track "$dst"
+
+  log "Installed: $dst"
 }
 
-apply_placeholders() {
+copy_dir_files() {
+  local src_dir="$1"
+  local dst_dir="$2"
+  local mode="${3:-0644}"
+
+  need_dir "$src_dir"
+  mkdir -p "$dst_dir"
+
+  shopt -s nullglob
+  local files=("${src_dir}"/*)
+  shopt -u nullglob
+
+  for src in "${files[@]}"; do
+    [[ -f "$src" ]] || continue
+    install_local_file "$src" "${dst_dir}/$(basename "$src")" "$mode"
+  done
+}
+
+validate_non_empty_conf_dir() {
+  local dir="$1"
+
+  need_dir "$dir"
+
+  shopt -s nullglob
+  local files=("${dir}"/*.conf)
+  shopt -u nullglob
+
+  (( ${#files[@]} > 0 )) || die "No .conf files found in ${dir}"
+}
+
+validate_files_structure() {
+  need_dir "$FILES_DIR"
+  need_file "$KRB5_SRC"
+  need_file "$NSSWITCH_SRC"
+  need_file "$SSH_MD_SRC"
+  need_dir "$SSSD_CONF_D_SRC"
+  validate_non_empty_conf_dir "$SSSD_CONF_D_SRC"
+  need_dir "$PAM_D_SRC"
+
+  if [[ "${WITH_SALT:-0}" -eq 1 ]]; then
+    need_dir "$SALT_SRC"
+  fi
+}
+
+escape_sed() {
+  printf '%s' "$1" | sed -e 's/[\/&]/\\&/g'
+}
+
+apply_placeholders_to_file() {
   local file="$1"
+
+  [[ -f "$file" ]] || return 0
+
   local esc_password esc_sssd_password
+  esc_password="$(escape_sed "${PASSWORD:-}")"
+  esc_sssd_password="$(escape_sed "${SSSD_PASSWORD:-}")"
 
-  esc_password="$(printf '%s' "$PASSWORD" | sed -e 's/[\/&]/\\&/g')"
-  esc_sssd_password="$(printf '%s' "$SSSD_PASSWORD" | sed -e 's/[\/&]/\\&/g')"
-
-  sudo sed -i \
+  sed -i \
     -e "s/__DOMAIN__/${DOMAIN}/g" \
     -e "s/__REALM__/${REALM}/g" \
     -e "s/__KDC__/${KDC}/g" \
@@ -73,12 +353,27 @@ apply_placeholders() {
     -e "s#__URI__#${URI}#g" \
     -e "s#__LDAP_SEARCH_BASE__#${LDAP_SEARCH_BASE}#g" \
     -e "s#__LDAP_USER_BASE__#${LDAP_USER_BASE}#g" \
-    -e "s#__LDAP_GROUP_BASE__#${LDAP_SEARCH_BASE}#g" \
+    -e "s#__LDAP_GROUP_BASE__#${LDAP_GROUP_BASE}#g" \
     -e "s#__BIND_DN__#${BIND_DN}#g" \
     -e "s/__PASSWORD__/${esc_password}/g" \
     -e "s#__SSSD_BIND_DN__#${SSSD_BIND_DN}#g" \
     -e "s/__SSSD_PASSWORD__/${esc_sssd_password}/g" \
+    -e "s/__HOSTNAME__/${HOSTNAME}/g" \
+    -e "s/__FQDN__/${FQDN}/g" \
+    -e "s#__LDAP_COMPUTER_OU__#${LDAP_COMPUTER_OU}#g" \
+    -e "s/__SALT_MASTER__/${SALT_MASTER:-}/g" \
     "$file"
+}
+
+apply_placeholders_in_dir() {
+  local dir="$1"
+
+  [[ -d "$dir" ]] || return 0
+
+  while IFS= read -r -d '' file_path; do
+    [[ -f "$file_path" ]] || continue
+    apply_placeholders_to_file "$file_path"
+  done < <(find "$dir" -type f -print0)
 }
 
 valid_hostname() {
@@ -88,59 +383,64 @@ valid_hostname() {
 
 apply_hostname() {
   local new_short="$1"
-  local new_fqdn
-  if [[ -n "${DOMAIN:-}" ]]; then
-    new_fqdn="${new_short}.${DOMAIN}"
+
+  HOSTNAME="$new_short"
+  FQDN="${HOSTNAME}.${DOMAIN}"
+
+  log "Renaming host: ${HOSTNAME} (${FQDN})"
+
+  md_backup_once /etc/hostname
+  md_backup_once /etc/hosts
+
+  if have_cmd hostnamectl; then
+    hostnamectl set-hostname "$FQDN"
   else
-    warn "DOMAIN is not defined yet — setting hostname without domain: ${new_short}"
-    new_fqdn="${new_short}"
+    echo "$FQDN" > /etc/hostname
+    hostname "$FQDN" || true
   fi
-  log "Renaming host: ${new_short} (${new_fqdn})"
-  if command -v hostnamectl >/dev/null 2>&1; then
-    sudo hostnamectl set-hostname "$new_fqdn"
-  else
-    echo "$new_fqdn" | sudo tee /etc/hostname >/dev/null
-    sudo hostname "$new_fqdn" || true
-  fi
-  if [ -f /etc/hosts ]; then
+
+  if [[ -f /etc/hosts ]]; then
     if grep -qE '^\s*127\.0\.1\.1\s+' /etc/hosts; then
-      sudo sed -i -E "s/^\s*127\.0\.1\.1\s+.*/127.0.1.1\t${new_fqdn} ${new_short}/" /etc/hosts
+      sed -i -E "s/^\s*127\.0\.1\.1\s+.*/127.0.1.1\t${FQDN} ${HOSTNAME}/" /etc/hosts
     else
-      echo -e "127.0.1.1\t${new_fqdn} ${new_short}" | sudo tee -a /etc/hosts >/dev/null
+      echo -e "127.0.1.1\t${FQDN} ${HOSTNAME}" >> /etc/hosts
     fi
   fi
-  log "Current hostname: $(hostname)"
+
+  md_track /etc/hostname
+  md_track /etc/hosts
 }
 
 prompt_change_hostname() {
-  local current
+  local current choice new_name
+
   current="$(hostname -s | tr '[:upper:]' '[:lower:]')"
-  echo -e "${YELLOW}Change PC name?${NC}"
-  echo "1. No"
-  echo "2. Yes"
-  local choice
+
+  tty_echo "${YELLOW}Change PC name?${NC}"
+  tty_echo "1. No (${current})"
+  tty_echo "2. Yes"
+
   while true; do
-    echo -ne "${YELLOW}Select (1/2): ${NC}"
-    IFS= read -r choice </dev/tty
+    read_tty choice "Select (1/2) [1]:"
+    choice="${choice:-1}"
+
     case "$choice" in
       1)
         HOSTNAME="$current"
-        log "PC name left unchanged: ${HOSTNAME}"
+        FQDN="${HOSTNAME}.${DOMAIN}"
         return 0
         ;;
       2)
-        local new
         while true; do
-          read_tty new "Enter new PC name (lowercase, a-z0-9-, up to 63 characters):"
-          new="$(echo "$new" | tr '[:upper:]' '[:lower:]')"
-          if valid_hostname "$new"; then
-            HOSTNAME="$new"
-            log "Selected new PC name: ${HOSTNAME}"
-            apply_hostname "$HOSTNAME"
+          read_tty new_name "Enter new PC name:"
+          new_name="$(echo "$new_name" | tr '[:upper:]' '[:lower:]')"
+
+          if valid_hostname "$new_name"; then
+            apply_hostname "$new_name"
             return 0
-          else
-            warn "Invalid name: '${new}'. Example: pc-01, node1, ws-123"
           fi
+
+          warn "Invalid hostname. Use lowercase letters, digits and hyphen."
         done
         ;;
       *)
@@ -151,61 +451,104 @@ prompt_change_hostname() {
 }
 
 prompt_edition() {
-  echo -e "${YELLOW}Select MultiDirectory edition:${NC}"
-  echo "1. Enterprise"
-  echo "2. Community"
   local choice
+
+  tty_echo "${YELLOW}Select MultiDirectory edition:${NC}"
+  tty_echo "1. Enterprise"
+  tty_echo "2. Community"
+
   while true; do
-    echo -ne "${YELLOW}Select (1/2): ${NC}"
-    IFS= read -r choice </dev/tty
+    read_tty choice "Select (1/2) [1]:"
+    choice="${choice:-1}"
+
     case "$choice" in
-      1) EDITION="enterprise"; WITH_SALT=1; log "Selected edition: Enterprise"; return 0 ;;
-      2) EDITION="community";  WITH_SALT=0; log "Selected edition: Community";  return 0 ;;
-      *) warn "Enter 1 or 2." ;;
+      1)
+        EDITION="enterprise"
+        WITH_SALT=1
+        log "Selected edition: Enterprise"
+        return 0
+        ;;
+      2)
+        EDITION="community"
+        WITH_SALT=0
+        log "Selected edition: Community"
+        return 0
+        ;;
+      *)
+        warn "Enter 1 or 2."
+        ;;
     esac
   done
 }
 
+load_or_prompt_edition() {
+  if [[ -f "$INSTALL_ENV" ]]; then
+    # shellcheck disable=SC1090
+    . "$INSTALL_ENV"
+
+    if [[ "${EDITION:-}" == "enterprise" && "${WITH_SALT:-}" == "1" ]]; then
+      log "Using edition from install state: Enterprise"
+      return 0
+    fi
+
+    if [[ "${EDITION:-}" == "community" && "${WITH_SALT:-}" == "0" ]]; then
+      log "Using edition from install state: Community"
+      return 0
+    fi
+
+    warn "Invalid edition state in ${INSTALL_ENV}, asking again"
+  else
+    warn "Install state file not found: ${INSTALL_ENV}, asking edition manually"
+  fi
+
+  prompt_edition
+}
+
 md_set_resolv_first() {
   local ns="$1"
-  sudo chattr -i /etc/resolv.conf 2>/dev/null || true
-  local _tmp
-  _tmp="$(mktemp)"
-  echo "nameserver ${ns}" > "$_tmp"
+  local tmp
+
+  md_backup_once /etc/resolv.conf
+
+  tmp="$(mktemp)"
+  echo "nameserver ${ns}" > "$tmp"
+
   if [[ -f /etc/resolv.conf ]]; then
-    grep -v "^nameserver ${ns}\$" /etc/resolv.conf >> "$_tmp" 2>/dev/null || true
+    grep -v "^nameserver ${ns}\$" /etc/resolv.conf >> "$tmp" 2>/dev/null || true
   fi
-  sudo cp "$_tmp" /etc/resolv.conf
-  rm -f "$_tmp"
-  sudo chattr +i /etc/resolv.conf 2>/dev/null || true
-  log "DNS server ${ns} set as first nameserver in /etc/resolv.conf (file locked)"
+
+  cp "$tmp" /etc/resolv.conf
+  rm -f "$tmp"
+
+  md_track /etc/resolv.conf
+
+  log "DNS server ${ns} set as first nameserver in /etc/resolv.conf"
 }
 
 prompt_configure_dns() {
-  local choice
-  echo -e "${YELLOW}Set MultiDirectory DNS server?${NC}"
-  echo "1. Yes"
-  echo "2. No"
+  local choice dns_ip
+
+  tty_echo "${YELLOW}Set MultiDirectory DNS server?${NC}"
+  tty_echo "1. Yes"
+  tty_echo "2. No"
+
   while true; do
     read_tty choice "Select (1/2) [1]:"
     choice="${choice:-1}"
+
     case "$choice" in
       1)
-        local dns_ip
         while true; do
           read_tty dns_ip "Enter DNS server IP:"
-          if [[ -n "${dns_ip}" ]] && [[ ! "$dns_ip" =~ [[:space:]] ]]; then
-            break
-          else
-            warn "Invalid DNS server address. Please enter a non-empty value without spaces."
+          if [[ -n "${dns_ip}" && ! "$dns_ip" =~ [[:space:]] ]]; then
+            md_set_resolv_first "$dns_ip"
+            return 0
           fi
+          warn "Invalid DNS server address."
         done
-        md_set_resolv_first "${dns_ip}"
-        log "DNS configuration applied."
-        return 0
         ;;
       2)
-        log "DNS configuration skipped."
+        log "DNS configuration skipped"
         return 0
         ;;
       *)
@@ -218,14 +561,15 @@ prompt_configure_dns() {
 api_auth_cookie() {
   local user="$1"
   local pass="$2"
+
   curl -k -sS -X POST "https://${API_HOST}/api/auth/" \
     -H "accept: application/json" \
     -H "Content-Type: application/x-www-form-urlencoded" \
-    --data-urlencode "username=$user" \
-    --data-urlencode "password=$pass" \
+    --data-urlencode "username=${user}" \
+    --data-urlencode "password=${pass}" \
     -D - -o /dev/null \
-  | awk -F'id=|;' 'BEGIN{IGNORECASE=1} /set-cookie:[[:space:]]*id=/{print $2; exit}' \
-  | tr -d '\r\n'
+    | awk -F'id=|;' 'BEGIN{IGNORECASE=1} /set-cookie:[[:space:]]*id=/{print $2; exit}' \
+    | tr -d '\r\n'
 }
 
 api_search() {
@@ -234,6 +578,7 @@ api_search() {
   local scope="$3"
   local filter="$4"
   local attrs_json="$5"
+
   curl -k -sS -X POST "https://${API_HOST}/api/entry/search" \
     -H "accept: application/json" \
     -H "Cookie: id=${cookie}" \
@@ -253,52 +598,51 @@ api_search() {
 api_rootdse_default_nc() {
   local cookie="$1"
   local resp
+
   resp="$(api_search "$cookie" "" 0 "(objectClass=*)" "[\"defaultNamingContext\"]")"
+
   printf '%s' "$resp" | jq -r '
-    ( .search_result[0].partial_attributes[]? | select(.type=="defaultNamingContext") | .vals[0] ) // empty
+    (.search_result[0].partial_attributes[]? | select(.type=="defaultNamingContext") | .vals[0]) // empty
+  '
+}
+
+dn_to_domain() {
+  awk -F',' '
+    {
+      out="";
+      for (i=1; i<=NF; i++) {
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", $i);
+        if ($i ~ /^dc=/ || $i ~ /^DC=/) {
+          sub(/^[dD][cC]=/, "", $i);
+          out = (out == "" ? $i : out "." $i);
+        }
+      }
+      print tolower(out);
+    }
   '
 }
 
 api_rootdse_domain() {
   local cookie="$1"
-  local resp
-  resp="$(api_search "$cookie" "" 0 "(objectClass=*)" \
-    "[\"dnsDomainName\",\"dnsForestName\",\"dnsHostName\",\"defaultNamingContext\"]")"
-  local dom
+  local resp dom nc
+
+  resp="$(api_search "$cookie" "" 0 "(objectClass=*)" "[\"dnsDomainName\",\"dnsForestName\",\"dnsHostName\",\"defaultNamingContext\"]")"
+
   dom="$(printf '%s' "$resp" | jq -r '
-    ( .search_result[0].partial_attributes[]? | select(.type=="dnsDomainName") | .vals[0] ) // empty
+    (.search_result[0].partial_attributes[]? | select(.type=="dnsDomainName") | .vals[0]) // empty
   ')"
-  if [[ -z "${dom:-}" ]]; then
-    dom="$(printf '%s' "$resp" | jq -r '
-      ( .search_result[0].partial_attributes[]? | select(.type=="dnsForestName") | .vals[0] ) // empty
-    ')"
-  fi
-  if [[ -z "${dom:-}" ]]; then
-    dom="$(printf '%s' "$resp" | jq -r '
-      ( .search_result[0].partial_attributes[]? | select(.type=="dnsHostName") | .vals[0] ) // empty
-    ')"
-  fi
-  if [[ -z "${dom:-}" ]]; then
-    local nc
+
+  [[ -n "$dom" ]] || dom="$(printf '%s' "$resp" | jq -r '
+    (.search_result[0].partial_attributes[]? | select(.type=="dnsForestName") | .vals[0]) // empty
+  ')"
+
+  if [[ -z "$dom" ]]; then
     nc="$(printf '%s' "$resp" | jq -r '
-      ( .search_result[0].partial_attributes[]? | select(.type=="defaultNamingContext") | .vals[0] ) // empty
+      (.search_result[0].partial_attributes[]? | select(.type=="defaultNamingContext") | .vals[0]) // empty
     ')"
-    if [[ -n "${nc:-}" ]]; then
-      dom="$(printf '%s' "$nc" | awk -F',' '
-        {
-          out="";
-          for(i=1;i<=NF;i++){
-            gsub(/^[[:space:]]+|[[:space:]]+$/,"",$i);
-            if($i ~ /^dc=/){
-              sub(/^dc=/,"",$i);
-              out = (out=="" ? $i : out "." $i);
-            }
-          }
-          print out
-        }'
-      )"
-    fi
+    [[ -n "$nc" ]] && dom="$(printf '%s' "$nc" | dn_to_domain)"
   fi
+
   printf '%s' "$dom"
 }
 
@@ -307,292 +651,192 @@ api_principal_add() {
   local spn="$2"
   local primary="${spn%%/*}"
   local instance="${spn#*/}"
+
   curl -k -sS -X POST "https://${API_HOST}/api/kerberos/principal/add" \
     -H "accept: application/json" \
     -H "Content-Type: application/json" \
     -H "Cookie: id=${cookie}" \
     -d "{\"primary\":\"${primary}\",\"instance\":\"${instance}\"}" \
-    -o /tmp/princ_add.body -w '%{http_code}' 2>/dev/null
+    -o /tmp/md-principal-add.body \
+    -w '%{http_code}' 2>/dev/null
 }
 
 api_ktadd_download() {
   local cookie="$1"
   local spn1="$2"
   local spn2="$3"
-  sudo rm -f /tmp/ktadd.hdr /tmp/ktadd.body /etc/krb5.keytab
   local body
+
+  rm -f /tmp/md-ktadd.hdr /tmp/md-ktadd.body /etc/krb5.keytab
+
   if [[ "${EDITION}" == "community" ]]; then
-    log "Community: registering principals via /api/kerberos/principal/add..."
-    log "  ${spn1} -> HTTP $(api_principal_add "${cookie}" "${spn1}")"
-    log "  ${spn2} -> HTTP $(api_principal_add "${cookie}" "${spn2}")"
+    log "Community: registering principals"
+    log "${spn1}: HTTP $(api_principal_add "${cookie}" "${spn1}")"
+    log "${spn2}: HTTP $(api_principal_add "${cookie}" "${spn2}")"
     body="[\"${spn1}@${REALM}\",\"${spn2}@${REALM}\"]"
   else
     body="{\"names\":[\"${spn1}\",\"${spn2}\"],\"is_rand_key\":true}"
   fi
+
   curl -k -sS --fail-with-body \
-    -D /tmp/ktadd.hdr \
-    -o /tmp/ktadd.body \
+    -D /tmp/md-ktadd.hdr \
+    -o /tmp/md-ktadd.body \
     -X POST "https://${API_HOST}/api/kerberos/ktadd" \
     -H "accept: application/octet-stream" \
     -H "Content-Type: application/json" \
     -H "Cookie: id=${cookie}" \
     -d "${body}" || true
-  log "ktadd headers (first 20 lines):"
-  sed -n '1,20p' /tmp/ktadd.hdr || true
-  log "ktadd file info:"
-  ls -lh /tmp/ktadd.body || true
-  file /tmp/ktadd.body || true
-  if file /tmp/ktadd.body 2>/dev/null | grep -Ei 'json|text|html' >/dev/null; then
-    warn "It looks like the API returned a non-binary keytab (JSON/HTML/text). First lines below:"
-    head -n 60 /tmp/ktadd.body || true
-    die "keytab was not received as a binary file. See /tmp/ktadd.hdr and /tmp/ktadd.body"
+
+  if file /tmp/md-ktadd.body 2>/dev/null | grep -Ei 'json|text|html' >/dev/null; then
+    warn "API returned non-binary keytab:"
+    head -n 60 /tmp/md-ktadd.body || true
+    die "keytab was not received as a binary file"
   fi
-  sudo install -m 600 -o root -g root /tmp/ktadd.body /etc/krb5.keytab
+
+  install -m 600 -o root -g root /tmp/md-ktadd.body /etc/krb5.keytab
+  md_track /etc/krb5.keytab
+
   log "Keytab installed: /etc/krb5.keytab"
 }
 
-md_init_state() {
-  sudo mkdir -p "$MD_STATE_DIR" "$MD_BACKUP_DIR"
-  sudo touch "$MD_MANIFEST"
-  sudo chmod 600 "$MD_MANIFEST"
-}
+api_update_many_replace_uac() {
+  local cookie="$1"
+  local object_dn="$2"
+  local uac_value="$3"
+  local payload resp http_code body
 
-md_backup_once() {
-  local path="$1"
-  local safe
-  safe="$(echo "$path" | sed 's#/#__#g')"
-  if [[ -e "$path" || -L "$path" ]]; then
-    if [[ ! -e "${MD_BACKUP_DIR}/${safe}" && ! -L "${MD_BACKUP_DIR}/${safe}" ]]; then
-      sudo cp -a "$path" "${MD_BACKUP_DIR}/${safe}"
-    fi
-  fi
-}
+  payload="$(jq -n \
+    --arg object "$object_dn" \
+    --arg uac "$uac_value" \
+    '[
+      {
+        object: $object,
+        changes: [
+          {
+            operation: 2,
+            modification: {
+              type: "userAccountControl",
+              vals: [$uac]
+            }
+          }
+        ]
+      }
+    ]'
+  )"
 
-restore_one() {
-  local path="$1"
-  local safe
-  safe="$(echo "$path" | sed 's#/#__#g')"
-  if [[ -e "${MD_BACKUP_DIR}/${safe}" || -L "${MD_BACKUP_DIR}/${safe}" ]]; then
-    sudo rm -rf "$path"
-    sudo cp -a "${MD_BACKUP_DIR}/${safe}" "$path"
-    log "Restored: $path"
-  fi
-}
+  resp="$(
+    curl -k -sS -w "\n%{http_code}" \
+      -X PATCH "https://${API_HOST}/api/entry/update_many" \
+      -H 'accept: application/json' \
+      -H 'Content-Type: application/json' \
+      -H "Cookie: id=${cookie}" \
+      -d "${payload}" 2>&1
+  )" || true
 
-md_track() {
-  local path="$1"
-  grep -Fxq "$path" "$MD_MANIFEST" 2>/dev/null || echo "$path" | sudo tee -a "$MD_MANIFEST" >/dev/null
-}
+  http_code="$(echo "$resp" | tail -n1)"
+  body="$(echo "$resp" | sed '$d')"
 
-md_save_join_env() {
-  sudo tee "$MD_JOIN_ENV" >/dev/null <<EOF
-DOMAIN='${DOMAIN}'
-REALM='${REALM}'
-HOSTNAME='${HOSTNAME}'
-API_HOST='${API_HOST}'
-LDAP_BASE_DN='${LDAP_BASE_DN}'
-LDAP_COMPUTER_OU='${LDAP_COMPUTER_OU}'
-WITH_SALT='${WITH_SALT}'
-GUID='${guid:-}'
-EOF
-  sudo chmod 600 "$MD_JOIN_ENV"
-}
-
-leave_domain() {
-  need_cmd curl
-  need_cmd jq
-  need_cmd sudo
-
-  if [[ ! -f "$MD_JOIN_ENV" ]]; then
-    log "No domain join state found, nothing to leave."
+  if [[ "$http_code" =~ ^2[0-9][0-9]$ ]]; then
     return 0
   fi
 
-  source "$MD_JOIN_ENV"
-
-  read_tty API_HOST_INPUT "Enter API address for domain leave [${API_HOST}]:"
-  API_HOST="${API_HOST_INPUT:-$API_HOST}"
-
-  read_tty LOGIN "Enter domain administrator login:"
-  read_secret_tty PASSWORD "Enter domain administrator password:"
-
-  [[ -n "${LOGIN:-}" && -n "${PASSWORD:-}" ]] || die "Domain admin credentials are required for leave."
-
-  log "Checking domain administrator credentials..."
-  access_token="$(api_auth_cookie "${LOGIN}" "${PASSWORD}")"
-  if [[ -z "${access_token:-}" ]]; then
-    warn "Invalid domain administrator credentials. Leave aborted."
-    return 1
-  fi
-  log "Domain administrator credentials are valid."
-
-  if [[ "${WITH_SALT:-0}" -eq 1 ]] && [[ -n "${GUID:-}" ]]; then
-    log "Deleting Salt minion key from master (GUID=${GUID})..."
-    resp=$(curl -k -sS -w "\n%{http_code}" -X DELETE "https://${API_HOST}/api/salt/minion/${GUID}" \
-      -H "Cookie: id=${access_token}" \
-      -H 'accept: application/json' 2>&1) || true
-    http_code=$(echo "$resp" | tail -n1)
-    body=$(echo "$resp" | sed '$d')
-    if [[ "$http_code" -eq 200 ]]; then
-      log "Salt minion key successfully deleted."
-    else
-      warn "Failed to delete Salt minion key (HTTP $http_code): $body"
-    fi
-  else
-    warn "Salt integration not enabled or GUID missing, skipping Salt minion deletion."
-  fi
-
-  if [[ -n "${HOSTNAME:-}" && -n "${LDAP_COMPUTER_OU:-}" ]]; then
-    COMPUTER_DN="cn=${HOSTNAME},${LDAP_COMPUTER_OU}"
-    log "Disabling computer object in LDAP: ${COMPUTER_DN}"
-    payload="[{\"object\":\"${COMPUTER_DN}\",\"changes\":[{\"operation\":2,\"modification\":{\"type\":\"userAccountControl\",\"vals\":[\"4098\"]}}]}]"
-    resp=$(curl -k -sS -w "\n%{http_code}" -X PATCH "https://${API_HOST}/api/entry/update_many" \
-      -H "Cookie: id=${access_token}" \
-      -H 'Content-Type: application/json' \
-      -d "$payload" 2>&1) || true
-    http_code=$(echo "$resp" | tail -n1)
-    body=$(echo "$resp" | sed '$d')
-    if [[ "$http_code" -eq 200 ]]; then
-      log "Computer object disabled successfully."
-    else
-      warn "Failed to disable computer object (HTTP $http_code): $body"
-    fi
-  else
-    warn "HOSTNAME or LDAP_COMPUTER_OU missing, skipping LDAP computer disable."
-  fi
-
-  warn "Computer object will NOT be deleted from LDAP/domain (only disabled)."
-
-  sudo systemctl stop sssd.service 2>/dev/null || true
-  sudo systemctl stop salt-minion.service 2>/dev/null || true
-  sudo systemctl disable salt-minion.service 2>/dev/null || true
-
-  sudo chattr -i /etc/resolv.conf 2>/dev/null || true
-
-  if [[ -f "$MD_MANIFEST" ]]; then
-    while IFS= read -r p; do
-      [[ -n "$p" ]] || continue
-      [[ "$p" == "/" ]] && continue
-      if [[ -L "$p" || -f "$p" ]]; then
-        sudo rm -f "$p"
-      fi
-    done < "$MD_MANIFEST"
-  fi
-
-  restore_one /etc/krb5.conf
-  restore_one /etc/sssd/sssd.conf
-  restore_one /etc/nsswitch.conf
-  restore_one /etc/hostname
-  restore_one /etc/hosts
-  sudo chattr -i /etc/resolv.conf 2>/dev/null || true
-  restore_one /etc/resolv.conf
-  restore_one /etc/pam.d/system-auth
-  restore_one /etc/pam.d/su
-  restore_one /etc/pam.d/sshd
-  restore_one /etc/pam.d/gdm-password
-  restore_one /etc/pam.d/common-auth
-  restore_one /etc/pam.d/common-account
-  restore_one /etc/pam.d/common-session
-  restore_one /etc/pam.d/common-password
-  restore_one /etc/salt/minion
-  restore_one /etc/salt/minion_id
-  restore_one /etc/salt/pki/minion
-  restore_one /etc/systemd/resolved.conf.d/MultiDirectory.conf
-  sudo rm -f /etc/systemd/system/sssd.service.d/md-wait-network.conf 2>/dev/null || true
-  sudo systemctl unmask sssd-nss.socket sssd-pam.socket sssd-ssh.socket sssd-sudo.socket sssd-autofs.socket sssd-pac.socket >/dev/null 2>&1 || true
-  sudo systemctl daemon-reload 2>/dev/null || true
-
-  sudo rm -f /etc/krb5.keytab
-  sudo rm -rf /var/lib/sss/db/* /var/lib/sss/mc/* 2>/dev/null || true
-  sudo rm -rf /etc/salt/pki/minion/* 2>/dev/null || true
-  sudo rm -f /etc/sudoers.d/multidirectory-domain-admins
-  sudo rm -f /etc/systemd/resolved.conf.d/MultiDirectory.conf
-
-  sudo rm -rf "$MD_ETC_DIR"
-
-  sudo systemctl daemon-reload 2>/dev/null || true
-  sudo systemctl restart systemd-resolved.service 2>/dev/null || true
-  sudo systemctl restart ssh.service 2>/dev/null || true
-  sudo systemctl restart sshd.service 2>/dev/null || true
-
-  log "MULTIDIRECTORY leave completed."
-  warn "System reboot is recommended."
+  warn "Failed to update userAccountControl for ${object_dn}. HTTP ${http_code}: ${body}"
+  return 1
 }
 
-join_domain() {
-  need_cmd curl
-  need_cmd jq
-  need_cmd getent
-  need_cmd file
-  need_cmd sudo
-  need_cmd sed
-  need_cmd awk
-  need_cmd tr
-  need_cmd head
-  need_cmd hostname
+enable_computer_account() {
+  local object_dn="$1"
 
-  md_init_state
+  log "Enabling computer account: ${object_dn}"
+  api_update_many_replace_uac "${access_token}" "${object_dn}" "4096" \
+    || die "Failed to enable computer account: ${object_dn}"
 
-  prompt_edition
-  prompt_configure_dns
+  log "Computer account enabled: ${object_dn}"
+}
 
-  read_tty API_HOST "Enter API address (FQDN), for example webadmin.domain.ru:"
-  read_tty LOGIN    "Enter administrator login (for example, admin):"
-  read_secret_tty PASSWORD "Enter administrator password:"
+disable_computer_account_on_leave() {
+  local object_dn
 
-  echo
-  warn "Specify the service user for SSSD."
-  read_tty SSSD_LOGIN           "Enter LDAP service user login for SSSD (for example, sssd_bind):"
-  read_secret_tty SSSD_PASSWORD "Enter LDAP service user password for SSSD:"
+  [[ -n "${HOSTNAME:-}" ]] || {
+    warn "HOSTNAME is unknown, computer account disable skipped"
+    return 0
+  }
 
-  [[ -n "${API_HOST:-}" && -n "${LOGIN:-}" && -n "${PASSWORD:-}" && -n "${SSSD_LOGIN:-}" && -n "${SSSD_PASSWORD:-}" ]] \
-    || die "Error: all fields must be filled."
+  [[ -n "${LDAP_COMPUTER_OU:-}" ]] || {
+    warn "LDAP_COMPUTER_OU is unknown, computer account disable skipped"
+    return 0
+  }
 
-  log "Checking DNS resolution: API_HOST=${API_HOST}"
+  [[ -n "${access_token:-}" ]] || {
+    warn "API access token is missing, computer account disable skipped"
+    return 0
+  }
+
+  object_dn="cn=${HOSTNAME},${LDAP_COMPUTER_OU}"
+
+  warn "Disabling computer account: ${object_dn}"
+  if api_update_many_replace_uac "${access_token}" "${object_dn}" "4098"; then
+    log "Computer account disabled: ${object_dn}"
+  else
+    warn "Computer account was not disabled on server side; local leave will continue"
+  fi
+}
+
+validate_api_host_resolution() {
+  log "Checking DNS resolution: ${API_HOST}"
   getent hosts "${API_HOST}" >/dev/null || die "DNS resolution failed: ${API_HOST}"
+  log "DNS resolution OK: ${API_HOST}"
+}
 
-  log "Getting cookie id (admin) via API /api/auth/..."
+validate_salt_host_resolution() {
+  [[ "${WITH_SALT:-0}" -eq 1 ]] || {
+    log "Community edition: salt DNS check skipped"
+    return 0
+  }
+
+  [[ -n "${SALT_MASTER:-}" ]] || {
+    log "Salt master is not known yet, salt DNS check skipped"
+    return 0
+  }
+
+  log "Checking DNS resolution: ${SALT_MASTER}"
+  getent hosts "${SALT_MASTER}" >/dev/null || die "DNS resolution failed: ${SALT_MASTER}"
+  log "DNS resolution OK: ${SALT_MASTER}"
+}
+
+validate_initial_hosts_resolution() {
+  validate_api_host_resolution
+
+  if [[ "${WITH_SALT:-0}" -eq 1 ]]; then
+    SALT_MASTER="salt.${API_HOST}"
+    validate_salt_host_resolution
+  fi
+}
+
+validate_admin_credentials() {
+  log "Authenticating domain administrator via API"
+
   access_token="$(api_auth_cookie "${LOGIN}" "${PASSWORD}")"
-  [[ -n "${access_token:-}" ]] || die "Failed to get cookie id"
-  log "cookie id (admin) received"
+  [[ -n "${access_token}" ]] || die "Failed to authenticate domain administrator"
 
-  log "Detecting DOMAIN via API RootDSE..."
+  log "Domain administrator credentials are valid"
+}
+
+discover_and_validate_domain() {
+  log "Detecting domain via RootDSE"
+
   DOMAIN="$(api_rootdse_domain "${access_token}")"
-  [[ -n "${DOMAIN:-}" ]] || die "Failed to detect DOMAIN via API RootDSE"
-  log "DOMAIN=${DOMAIN}"
+  [[ -n "${DOMAIN}" ]] || die "Failed to detect DOMAIN via RootDSE"
+  DOMAIN="$(echo "$DOMAIN" | tr '[:upper:]' '[:lower:]')"
 
-  log "Getting defaultNamingContext (base DN) via API (RootDSE)..."
+  log "Detected domain: ${DOMAIN}"
+
+  log "Getting defaultNamingContext"
+
   LDAP_BASE_DN="$(api_rootdse_default_nc "${access_token}")"
-  [[ -n "${LDAP_BASE_DN:-}" ]] || die "Failed to get defaultNamingContext via API"
-  log "LDAP_BASE_DN=${LDAP_BASE_DN}"
+  [[ -n "${LDAP_BASE_DN}" ]] || die "Failed to get defaultNamingContext"
 
-  if [[ "${API_HOST}" != "${DOMAIN}" ]]; then
-    warn "API_HOST (${API_HOST}) differs from DOMAIN (${DOMAIN}) — this is normal."
-  fi
-
-  prompt_change_hostname
-
-  log "Getting administrator DN via API /api/entry/search..."
-  USER_FILTER="(sAMAccountName=${LOGIN})"
-  binddn_resp="$(api_search "${access_token}" "${LDAP_BASE_DN}" 2 "${USER_FILTER}" "[\"distinguishedName\"]")"
-  BIND_DN="$(printf '%s' "$binddn_resp" | jq -r '.search_result[0].object_name // empty')"
-  if [[ -z "${BIND_DN:-}" ]]; then
-    warn "Administrator DN was not received via API. Manual DN input is required."
-    read_tty BIND_DN "Enter administrator DN (example: cn=admin,cn=users,dc=domain,dc=ru):"
-  fi
-  [[ -n "${BIND_DN:-}" ]] || die "Administrator DN is empty"
-  log "Admin DN=${BIND_DN}"
-
-  log "Getting SSSD service user DN via API /api/entry/search..."
-  SSSD_FILTER="(sAMAccountName=${SSSD_LOGIN})"
-  sssd_dn_resp="$(api_search "${access_token}" "${LDAP_BASE_DN}" 2 "${SSSD_FILTER}" "[\"distinguishedName\"]")"
-  SSSD_BIND_DN="$(printf '%s' "$sssd_dn_resp" | jq -r '.search_result[0].object_name // empty')"
-  if [[ -z "${SSSD_BIND_DN:-}" ]]; then
-    warn "SSSD service user DN was not received via API. Manual DN input is required."
-    read_tty SSSD_BIND_DN "Enter SSSD service user DN (example: cn=sssd_bind,cn=users,dc=domain,dc=ru):"
-  fi
-  [[ -n "${SSSD_BIND_DN:-}" ]] || die "SSSD_BIND_DN is empty"
-  log "SSSD bind DN=${SSSD_BIND_DN}"
+  log "Detected defaultNamingContext: ${LDAP_BASE_DN}"
 
   REALM="$(echo "$DOMAIN" | tr '[:lower:]' '[:upper:]')"
   KDC="$DOMAIN"
@@ -600,307 +844,801 @@ join_domain() {
   URI="ldap://${DOMAIN}"
   LDAP_SEARCH_BASE="$LDAP_BASE_DN"
   LDAP_USER_BASE="$LDAP_BASE_DN"
+  LDAP_GROUP_BASE="$LDAP_BASE_DN"
   LDAP_COMPUTER_OU="cn=computers,${LDAP_BASE_DN}"
-  SUDO_GROUP='"%domain admins" ALL=(ALL) ALL'
 
-  if [[ "${WITH_SALT}" -eq 1 ]]; then
+  if [[ "${WITH_SALT:-0}" -eq 1 ]]; then
     SALT_MASTER="salt.${DOMAIN}"
-    log "Checking DNS resolution: SALT_MASTER=${SALT_MASTER}"
-    if ! getent hosts "${SALT_MASTER}" >/dev/null; then
-      warn "DNS resolution for SALT_MASTER=${SALT_MASTER} failed. Please ensure DNS is correct."
-    fi
+  fi
+}
+
+discover_admin_dn() {
+  log "Getting administrator DN"
+
+  USER_FILTER="(sAMAccountName=${LOGIN})"
+  binddn_resp="$(api_search "${access_token}" "${LDAP_BASE_DN}" 2 "${USER_FILTER}" "[\"distinguishedName\"]")"
+  BIND_DN="$(printf '%s' "$binddn_resp" | jq -r '.search_result[0].object_name // empty')"
+
+  if [[ -z "${BIND_DN}" ]]; then
+    warn "Administrator DN was not received via API"
+    read_tty BIND_DN "Enter administrator DN:"
   fi
 
-  log "REALM=${REALM} HOSTNAME=${HOSTNAME} API_HOST=${API_HOST} DOMAIN=${DOMAIN}"
+  [[ -n "${BIND_DN}" ]] || die "Administrator DN is empty"
 
-  sudo cp /etc/nsswitch.conf /etc/nsswitch.conf.bak 2>/dev/null || true
+  log "Administrator DN: ${BIND_DN}"
+}
 
-  log "Taking configs LOCALLY from: ${FILES_DIR}"
+discover_sssd_bind_dn() {
+  log "Getting SSSD service user DN"
 
-  KRB5_CONF_LOCAL="${FILES_DIR}/krb5.conf"
-  SSSD_CONF_LOCAL="${FILES_DIR}/sssd.conf"
-  NSSWITCH_CONF_LOCAL="${FILES_DIR}/nsswitch.conf"
-  SSH_MD_CONF_LOCAL="${FILES_DIR}/ssh_md.conf"
+  SSSD_FILTER="(sAMAccountName=${SSSD_LOGIN})"
+  sssd_dn_resp="$(api_search "${access_token}" "${LDAP_BASE_DN}" 2 "${SSSD_FILTER}" "[\"distinguishedName\"]")"
+  SSSD_BIND_DN="$(printf '%s' "$sssd_dn_resp" | jq -r '.search_result[0].object_name // empty')"
 
-  need_local_file "$KRB5_CONF_LOCAL"
-  need_local_file "$SSSD_CONF_LOCAL"
-  need_local_file "$NSSWITCH_CONF_LOCAL"
-  need_local_file "$SSH_MD_CONF_LOCAL"
+  if [[ -z "${SSSD_BIND_DN}" ]]; then
+    warn "SSSD service user DN was not received via API"
+    read_tty SSSD_BIND_DN "Enter SSSD service user DN:"
+  fi
 
-  log "Installing /etc/krb5.conf from local file..."
-  install_local_file "$KRB5_CONF_LOCAL" /etc/krb5.conf 0644
-  apply_placeholders /etc/krb5.conf
+  [[ -n "${SSSD_BIND_DN}" ]] || die "SSSD_BIND_DN is empty"
 
-  log "Installing /etc/sssd/sssd.conf from local file..."
-  sudo mkdir -p /etc/sssd
-  install_local_file "$SSSD_CONF_LOCAL" /etc/sssd/sssd.conf 0600
-  apply_placeholders /etc/sssd/sssd.conf
-  sudo chown root:root /etc/sssd/sssd.conf
+  log "SSSD service user DN: ${SSSD_BIND_DN}"
+}
 
-  log "Installing /etc/nsswitch.conf from local file..."
-  install_local_file "$NSSWITCH_CONF_LOCAL" /etc/nsswitch.conf 0644
+validate_sssd_credentials() {
+  local sssd_token
 
-  log "Installing /etc/ssh/sshd_config.d/ssh_md.conf from local file..."
-  sudo mkdir -p /etc/ssh/sshd_config.d
-  install_local_file "$SSH_MD_CONF_LOCAL" /etc/ssh/sshd_config.d/ssh_md.conf 0644
+  discover_sssd_bind_dn
 
-  log "Encrypting SSSD password (sss_obfuscate)..."
-  warn "Enter the service account password for encryption"
-  sudo sss_obfuscate -d "${DOMAIN}"
+  log "Validating SSSD service account via API auth"
 
-  if is_redos; then
-    if command -v dnf >/dev/null 2>&1; then
-      sudo dnf install -y authselect oddjob 2>/dev/null
-    elif command -v yum >/dev/null 2>&1; then
-      sudo yum install -y authselect oddjob 2>/dev/null
+  sssd_token="$(api_auth_cookie "${SSSD_LOGIN}" "${SSSD_PASSWORD}")"
+  [[ -n "${sssd_token}" ]] || die "SSSD service account API authentication failed"
+
+  log "SSSD service account credentials are valid"
+}
+
+validate_sudoers() {
+  if have_cmd visudo; then
+    visudo -cf /etc/sudoers || die "sudoers validation failed"
+  else
+    warn "visudo not found, sudoers validation skipped"
+  fi
+}
+
+validate_sssd_config() {
+  if have_cmd sssctl; then
+    sssctl config-check || die "SSSD configuration is invalid"
+  else
+    warn "sssctl not found, SSSD config validation skipped"
+  fi
+}
+
+validate_no_plaintext_sssd_password() {
+  [[ -n "${SSSD_PASSWORD:-}" ]] || return 0
+
+  if grep -F -- "${SSSD_PASSWORD}" /etc/sssd/sssd.conf 2>/dev/null; then
+    die "Plaintext SSSD password is still present in /etc/sssd/sssd.conf"
+  fi
+}
+
+build_sssd_conf() {
+  need_dir "$SSSD_CONF_D_SRC"
+  validate_non_empty_conf_dir "$SSSD_CONF_D_SRC"
+
+  mkdir -p /etc/sssd
+  chmod 700 /etc/sssd
+
+  md_backup_once /etc/sssd/sssd.conf
+
+  if [[ -d /etc/sssd/conf.d ]]; then
+    md_backup_once /etc/sssd/conf.d
+    rm -rf /etc/sssd/conf.d
+    log "Removed old SSSD snippets from /etc/sssd/conf.d"
+  fi
+
+  mkdir -p /etc/sssd/conf.d
+  chown root:root /etc/sssd/conf.d
+  chmod 700 /etc/sssd/conf.d
+
+  : > /etc/sssd/sssd.conf
+
+  shopt -s nullglob
+  local files=("${SSSD_CONF_D_SRC}"/*.conf)
+  shopt -u nullglob
+
+  local src
+  for src in "${files[@]}"; do
+    echo "# Source template: $(basename "$src")" >> /etc/sssd/sssd.conf
+    cat "$src" >> /etc/sssd/sssd.conf
+    echo >> /etc/sssd/sssd.conf
+  done
+
+  apply_placeholders_to_file /etc/sssd/sssd.conf
+
+  chown root:root /etc/sssd/sssd.conf
+  chmod 600 /etc/sssd/sssd.conf
+  chmod 700 /etc/sssd
+
+  md_track /etc/sssd/sssd.conf
+
+  log "Built single SSSD config: /etc/sssd/sssd.conf"
+  log "SSSD conf.d kept empty: /etc/sssd/conf.d"
+}
+
+obfuscate_sssd_password() {
+  log "Encrypting SSSD password via sss_obfuscate"
+  log "SSSD config file: /etc/sssd/sssd.conf"
+  warn "Enter the SSSD service account password again when sss_obfuscate asks for it"
+
+  sss_obfuscate -d "${DOMAIN}" -f /etc/sssd/sssd.conf || die "sss_obfuscate failed"
+
+  validate_no_plaintext_sssd_password
+  validate_sssd_config
+}
+
+install_pam_config() {
+  if is_redos_or_rhel_like; then
+    if have_cmd authselect; then
+      authselect select sssd with-mkhomedir --force || true
     fi
-    sudo authselect select sssd with-mkhomedir --force 2>/dev/null
-    sudo systemctl enable --now oddjobd.service 2>/dev/null
-  elif is_altlinux; then
-    sudo chmod 4711 /usr/bin/sudo >/dev/null 2>&1
-    sudo tee /etc/pam.d/system-auth >/dev/null <<'EOF'
-#%PAM-1.0
-auth        sufficient    pam_sss.so
-auth        required      pam_permit.so
 
-account     sufficient    pam_sss.so
-account     required      pam_permit.so
+    systemctl enable --now oddjobd.service 2>/dev/null || true
+    return 0
+  fi
 
-password    sufficient    pam_sss.so
-password    required      pam_permit.so
+  if is_altlinux; then
+    need_dir "$PAM_D_SRC"
 
-session     sufficient    pam_sss.so
-session     required      pam_permit.so
-session     required      pam_mkhomedir.so skel=/etc/skel umask=0022
-EOF
-    sudo tee /etc/pam.d/su >/dev/null <<'EOF'
-#%PAM-1.0
-auth            sufficient      pam_rootok.so
-auth            include         system-auth
-account         include         system-auth
-password        required        pam_deny.so
-session         required        pam_mkhomedir.so skel=/etc/skel umask=0022
-session         include         system-auth
-session         optional        pam_xauth.so
-EOF
-    sudo tee /etc/pam.d/sshd >/dev/null <<'EOF'
-#%PAM-1.0
-auth        include      system-auth
-account     required     pam_nologin.so
-account     include      system-auth
-password    include      system-auth
-session     required     pam_mkhomedir.so skel=/etc/skel umask=0022
-session     optional     pam_keyinit.so force revoke
-session     include      system-auth
-session     required     pam_loginuid.so
-EOF
-    if [ -f /etc/pam.d/gdm-password ]; then
-      sudo tee /etc/pam.d/gdm-password >/dev/null <<'EOF'
-#%PAM-1.0
-auth            required        pam_shells.so
-auth            required        pam_succeed_if.so quiet uid ne 0
-auth            sufficient      pam_succeed_if.so user ingroup nopasswdlogin
-auth            substack        common-login
-auth            optional        pam_gnome_keyring.so
-account         include         common-login
-password        include         common-login
-password        optional        pam_gnome_keyring.so use_authtok
-session         required        pam_mkhomedir.so skel=/etc/skel umask=0022
-session         substack        common-login
-session         optional        pam_console.so
-session         required        pam_namespace.so
-session         optional        pam_gnome_keyring.so auto_start
-EOF
+    [[ -f "${PAM_D_SRC}/alt-system-auth" ]] && install_local_file "${PAM_D_SRC}/alt-system-auth" /etc/pam.d/system-auth 0644
+    [[ -f "${PAM_D_SRC}/alt-su" ]] && install_local_file "${PAM_D_SRC}/alt-su" /etc/pam.d/su 0644
+    [[ -f "${PAM_D_SRC}/alt-sshd" ]] && install_local_file "${PAM_D_SRC}/alt-sshd" /etc/pam.d/sshd 0644
+    [[ -f "${PAM_D_SRC}/alt-gdm-password" && -f /etc/pam.d/gdm-password ]] && install_local_file "${PAM_D_SRC}/alt-gdm-password" /etc/pam.d/gdm-password 0644
+    [[ -f "${PAM_D_SRC}/alt-login" && -f /etc/pam.d/login ]] && install_local_file "${PAM_D_SRC}/alt-login" /etc/pam.d/login 0644
+    [[ -f "${PAM_D_SRC}/alt-common-login" && -f /etc/pam.d/common-login ]] && install_local_file "${PAM_D_SRC}/alt-common-login" /etc/pam.d/common-login 0644
+
+    chmod 4711 /usr/bin/sudo 2>/dev/null || true
+    return 0
+  fi
+
+  if is_deb_based; then
+    if [[ -d "$PAM_D_SRC" ]]; then
+      [[ -f "${PAM_D_SRC}/common-auth" ]] && install_local_file "${PAM_D_SRC}/common-auth" /etc/pam.d/common-auth 0644
+      [[ -f "${PAM_D_SRC}/common-account" ]] && install_local_file "${PAM_D_SRC}/common-account" /etc/pam.d/common-account 0644
+      [[ -f "${PAM_D_SRC}/common-session" ]] && install_local_file "${PAM_D_SRC}/common-session" /etc/pam.d/common-session 0644
+      [[ -f "${PAM_D_SRC}/common-password" ]] && install_local_file "${PAM_D_SRC}/common-password" /etc/pam.d/common-password 0644
+    else
+      pam-auth-update --enable mkhomedir || true
+    fi
+  fi
+}
+
+install_static_configs() {
+  log "Installing config files from ${FILES_DIR}"
+
+  install_local_file "$KRB5_SRC" /etc/krb5.conf 0644
+  apply_placeholders_to_file /etc/krb5.conf
+
+  install_local_file "$NSSWITCH_SRC" /etc/nsswitch.conf 0644
+
+  mkdir -p /etc/ssh/sshd_config.d
+  install_local_file "$SSH_MD_SRC" /etc/ssh/sshd_config.d/ssh_md.conf 0644
+
+  build_sssd_conf
+  install_pam_config
+
+  if [[ -d "$SUDOERS_D_SRC" ]]; then
+    mkdir -p /etc/sudoers.d
+    copy_dir_files "$SUDOERS_D_SRC" /etc/sudoers.d 0440
+    apply_placeholders_in_dir /etc/sudoers.d
+    find /etc/sudoers.d -type f -exec chmod 0440 {} \; 2>/dev/null || true
+    validate_sudoers
+  fi
+
+  if [[ -d "$RESOLVED_CONF_D_SRC" ]]; then
+    mkdir -p /etc/systemd/resolved.conf.d
+    copy_dir_files "$RESOLVED_CONF_D_SRC" /etc/systemd/resolved.conf.d 0644
+    apply_placeholders_in_dir /etc/systemd/resolved.conf.d
+  fi
+
+  if [[ "${WITH_SALT:-0}" -eq 1 ]]; then
+    if [[ -d "$SALT_SRC" ]]; then
+      mkdir -p /etc/salt
+      copy_dir_files "$SALT_SRC" /etc/salt 0644
+      apply_placeholders_in_dir /etc/salt
     fi
   else
-    log "Configuring PAM mkhomedir for Debian/Ubuntu"
-    if [ -f /etc/pam.d/common-session ]; then
-      sudo pam-auth-update --enable mkhomedir >/dev/null || true
-      sudo sed -i 's/session optional pam_mkhomedir.so/session required pam_mkhomedir.so/' /etc/pam.d/common-session || true
-    elif [ -f /etc/pam.d/system-auth ]; then
-      if ! grep -q "pam_mkhomedir.so" /etc/pam.d/system-auth; then
-        sudo sed -i '/session.*required.*pam_unix.so/a session     required      pam_mkhomedir.so skel=/etc/skel umask=0077' /etc/pam.d/system-auth
-      fi
-    fi
+    log "Community edition: Salt config files are skipped"
   fi
+}
 
-  log "Configuring sudoers"
-  if ! grep -Fxq "$SUDO_GROUP" /etc/sudoers; then
-    echo "$SUDO_GROUP" | sudo tee -a /etc/sudoers >/dev/null
-  else
-    log "sudo permissions for domain admins are already configured."
-  fi
+create_computer_object_if_needed() {
+  local computer_dn exists_dn add_resp add_http add_body
 
-  log "Checking whether computer cn=${HOSTNAME} exists..."
-  exists_cn="$(
-    api_search "${access_token}" "${LDAP_COMPUTER_OU}" 2 "(&(objectClass=computer)(cn=${HOSTNAME}))" "[\"cn\"]" \
-    | jq -r '.search_result[0].object_name // empty'
+  computer_dn="cn=${HOSTNAME},${LDAP_COMPUTER_OU}"
+
+  log "Checking whether computer cn=${HOSTNAME} exists"
+
+  exists_dn="$(
+    api_search "${access_token}" "${LDAP_COMPUTER_OU}" 2 "(&(objectClass=computer)(cn=${HOSTNAME}))" "[\"cn\",\"userAccountControl\"]" \
+      | jq -r '.search_result[0].object_name // empty'
   )"
-  if [[ -n "${exists_cn:-}" ]]; then
-    warn "Computer already exists in LDAP: ${exists_cn}. Adding will be skipped."
-    SKIP_ADD_COMPUTER=1
-  else
-    SKIP_ADD_COMPUTER=0
+
+  if [[ -n "${exists_dn}" ]]; then
+    warn "Computer already exists in LDAP: ${exists_dn}. Creating will be skipped."
+    enable_computer_account "${exists_dn}"
+    return 0
   fi
 
-  if [[ "${SKIP_ADD_COMPUTER}" -eq 0 ]]; then
-    log "Creating computer object..."
-    curl -k -sS -X POST "https://${API_HOST}/api/entry/add" \
+  log "Creating computer object: ${computer_dn}"
+
+  add_resp="$(
+    curl -k -sS -w "\n%{http_code}" \
+      -X POST "https://${API_HOST}/api/entry/add" \
       -H 'accept: application/json' \
       -H 'Content-Type: application/json' \
       -H "Cookie: id=${access_token}" \
       -d "{
-        \"entry\": \"cn=${HOSTNAME},${LDAP_COMPUTER_OU}\",
+        \"entry\": \"${computer_dn}\",
         \"attributes\": [
-          { \"type\": \"objectClass\", \"vals\": [\"top\",\"computer\"] },
+          { \"type\": \"objectClass\", \"vals\": [\"top\", \"computer\"] },
           { \"type\": \"description\", \"vals\": [\"\"] }
         ]
-      }" >/dev/null || true
-  else
-    log "Skipping /api/entry/add (computer already exists)."
+      }" 2>&1
+  )" || true
+
+  add_http="$(echo "$add_resp" | tail -n1)"
+  add_body="$(echo "$add_resp" | sed '$d')"
+
+  if [[ ! "$add_http" =~ ^2[0-9][0-9]$ ]]; then
+    die "Failed to create computer object ${computer_dn}. HTTP ${add_http}: ${add_body}"
   fi
 
-  log "Getting keytab via API_HOST=${API_HOST}..."
-  api_ktadd_download "${access_token}" "host/${HOSTNAME}" "host/${HOSTNAME}.${DOMAIN}"
+  log "Computer object created: ${computer_dn}"
+  enable_computer_account "${computer_dn}"
+}
 
-  log "Checking keytab:"
-  sudo klist -k /etc/krb5.keytab || true
+validate_keytab() {
+  log "Checking keytab"
 
-  if [[ "${WITH_SALT}" -eq 1 ]]; then
-    log "Enterprise: configuring Salt..."
+  klist -k /etc/krb5.keytab || die "Invalid keytab"
 
-    if systemctl is-active --quiet salt-minion.service 2>/dev/null; then
-      log "Stopping salt-minion service before reconfiguration..."
-      sudo systemctl stop salt-minion.service
+  if kinit -k "host/${FQDN}@${REALM}"; then
+    log "Kerberos authentication succeeded: host/${FQDN}@${REALM}"
+    kdestroy || true
+    return 0
+  fi
+
+  if kinit -k "host/${HOSTNAME}@${REALM}"; then
+    log "Kerberos authentication succeeded: host/${HOSTNAME}@${REALM}"
+    kdestroy || true
+    return 0
+  fi
+
+  die "Kerberos keytab authentication failed"
+}
+
+api_delete_salt_minion_key() {
+  local cookie="$1"
+  local minion_id="$2"
+
+  [[ -n "$minion_id" ]] || return 0
+
+  curl -k -sS -X DELETE "https://${API_HOST}/api/salt/minion/${minion_id}" \
+    -H "Cookie: id=${cookie}" \
+    -H 'accept: application/json' \
+    -o /dev/null || true
+}
+
+prepare_salt_minion_identity() {
+  local guid="$1"
+  local gpo_token="$2"
+
+  require_salt_minion_ready
+
+  log "Preparing Salt minion identity: ${guid}"
+
+  systemctl stop salt-minion.service 2>/dev/null || true
+
+  rm -rf /etc/salt/pki/minion 2>/dev/null || true
+  rm -f /etc/salt/minion_id 2>/dev/null || true
+
+  mkdir -p /etc/salt
+  touch /etc/salt/minion
+  md_backup_once /etc/salt/minion
+
+  sed -i '/^\s*id\s*:/d' /etc/salt/minion || true
+  sed -i '/^\s*master\s*:/d' /etc/salt/minion || true
+  sed -i '/^\s*master_finger\s*:/d' /etc/salt/minion || true
+
+  if [[ -d /etc/salt/minion.d ]]; then
+    find /etc/salt/minion.d -type f -name '*.conf' -exec sed -i '/^\s*id\s*:/d' {} \; 2>/dev/null || true
+  fi
+
+  {
+    echo "id: ${guid}"
+    echo "master: ${SALT_MASTER}"
+    echo "master_finger: ${gpo_token}"
+  } >> /etc/salt/minion
+
+  echo "$guid" > /etc/salt/minion_id
+  chmod 0644 /etc/salt/minion_id
+
+  md_track /etc/salt/minion
+  md_track /etc/salt/minion_id
+
+  systemctl daemon-reload || true
+  systemctl enable salt-minion.service >/dev/null 2>&1 || true
+
+  log "Salt minion identity prepared"
+}
+
+restart_salt_minion_and_wait() {
+  local wait_seconds="${1:-8}"
+
+  restart_salt_minion_or_die
+
+  log "Waiting ${wait_seconds}s for Salt minion key publication"
+  sleep "$wait_seconds"
+}
+
+accept_salt_minion_key() {
+  local guid="$1"
+  local resp http_code body
+  local retries=12
+  local delay=5
+  local attempt=1
+
+  while [[ $attempt -le $retries ]]; do
+    log "Attempt ${attempt}/${retries}: accepting Salt minion key"
+
+    resp="$(
+      curl -k -sS -w "\n%{http_code}" -X POST "https://${API_HOST}/api/salt/minion" \
+        -H 'accept: application/json' \
+        -H "Cookie: id=${access_token}" \
+        -H 'Content-Type: application/json' \
+        -d "{\"id\": \"${guid}\"}" 2>&1
+    )" || true
+
+    http_code="$(echo "$resp" | tail -n1)"
+    body="$(echo "$resp" | sed '$d')"
+
+    if [[ "$http_code" -eq 200 ]]; then
+      log "Salt minion key accepted"
+      restart_salt_minion_or_die
+      return 0
     fi
 
-    if [[ -d /etc/salt/pki/minion ]]; then
-      log "Removing existing Salt minion keys to force regeneration..."
-      sudo rm -rf /etc/salt/pki/minion
+    if [[ "$http_code" -eq 400 ]] && echo "$body" | grep -qi "Minion Already Exists"; then
+      warn "Minion already exists on master. Deleting old key and publishing a fresh key."
+
+      systemctl stop salt-minion.service 2>/dev/null || true
+      rm -rf /etc/salt/pki/minion 2>/dev/null || true
+      api_delete_salt_minion_key "${access_token}" "${guid}"
+
+      restart_salt_minion_and_wait 8
+      ((attempt++))
+      continue
     fi
 
-    log "Getting master_finger for Salt (via API_HOST)..."
-    gpo_token="$(curl -k -sS -X GET "https://${API_HOST}/api/salt/master/key" \
+    if [[ "$http_code" -eq 400 ]] && echo "$body" | grep -qi "Unable to accept minion"; then
+      warn "Salt key is not ready on master yet. Waiting before retry."
+      sleep "$delay"
+
+      if (( attempt % 3 == 0 )); then
+        warn "Restarting salt-minion to force key publication"
+        restart_salt_minion_and_wait 8
+      fi
+
+      ((attempt++))
+      continue
+    fi
+
+    warn "Salt API returned HTTP ${http_code}: ${body}"
+    sleep "$delay"
+    ((attempt++))
+  done
+
+  print_salt_diagnostics
+  die "Failed to accept Salt minion key"
+}
+
+configure_salt() {
+  [[ "${WITH_SALT:-0}" -eq 1 ]] || {
+    log "Community edition: Salt steps skipped"
+    return 0
+  }
+
+  local gpo_token guid
+
+  SALT_MASTER="salt.${DOMAIN}"
+
+  require_salt_minion_ready
+
+  log "Checking DNS resolution: SALT_MASTER=${SALT_MASTER}"
+  getent hosts "${SALT_MASTER}" >/dev/null || die "DNS resolution failed for ${SALT_MASTER}"
+
+  log "Getting Salt master_finger"
+  gpo_token="$(
+    curl -k -sS -X GET "https://${API_HOST}/api/salt/master/key" \
       -H "Cookie: id=${access_token}" \
-      -H 'accept: application/json' | tr -d '\r\n')"
-    [[ -n "${gpo_token:-}" ]] || die "Failed to get master_finger"
+      -H 'accept: application/json' \
+      | tr -d '\r\n"'
+  )"
 
-    log "Configuring /etc/salt/minion: master=${SALT_MASTER}"
-    sudo mkdir -p /etc/salt
-    sudo sed -i '/^\s*master:/d' /etc/salt/minion 2>/dev/null || true
-    sudo sed -i '/^\s*master_finger:/d' /etc/salt/minion 2>/dev/null || true
-    {
-      echo "master: ${SALT_MASTER}"
-      echo "master_finger: ${gpo_token}"
-    } | sudo tee -a /etc/salt/minion >/dev/null
+  [[ -n "${gpo_token}" ]] || die "Failed to get Salt master_finger"
 
-    log "Getting computer GUID..."
-    guid="$(
-      api_search "${access_token}" "${LDAP_COMPUTER_OU}" 2 "(&(objectClass=*)(cn=${HOSTNAME}))" "[\"objectGUID\"]" \
+  log "Getting computer objectGUID"
+  guid="$(
+    api_search "${access_token}" "${LDAP_COMPUTER_OU}" 2 "(&(objectClass=*)(cn=${HOSTNAME}))" "[\"objectGUID\"]" \
       | jq -r '.search_result[0].partial_attributes[]? | select(.type=="objectGUID") | .vals[0] // empty'
-    )"
-    [[ -n "${guid:-}" ]] || die "Failed to get objectGUID"
-    log "GUID=${guid}"
+  )"
 
-    if [ "$(cat /etc/salt/minion_id 2>/dev/null || true)" != "$guid" ]; then
-      printf '%s\n' "$guid" | sudo tee /etc/salt/minion_id >/dev/null
-    fi
+  [[ -n "${guid}" ]] || die "Failed to get objectGUID"
 
-    log "Starting salt-minion service..."
-    sudo systemctl enable salt-minion.service >/dev/null 2>&1 || true
-    sudo systemctl restart salt-minion.service
+  prepare_salt_minion_identity "$guid" "$gpo_token"
 
-    accept_salt_key() {
-      local retries=10
-      local delay=3
-      local attempt=1
-      local resp
-      local http_code
-      local body
+  warn "Deleting possible old Salt key for this minion id before fresh registration"
+  api_delete_salt_minion_key "${access_token}" "${guid}"
 
-      while [[ $attempt -le $retries ]]; do
-        log "Attempt $attempt/$retries: calling /api/salt/minion for id=${guid}"
-        resp=$(curl -k -sS -w "\n%{http_code}" -X POST "https://${API_HOST}/api/salt/minion" \
-          -H 'accept: application/json' \
-          -H "Cookie: id=${access_token}" \
-          -H 'Content-Type: application/json' \
-          -d "{\"id\": \"${guid}\"}" 2>&1) || true
-        http_code=$(echo "$resp" | tail -n1)
-        body=$(echo "$resp" | sed '$d')
-        log "HTTP response code: $http_code"
-        if [[ "$http_code" -eq 200 ]]; then
-          log "Salt minion key successfully accepted by API."
-          return 0
-        elif [[ "$http_code" -eq 400 ]] && echo "$body" | grep -q "Minion Already Exists"; then
-          warn "Minion ${guid} already exists on master. Deleting it first..."
-          curl -k -sS -X DELETE "https://${API_HOST}/api/salt/minion/${guid}" \
-            -H "Cookie: id=${access_token}" \
-            -H 'accept: application/json' \
-            -o /dev/null || warn "DELETE failed, continuing anyway"
-          sleep 2
-          log "Restarting salt-minion to generate new keys..."
-          sudo systemctl restart salt-minion.service
-          sleep 5
-          continue
-        else
-          warn "API returned $http_code: $body"
-          sleep $delay
-          ((attempt++))
-        fi
-      done
-      die "Failed to accept Salt minion key after $retries attempts."
-    }
+  restart_salt_minion_and_wait 8
+  accept_salt_minion_key "$guid"
+}
 
-    accept_salt_key
-    sudo systemctl restart salt-minion.service
-  else
-    log "Community: Salt steps skipped."
+save_join_env() {
+  cat > "${MD_JOIN_ENV}" <<EOF
+API_HOST=${API_HOST}
+DOMAIN=${DOMAIN}
+REALM=${REALM}
+HOSTNAME=${HOSTNAME}
+FQDN=${FQDN}
+LDAP_BASE_DN=${LDAP_BASE_DN}
+LDAP_COMPUTER_OU=${LDAP_COMPUTER_OU}
+EDITION=${EDITION}
+WITH_SALT=${WITH_SALT}
+SALT_MASTER=${SALT_MASTER:-}
+EOF
+
+  chmod 600 "${MD_JOIN_ENV}"
+  md_track "${MD_JOIN_ENV}"
+}
+
+load_join_env() {
+  [[ -f "$MD_JOIN_ENV" ]] || die "Join state file not found: ${MD_JOIN_ENV}"
+
+  # shellcheck disable=SC1090
+  . "$MD_JOIN_ENV"
+
+  [[ -n "${DOMAIN:-}" ]] || die "DOMAIN is missing in ${MD_JOIN_ENV}"
+  [[ -n "${API_HOST:-}" ]] || die "API_HOST is missing in ${MD_JOIN_ENV}"
+
+  SAVED_DOMAIN="$DOMAIN"
+  SAVED_API_HOST="$API_HOST"
+
+  SAVED_DOMAIN="$(echo "$SAVED_DOMAIN" | tr '[:upper:]' '[:lower:]')"
+
+  log "Saved domain: ${SAVED_DOMAIN}"
+  log "Saved API host: ${SAVED_API_HOST}"
+}
+
+validate_leave_credentials() {
+  local leave_login leave_password leave_token detected_domain
+
+  load_join_env
+
+  read_tty leave_login "Enter domain administrator login:"
+  read_secret_tty leave_password "Enter domain administrator password:"
+
+  [[ -n "$leave_login" && -n "$leave_password" ]] || die "Login and password must be filled"
+
+  API_HOST="$SAVED_API_HOST"
+
+  log "Checking DNS resolution: ${API_HOST}"
+  getent hosts "${API_HOST}" >/dev/null || die "DNS resolution failed: ${API_HOST}"
+
+  log "Authenticating domain administrator"
+  leave_token="$(api_auth_cookie "$leave_login" "$leave_password")"
+  [[ -n "$leave_token" ]] || die "Failed to authenticate domain administrator"
+
+  log "Detecting domain via RootDSE"
+  detected_domain="$(api_rootdse_domain "$leave_token")"
+  [[ -n "$detected_domain" ]] || die "Failed to detect domain via RootDSE"
+
+  detected_domain="$(echo "$detected_domain" | tr '[:upper:]' '[:lower:]')"
+
+  log "Saved domain: ${SAVED_DOMAIN}"
+  log "Authenticated domain: ${detected_domain}"
+
+  if [[ "$detected_domain" != "$SAVED_DOMAIN" ]]; then
+    unset leave_password
+    die "Domain mismatch. Saved domain is ${SAVED_DOMAIN}, but authenticated domain is ${detected_domain}"
   fi
 
-  log "Starting services..."
-  sudo systemctl daemon-reload >/dev/null 2>&1 || true
+  access_token="$leave_token"
+  LOGIN="$leave_login"
 
-  if command -v sshd >/dev/null 2>&1; then
-    sudo sshd -t || die "Error in sshd configuration"
-    log "Success: sshd configuration check"
-  fi
+  unset leave_password
 
-  if [[ "${WITH_SALT}" -eq 1 ]]; then
-    services=(sssd ssh sshd salt-minion)
-  else
-    services=(sssd ssh sshd)
+  log "Leave credentials validated"
+}
+
+start_services() {
+  local services=(sssd ssh sshd)
+
+  systemctl daemon-reload || true
+
+  if have_cmd sshd; then
+    sshd -t || die "Error in sshd configuration"
   fi
 
   for svc in "${services[@]}"; do
-    log "Restarting service: ${svc}"
-    sudo systemctl enable "${svc}.service" >/dev/null 2>&1 || true
-    sudo systemctl restart "${svc}.service" >/dev/null 2>&1 || true
+    systemctl enable "${svc}.service" >/dev/null 2>&1 || true
+    systemctl restart "${svc}.service" >/dev/null 2>&1 || true
   done
+
+  if [[ "${WITH_SALT:-0}" -eq 1 ]]; then
+    restart_salt_minion_or_die
+    services+=(salt-minion)
+  fi
 
   for svc in "${services[@]}"; do
     if systemctl is-active --quiet "${svc}.service" 2>/dev/null; then
       log "ACTIVE: ${svc}"
     else
       warn "NOT ACTIVE: ${svc}"
-      sudo systemctl status "${svc}.service" --no-pager -l 2>/dev/null || true
+      systemctl status "${svc}.service" --no-pager -l 2>/dev/null || true
     fi
   done
-
-  md_save_join_env
-
-  log "Configuration completed successfully."
-  warn "System reboot is recommended to apply all changes."
 }
 
-case "${1:-join}" in
-  join)
-    join_domain
-    ;;
-  leave)
-    leave_domain
-    ;;
-  *)
-    echo "Usage: $0 {join|leave}"
-    exit 1
-    ;;
-esac
+stop_domain_services() {
+  systemctl stop sssd.service 2>/dev/null || true
+  systemctl stop salt-minion.service 2>/dev/null || true
+  systemctl disable salt-minion.service 2>/dev/null || true
+}
+
+remove_managed_files() {
+  if [[ ! -f "$MD_MANIFEST" ]]; then
+    warn "Manifest not found: ${MD_MANIFEST}"
+    return 0
+  fi
+
+  while IFS= read -r p; do
+    [[ -n "$p" ]] || continue
+    [[ "$p" == "/" ]] && continue
+    [[ "$p" == "$MD_MANIFEST" ]] && continue
+
+    if [[ -L "$p" || -f "$p" ]]; then
+      rm -f "$p"
+      log "Removed managed file: $p"
+    fi
+  done < "$MD_MANIFEST"
+}
+
+restore_backups() {
+  restore_one /etc/krb5.conf
+  restore_one /etc/nsswitch.conf
+  restore_one /etc/ssh/sshd_config.d/ssh_md.conf
+  restore_one /etc/sssd/sssd.conf
+  restore_one /etc/sssd/conf.d
+  restore_one /etc/hostname
+  restore_one /etc/hosts
+  restore_one /etc/resolv.conf
+
+  restore_one /etc/pam.d/system-auth
+  restore_one /etc/pam.d/su
+  restore_one /etc/pam.d/sshd
+  restore_one /etc/pam.d/gdm-password
+  restore_one /etc/pam.d/login
+  restore_one /etc/pam.d/common-login
+  restore_one /etc/pam.d/common-auth
+  restore_one /etc/pam.d/common-account
+  restore_one /etc/pam.d/common-session
+  restore_one /etc/pam.d/common-password
+
+  restore_one /etc/salt/minion
+  restore_one /etc/salt/minion_id
+}
+
+cleanup_domain_state() {
+  rm -f /etc/krb5.keytab
+
+  if [[ -f "${MD_JOIN_ENV}" || -f "${MD_ROLLBACK_MARKER}" ]]; then
+    rm -rf /var/lib/sss/db/* /var/lib/sss/mc/* 2>/dev/null || true
+  fi
+
+  rm -rf /etc/salt/pki/minion/* 2>/dev/null || true
+
+  find /etc/systemd/resolved.conf.d -mindepth 0 -maxdepth 0 -type d -empty -delete 2>/dev/null || true
+}
+
+restart_after_leave() {
+  systemctl daemon-reload || true
+  systemctl restart systemd-resolved.service 2>/dev/null || true
+  systemctl restart ssh.service 2>/dev/null || true
+  systemctl restart sshd.service 2>/dev/null || true
+}
+
+leave_domain() {
+  need_root
+  setup_logging
+  md_init_state
+
+  warn "Leaving MultiDirectory domain"
+
+  load_os_release
+
+  need_cmd curl
+  need_cmd jq
+  need_cmd getent
+  need_cmd awk
+  need_cmd tr
+
+  validate_leave_credentials
+  disable_computer_account_on_leave
+
+  stop_domain_services
+  remove_managed_files
+  restore_backups
+  cleanup_domain_state
+
+  rm -rf "$MD_ETC_DIR"
+
+  restart_after_leave
+
+  log "MultiDirectory leave completed"
+  warn "System reboot is recommended"
+}
+
+rollback_local_changes() {
+  local code="$1"
+
+  warn "Join failed with exit code ${code}"
+  warn "Rolling back local configuration changes"
+  warn "Server-side objects created via API are not removed by local rollback"
+
+  mkdir -p "${MD_STATE_DIR}"
+  touch "${MD_ROLLBACK_MARKER}"
+
+  set +e
+
+  stop_domain_services
+  remove_managed_files
+  restore_backups
+  cleanup_domain_state
+  restart_after_leave
+
+  rm -f "${MD_ROLLBACK_MARKER}"
+
+  set -e
+
+  warn "Rollback completed"
+}
+
+on_join_error() {
+  local code=$?
+
+  trap - ERR
+
+  rollback_local_changes "$code"
+
+  exit "$code"
+}
+
+preflight() {
+  need_root
+  setup_logging
+  load_os_release
+  check_system_capabilities
+
+  need_cmd curl
+  need_cmd jq
+  need_cmd getent
+  need_cmd file
+  need_cmd sed
+  need_cmd awk
+  need_cmd tr
+  need_cmd hostname
+  need_cmd klist
+  need_cmd kinit
+  need_cmd sort
+
+  normalize_files_eol
+}
+
+join_domain() {
+  preflight
+  md_init_state
+
+  trap on_join_error ERR
+
+  load_or_prompt_edition
+  validate_files_structure
+  prompt_configure_dns
+
+  read_tty API_HOST "Enter API address (FQDN), for example webadmin.domain.ru:"
+
+  [[ -n "${API_HOST}" ]] || die "API host must be filled"
+
+  validate_initial_hosts_resolution
+
+  read_tty LOGIN "Enter administrator login, for example admin:"
+  read_secret_tty PASSWORD "Enter administrator password:"
+
+  [[ -n "${LOGIN}" && -n "${PASSWORD}" ]] \
+    || die "Administrator login and administrator password must be filled"
+
+  validate_admin_credentials
+  discover_and_validate_domain
+
+  tty_echo ""
+  warn "Specify service user for SSSD"
+  read_tty SSSD_LOGIN "Enter LDAP service user login for SSSD, for example sssd_bind:"
+  read_secret_tty SSSD_PASSWORD "Enter LDAP service user password for SSSD:"
+
+  [[ -n "${SSSD_LOGIN}" && -n "${SSSD_PASSWORD}" ]] \
+    || die "SSSD login and SSSD password must be filled"
+
+  prompt_change_hostname
+
+  discover_admin_dn
+  validate_sssd_credentials
+
+  log "DOMAIN=${DOMAIN}"
+  log "REALM=${REALM}"
+  log "LDAP_BASE_DN=${LDAP_BASE_DN}"
+  log "HOSTNAME=${HOSTNAME}"
+  log "FQDN=${FQDN}"
+  log "EDITION=${EDITION}"
+  log "WITH_SALT=${WITH_SALT}"
+
+  install_static_configs
+  obfuscate_sssd_password
+
+  create_computer_object_if_needed
+
+  log "Getting keytab"
+  api_ktadd_download "${access_token}" "host/${HOSTNAME}" "host/${FQDN}"
+
+  validate_keytab
+
+  unset PASSWORD
+  unset SSSD_PASSWORD
+
+  configure_salt
+
+  save_join_env
+  start_services
+
+  trap - ERR
+
+  log "Configuration completed successfully"
+  warn "System reboot is recommended"
+}
+
+require_install_packages_launcher() {
+  if [[ "${MD_CALLED_FROM_INSTALL_PACKAGES:-0}" != "1" ]]; then
+    echo "[ERR] This script must be started only via install_packages.sh" > /dev/tty
+    echo "[ERR] Run: ./install_packages.sh ${1:-join}" > /dev/tty
+    exit 126
+  fi
+}
+
+main() {
+  require_install_packages_launcher "${1:-join}"
+
+  case "${1:-}" in
+    join)
+      join_domain
+      ;;
+    leave)
+      leave_domain
+      ;;
+    *)
+      usage
+      ;;
+  esac
+}
+
+main "$@"
