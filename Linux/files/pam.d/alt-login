@@ -1,0 +1,11 @@
+#%PAM-1.0
+auth            required        pam_securetty.so
+auth            include         common-login
+account         include         common-login
+password        include         common-login
+session         substack        common-login
+session         optional        pam_lastlog.so nowtmp
+session         optional        pam_motd.so
+session         optional        pam_mail.so
+-session        optional        pam_console.so
+-session        optional        pam_ck_connector.so
