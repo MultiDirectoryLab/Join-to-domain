@@ -1275,23 +1275,18 @@ prepare_salt_minion_identity() {
 
   log "Preparing Salt minion identity: ${guid}"
 
+  # Принудительно убиваем все процессы salt-minion (SIGKILL сразу, без SIGTERM)
   if pgrep -f "salt-minion" > /dev/null 2>&1; then
-    warn "salt-minion did not stop gracefully, forcing kill..."
-    pkill -KILL -f "salt-minion" 2>/dev/null || true
+    log "Stopping salt-minion processes with SIGKILL..."
+    pkill -9 -f "salt-minion" 2>/dev/null || true
     sleep 2
-  fi
-
-    local wait_count=0
-    while pgrep -f "salt-minion" > /dev/null 2>&1 && [ $wait_count -lt 5 ]; do
-      sleep 1
-      ((wait_count++))
-    done
-    
+    # Проверяем, что убили
     if pgrep -f "salt-minion" > /dev/null 2>&1; then
-      warn "salt-minion did not stop gracefully, forcing kill..."
-      pkill -KILL -f "salt-minion" 2>/dev/null || true
-      sleep 2
+      warn "Some salt-minion processes still remain, killing again..."
+      pkill -9 -f "salt-minion" 2>/dev/null || true
+      sleep 1
     fi
+    log "Salt processes stopped"
   fi
 
   rm -rf /etc/salt/pki/minion 2>/dev/null || true
