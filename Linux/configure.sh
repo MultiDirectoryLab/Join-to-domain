@@ -1049,8 +1049,10 @@ disable_sssd_socket_activation_if_needed() {
 
   for unit in "${sockets[@]}"; do
     if systemctl list-unit-files "$unit" 2>/dev/null | grep -q "^${unit}"; then
-      systemctl disable --now "$unit" >/dev/null 2>&1 || true
-      log "Disabled SSSD socket unit: ${unit}"
+      systemctl stop "$unit" 2>/dev/null || true
+      systemctl disable "$unit" 2>/dev/null || true
+      systemctl mask "$unit" 2>/dev/null || true
+      log "Disabled and masked SSSD socket unit: ${unit}"
     fi
   done
 }
