@@ -1275,14 +1275,23 @@ prepare_salt_minion_identity() {
 
   log "Preparing Salt minion identity: ${guid}"
 
-  systemctl stop salt-minion.service 2>/dev/null || true
+  if systemctl is-active --quiet salt-minion.service 2>/dev/null; then
+    log "Stopping salt-minion service..."
+    systemctl stop salt-minion.service 2>/dev/null || true
+    
+    sleep 2
+    if systemctl is-active --quiet salt-minion.service 2>/dev/null; then
+      warn "salt-minion.service did not stop gracefully, forcing kill..."
+      systemctl kill -s KILL salt-minion.service 2>/dev/null || true
+      sleep 1
+    fi
+  fi
 
   rm -rf /etc/salt/pki/minion 2>/dev/null || true
   rm -f /etc/salt/minion_id 2>/dev/null || true
 
   mkdir -p /etc/salt
 
-  # Полностью перезаписываем /etc/salt/minion, чтобы исключить старые строки master/finger/id
   cat > /etc/salt/minion <<EOF
 master: ${SALT_MASTER}
 master_finger: ${gpo_token}
@@ -1291,14 +1300,12 @@ EOF
   md_backup_once /etc/salt/minion
   md_track /etc/salt/minion
 
-  # Очищаем все конфиги в minion.d от старых настроек master/finger/id
   if [[ -d /etc/salt/minion.d ]]; then
     find /etc/salt/minion.d -type f -name '*.conf' -exec sed -i '/^\s*master\s*:/d' {} \; 2>/dev/null || true
     find /etc/salt/minion.d -type f -name '*.conf' -exec sed -i '/^\s*master_finger\s*:/d' {} \; 2>/dev/null || true
     find /etc/salt/minion.d -type f -name '*.conf' -exec sed -i '/^\s*id\s*:/d' {} \; 2>/dev/null || true
   fi
 
-  # Записываем minion_id
   echo "$guid" > /etc/salt/minion_id
   chmod 0644 /etc/salt/minion_id
   md_track /etc/salt/minion_id
