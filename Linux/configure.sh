@@ -150,7 +150,7 @@ check_system_capabilities() {
 
 salt_minion_unit_exists() {
   systemctl daemon-reload >/dev/null 2>&1 || true
-  systemctl list-unit-files salt-minion.service 2>/dev/null | grep -q '^salt-minion\.service'
+  test -f /lib/systemd/system/salt-minion.service || test -f /etc/systemd/system/salt-minion.service
 }
 
 print_salt_diagnostics() {
@@ -1279,26 +1279,26 @@ prepare_salt_minion_identity() {
   rm -f /etc/salt/minion_id 2>/dev/null || true
 
   mkdir -p /etc/salt
-  touch /etc/salt/minion
+
+  # Полностью перезаписываем /etc/salt/minion, чтобы исключить старые строки master/finger/id
+  cat > /etc/salt/minion <<EOF
+master: ${SALT_MASTER}
+master_finger: ${gpo_token}
+EOF
+
   md_backup_once /etc/salt/minion
+  md_track /etc/salt/minion
 
-  sed -i '/^\s*id\s*:/d' /etc/salt/minion || true
-  sed -i '/^\s*master\s*:/d' /etc/salt/minion || true
-  sed -i '/^\s*master_finger\s*:/d' /etc/salt/minion || true
-
+  # Очищаем все конфиги в minion.d от старых настроек master/finger/id
   if [[ -d /etc/salt/minion.d ]]; then
+    find /etc/salt/minion.d -type f -name '*.conf' -exec sed -i '/^\s*master\s*:/d' {} \; 2>/dev/null || true
+    find /etc/salt/minion.d -type f -name '*.conf' -exec sed -i '/^\s*master_finger\s*:/d' {} \; 2>/dev/null || true
     find /etc/salt/minion.d -type f -name '*.conf' -exec sed -i '/^\s*id\s*:/d' {} \; 2>/dev/null || true
   fi
 
-  {
-    echo "master: ${SALT_MASTER}"
-    echo "master_finger: ${gpo_token}"
-  } >> /etc/salt/minion
-
+  # Записываем minion_id
   echo "$guid" > /etc/salt/minion_id
   chmod 0644 /etc/salt/minion_id
-
-  md_track /etc/salt/minion
   md_track /etc/salt/minion_id
 
   systemctl daemon-reload || true
