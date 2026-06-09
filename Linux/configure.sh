@@ -504,25 +504,112 @@ load_or_prompt_edition() {
   prompt_edition
 }
 
-md_set_resolv_first() {
+detect_default_iface() {
+  ip route show default 2>/dev/null | awk '{print $5; exit}'
+}
+
+configure_dns_systemd_resolved() {
+  local ns="$1"
+  local resolved_dir="/etc/systemd/resolved.conf.d"
+  local resolved_file="${resolved_dir}/MultiDirectory.conf"
+  local resolv_target=""
+
+  have_cmd systemctl || return 1
+  systemctl list-unit-files systemd-resolved.service >/dev/null 2>&1 || return 1
+
+  mkdir -p "$resolved_dir"
+  md_backup_once "$resolved_file"
+
+  cat > "$resolved_file" <<EOF
+[Resolve]
+DNS=${ns}
+EOF
+
+  chmod 0644 "$resolved_file"
+  md_track "$resolved_file"
+
+  systemctl enable systemd-resolved.service >/dev/null 2>&1 || true
+  systemctl restart systemd-resolved.service || true
+
+  if [[ -e /run/systemd/resolve/resolv.conf ]]; then
+    resolv_target="/run/systemd/resolve/resolv.conf"
+  elif [[ -e /run/systemd/resolve/stub-resolv.conf ]]; then
+    resolv_target="/run/systemd/resolve/stub-resolv.conf"
+  fi
+
+  if [[ -n "$resolv_target" ]]; then
+    md_backup_once /etc/resolv.conf
+    rm -f /etc/resolv.conf
+    ln -s "$resolv_target" /etc/resolv.conf
+    md_track /etc/resolv.conf
+    log "resolv.conf linked to ${resolv_target}"
+  else
+    warn "systemd-resolved resolv.conf target not found; /etc/resolv.conf symlink was not changed"
+  fi
+
+  log "Persistent DNS configured via systemd-resolved: ${ns}"
+  return 0
+}
+
+configure_dns_networkmanager() {
+  local ns="$1"
+  local iface conn
+
+  have_cmd nmcli || return 1
+  systemctl is-active --quiet NetworkManager.service 2>/dev/null || return 1
+
+  iface="$(detect_default_iface)"
+  [[ -n "$iface" ]] || return 1
+
+  conn="$(nmcli -t -f NAME,DEVICE connection show --active 2>/dev/null | awk -F: -v dev="$iface" '$2 == dev {print $1; exit}')"
+  [[ -n "$conn" ]] || return 1
+
+  nmcli connection modify "$conn"     ipv4.dns "$ns"     ipv4.ignore-auto-dns yes || return 1
+
+  nmcli connection up "$conn" >/dev/null 2>&1 || true
+
+  log "Persistent DNS configured via NetworkManager connection '${conn}': ${ns}"
+  return 0
+}
+
+configure_dns_static_resolv_conf() {
   local ns="$1"
   local tmp
 
   md_backup_once /etc/resolv.conf
 
+  if [[ -L /etc/resolv.conf ]]; then
+    rm -f /etc/resolv.conf
+  fi
+
   tmp="$(mktemp)"
   echo "nameserver ${ns}" > "$tmp"
 
   if [[ -f /etc/resolv.conf ]]; then
-    grep -v "^nameserver ${ns}\$" /etc/resolv.conf >> "$tmp" 2>/dev/null || true
+    grep -vE "^nameserver[[:space:]]+${ns}([[:space:]]|$)" /etc/resolv.conf >> "$tmp" 2>/dev/null || true
   fi
 
   cp "$tmp" /etc/resolv.conf
   rm -f "$tmp"
 
+  chmod 0644 /etc/resolv.conf
   md_track /etc/resolv.conf
 
-  log "DNS server ${ns} set as first nameserver in /etc/resolv.conf"
+  log "Persistent DNS configured via static /etc/resolv.conf: ${ns}"
+}
+
+md_set_resolv_first() {
+  local ns="$1"
+
+  if configure_dns_systemd_resolved "$ns"; then
+    return 0
+  fi
+
+  if configure_dns_networkmanager "$ns"; then
+    return 0
+  fi
+
+  configure_dns_static_resolv_conf "$ns"
 }
 
 prompt_configure_dns() {
@@ -541,6 +628,7 @@ prompt_configure_dns() {
         while true; do
           read_tty dns_ip "Enter DNS server IP:"
           if [[ -n "${dns_ip}" && ! "$dns_ip" =~ [[:space:]] ]]; then
+            MD_DNS_SERVER="$dns_ip"
             md_set_resolv_first "$dns_ip"
             return 0
           fi
@@ -923,6 +1011,50 @@ validate_no_plaintext_sssd_password() {
   fi
 }
 
+disable_sssd_socket_activation_if_needed() {
+  local services_line unit
+  local sockets=(
+    sssd-nss.socket
+    sssd-pam.socket
+    sssd-pam-priv.socket
+    sssd-ssh.socket
+    sssd-sudo.socket
+  )
+
+  [[ -f /etc/sssd/sssd.conf ]] || return 0
+  have_cmd systemctl || return 0
+
+  services_line="$(
+    awk '
+      BEGIN { in_sssd=0 }
+      /^\[sssd\]/ { in_sssd=1; next }
+      /^\[/ { in_sssd=0 }
+      in_sssd && /^[[:space:]]*services[[:space:]]*=/ { print; exit }
+    ' /etc/sssd/sssd.conf 2>/dev/null || true
+  )"
+
+  [[ -n "$services_line" ]] || {
+    log "SSSD services line not found, socket activation will not be changed"
+    return 0
+  }
+
+  if ! echo "$services_line" | grep -Eq '(^|[,=[:space:]])(nss|pam|ssh|sudo)([,[:space:]]|$)'; then
+    log "SSSD services line does not contain nss/pam/ssh/sudo, socket activation will not be changed"
+    return 0
+  fi
+
+  log "SSSD services are configured in /etc/sssd/sssd.conf; disabling conflicting socket activation units if present"
+
+  systemctl daemon-reload >/dev/null 2>&1 || true
+
+  for unit in "${sockets[@]}"; do
+    if systemctl list-unit-files "$unit" 2>/dev/null | grep -q "^${unit}"; then
+      systemctl disable --now "$unit" >/dev/null 2>&1 || true
+      log "Disabled SSSD socket unit: ${unit}"
+    fi
+  done
+}
+
 build_sssd_conf() {
   need_dir "$SSSD_CONF_D_SRC"
   validate_non_empty_conf_dir "$SSSD_CONF_D_SRC"
@@ -962,6 +1094,8 @@ build_sssd_conf() {
   chmod 700 /etc/sssd
 
   md_track /etc/sssd/sssd.conf
+
+  disable_sssd_socket_activation_if_needed
 
   log "Built single SSSD config: /etc/sssd/sssd.conf"
   log "SSSD conf.d kept empty: /etc/sssd/conf.d"
@@ -1157,7 +1291,6 @@ prepare_salt_minion_identity() {
   fi
 
   {
-    echo "id: ${guid}"
     echo "master: ${SALT_MASTER}"
     echo "master_finger: ${gpo_token}"
   } >> /etc/salt/minion
@@ -1298,6 +1431,7 @@ LDAP_COMPUTER_OU=${LDAP_COMPUTER_OU}
 EDITION=${EDITION}
 WITH_SALT=${WITH_SALT}
 SALT_MASTER=${SALT_MASTER:-}
+MD_DNS_SERVER=${MD_DNS_SERVER:-}
 EOF
 
   chmod 600 "${MD_JOIN_ENV}"
