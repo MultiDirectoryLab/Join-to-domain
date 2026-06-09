@@ -317,7 +317,13 @@ track_local_package() {
 salt_minion_unit_exists() {
   systemctl daemon-reload >/dev/null 2>&1 || true
 
-  systemctl list-unit-files salt-minion.service 2>/dev/null | grep -q '^salt-minion\.service'
+  systemctl cat salt-minion.service >/dev/null 2>&1 && return 0
+
+  [[ -f /etc/systemd/system/salt-minion.service ]] && return 0
+  [[ -f /lib/systemd/system/salt-minion.service ]] && return 0
+  [[ -f /usr/lib/systemd/system/salt-minion.service ]] && return 0
+
+  return 1
 }
 
 salt_minion_binary_exists() {
@@ -346,6 +352,11 @@ print_salt_diagnostics() {
   fi
 
   systemctl list-unit-files 2>/dev/null | grep -E '^salt|minion' | sed 's/^/  unit: /' || true
+
+  if systemctl cat salt-minion.service >/dev/null 2>&1; then
+    warn "salt-minion.service content:"
+    systemctl cat salt-minion.service 2>/dev/null | sed 's/^/  /' || true
+  fi
 
   if [[ -d "${DEB_DIR}" ]]; then
     shopt -s nullglob
@@ -387,9 +398,14 @@ create_salt_minion_unit_if_possible() {
     return 1
   fi
 
+  local salt_minion_bin
+  salt_minion_bin="$(command -v salt-minion || true)"
+
+  [[ -n "$salt_minion_bin" ]] || return 1
+
   warn "salt-minion.service is missing, but salt-minion binary exists. Creating compatibility systemd unit."
 
-  cat > /etc/systemd/system/salt-minion.service <<'EOF2'
+  cat > /etc/systemd/system/salt-minion.service <<EOF2
 [Unit]
 Description=The Salt Minion
 Documentation=man:salt-minion(1)
@@ -398,7 +414,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/salt-minion
+ExecStart=${salt_minion_bin}
 Restart=on-failure
 RestartSec=5s
 LimitNOFILE=16384
@@ -408,9 +424,11 @@ WantedBy=multi-user.target
 EOF2
 
   chmod 0644 /etc/systemd/system/salt-minion.service
-  systemctl daemon-reload || true
 
-  salt_minion_unit_exists
+  systemctl daemon-reload || true
+  systemctl enable salt-minion.service >/dev/null 2>&1 || true
+
+  systemctl cat salt-minion.service >/dev/null 2>&1
 }
 
 require_salt_minion_installed() {
@@ -425,7 +443,9 @@ require_salt_minion_installed() {
     create_salt_minion_unit_if_possible || true
   fi
 
-  if ! salt_minion_unit_exists; then
+  systemctl daemon-reload || true
+
+  if ! systemctl cat salt-minion.service >/dev/null 2>&1; then
     print_salt_diagnostics
     die "salt-minion.service not found after package installation"
   fi
