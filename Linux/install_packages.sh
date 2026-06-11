@@ -190,7 +190,10 @@ save_packages_before() {
 
   log "Saving package list before installation"
 
-  if is_deb_based || [[ "${PM:-}" == "apt-get" ]]; then
+  if is_altlinux || is_rpm_based; then
+    need_cmd rpm
+    rpm -qa --qf '%{NAME}\n' | sort -u > "$PKGS_BEFORE"
+  elif is_deb_based; then
     need_cmd dpkg-query
     dpkg-query -W -f='${binary:Package}\n' | sort -u > "$PKGS_BEFORE"
   else
@@ -206,7 +209,10 @@ save_packages_after() {
 
   log "Saving package list after installation"
 
-  if is_deb_based || [[ "${PM:-}" == "apt-get" ]]; then
+  if is_altlinux || is_rpm_based; then
+    need_cmd rpm
+    rpm -qa --qf '%{NAME}\n' | sort -u > "$PKGS_AFTER"
+  elif is_deb_based; then
     need_cmd dpkg-query
     dpkg-query -W -f='${binary:Package}\n' | sort -u > "$PKGS_AFTER"
   else

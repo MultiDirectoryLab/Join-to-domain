@@ -149,8 +149,8 @@ check_system_capabilities() {
 }
 
 salt_minion_unit_exists() {
-  systemctl daemon-reload >/dev/null 2>&1 || true
-  test -f /lib/systemd/system/salt-minion.service || test -f /etc/systemd/system/salt-minion.service
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl cat salt-minion.service >/dev/null 2>&1
 }
 
 print_salt_diagnostics() {
@@ -1275,7 +1275,6 @@ prepare_salt_minion_identity() {
 
   log "Preparing Salt minion identity: ${guid}"
 
-  # Принудительно убиваем все процессы salt-minion (SIGKILL сразу, без SIGTERM)
   if pgrep -f "salt-minion" > /dev/null 2>&1; then
     log "Stopping salt-minion processes with SIGKILL..."
     pkill -9 -f "salt-minion" 2>/dev/null || true
