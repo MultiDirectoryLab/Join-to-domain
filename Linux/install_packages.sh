@@ -33,6 +33,7 @@ PKGS_INSTALLED="${STATE_DIR}/packages-installed-by-script.list"
 LOCAL_PKGS_INSTALLED="${STATE_DIR}/local-packages-installed-by-script.list"
 PACKAGES_TO_REMOVE="${STATE_DIR}/packages-to-remove.list"
 INSTALL_ENV="${STATE_DIR}/install.env"
+SALT_MINION_LOCAL_UNIT="/etc/systemd/system/salt-minion.service"
 
 usage() {
   echo "Usage: $0 {join|leave}"
@@ -139,6 +140,14 @@ init_state_dir() {
   chmod 700 "$STATE_DIR"
 
   touch "$LOCAL_PKGS_INSTALLED"
+  chmod 600 "$LOCAL_PKGS_INSTALLED"
+}
+
+reset_join_install_state() {
+  init_state_dir
+
+  rm -f "$PKGS_BEFORE" "$PKGS_AFTER" "$PKGS_INSTALLED" "$PACKAGES_TO_REMOVE"
+  : > "$LOCAL_PKGS_INSTALLED"
   chmod 600 "$LOCAL_PKGS_INSTALLED"
 }
 
@@ -330,6 +339,34 @@ salt_minion_binary_exists() {
   have_cmd salt-minion
 }
 
+file_owned_by_package() {
+  local path="$1"
+
+  if have_cmd dpkg-query && dpkg-query -S "$path" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  if have_cmd rpm && rpm -qf "$path" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  return 1
+}
+
+remove_legacy_generated_salt_unit_if_present() {
+  [[ -f "$SALT_MINION_LOCAL_UNIT" ]] || return 0
+  file_owned_by_package "$SALT_MINION_LOCAL_UNIT" && return 0
+
+  if grep -Fxq "Documentation=man:salt-minion(1)" "$SALT_MINION_LOCAL_UNIT" \
+    && grep -Eq '^ExecStart=.*salt-minion$' "$SALT_MINION_LOCAL_UNIT" \
+    && grep -Fxq "LimitNOFILE=16384" "$SALT_MINION_LOCAL_UNIT"; then
+    warn "Removing legacy generated Salt unit override: ${SALT_MINION_LOCAL_UNIT}"
+    systemctl disable --now salt-minion.service >/dev/null 2>&1 || true
+    rm -f "$SALT_MINION_LOCAL_UNIT"
+    systemctl daemon-reload || true
+  fi
+}
+
 local_deb_packages() {
   [[ -d "$DEB_DIR" ]] || return 0
 
@@ -387,60 +424,12 @@ print_salt_diagnostics() {
   fi
 }
 
-create_salt_minion_unit_if_possible() {
-  [[ "${WITH_SALT:-0}" -eq 1 ]] || return 0
-
-  if salt_minion_unit_exists; then
-    return 0
-  fi
-
-  if ! salt_minion_binary_exists; then
-    return 1
-  fi
-
-  local salt_minion_bin
-  salt_minion_bin="$(command -v salt-minion || true)"
-
-  [[ -n "$salt_minion_bin" ]] || return 1
-
-  warn "salt-minion.service is missing, but salt-minion binary exists. Creating compatibility systemd unit."
-
-  cat > /etc/systemd/system/salt-minion.service <<EOF2
-[Unit]
-Description=The Salt Minion
-Documentation=man:salt-minion(1)
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-ExecStart=${salt_minion_bin}
-Restart=on-failure
-RestartSec=5s
-LimitNOFILE=16384
-
-[Install]
-WantedBy=multi-user.target
-EOF2
-
-  chmod 0644 /etc/systemd/system/salt-minion.service
-
-  systemctl daemon-reload || true
-  systemctl enable salt-minion.service >/dev/null 2>&1 || true
-
-  systemctl cat salt-minion.service >/dev/null 2>&1
-}
-
 require_salt_minion_installed() {
   [[ "${WITH_SALT:-0}" -eq 1 ]] || return 0
 
   if ! salt_minion_binary_exists; then
     print_salt_diagnostics
     die "salt-minion command not found after package installation. Local DEB/RPM package does not install the minion binary or dependencies failed."
-  fi
-
-  if ! salt_minion_unit_exists; then
-    create_salt_minion_unit_if_possible || true
   fi
 
   systemctl daemon-reload || true
@@ -481,6 +470,7 @@ install_local_deb_packages() {
   local deb pkg deb_version installed_version installed_status
   local debs_to_install=()
   local local_pkg_names=()
+  local deb_reinstall_needed=0
 
   for deb in "${debs[@]}"; do
     pkg="$(get_deb_package_name "$deb")"
@@ -502,8 +492,10 @@ install_local_deb_packages() {
     if [[ "$installed_status" == "install ok installed" && -n "$installed_version" && -n "$deb_version" && "$installed_version" == "$deb_version" ]]; then
       if [[ "$pkg" == "salt-minion" ]] && ! salt_minion_unit_exists; then
         warn "Package ${pkg} ${installed_version} is installed, but salt-minion.service is missing; will reinstall"
+        deb_reinstall_needed=1
       elif [[ "$pkg" == "salt-minion" ]] && ! salt_minion_binary_exists; then
         warn "Package ${pkg} ${installed_version} is installed, but salt-minion binary is missing; will reinstall"
+        deb_reinstall_needed=1
       else
         log "Local package already installed with same version, skipping: ${pkg} ${installed_version}"
         continue
@@ -527,7 +519,12 @@ install_local_deb_packages() {
   log "Installing local DEB packages via apt-get:"
   printf '  - %s\n' "${debs_to_install[@]}"
 
-  if ! apt-get install -y "${debs_to_install[@]}"; then
+  if (( deb_reinstall_needed != 0 )); then
+    if ! apt-get install --reinstall -y "${debs_to_install[@]}"; then
+      print_salt_diagnostics
+      die "Failed to reinstall local DEB packages via apt-get"
+    fi
+  elif ! apt-get install -y "${debs_to_install[@]}"; then
     print_salt_diagnostics
     die "Failed to install local DEB packages via apt-get"
   fi
@@ -576,6 +573,7 @@ install_local_rpm_packages() {
 
   local rpm_file pkg rpm_version installed_version
   local rpms_to_install=()
+  local rpms_to_reinstall=()
 
   for rpm_file in "${rpms[@]}"; do
     pkg="$(get_rpm_package_name "$rpm_file")"
@@ -593,6 +591,12 @@ install_local_rpm_packages() {
     if [[ -n "$installed_version" && "$installed_version" != *"not installed"* && "$installed_version" == "$rpm_version" ]]; then
       if [[ "$pkg" == "salt-minion" ]] && ! salt_minion_unit_exists; then
         warn "Package ${pkg} ${installed_version} is installed, but salt-minion.service is missing; will reinstall"
+        rpms_to_reinstall+=("$rpm_file")
+        continue
+      elif [[ "$pkg" == "salt-minion" ]] && ! salt_minion_binary_exists; then
+        warn "Package ${pkg} ${installed_version} is installed, but salt-minion binary is missing; will reinstall"
+        rpms_to_reinstall+=("$rpm_file")
+        continue
       else
         log "Local package already installed with same version, skipping: ${pkg} ${installed_version}"
         continue
@@ -608,18 +612,26 @@ install_local_rpm_packages() {
     rpms_to_install+=("$rpm_file")
   done
 
-  if (( ${#rpms_to_install[@]} == 0 )); then
+  if (( ${#rpms_to_install[@]} == 0 && ${#rpms_to_reinstall[@]} == 0 )); then
     log "No local RPM packages need installation"
     return 0
   fi
 
-  log "Installing local RPM packages:"
-  printf '  - %s\n' "${rpms_to_install[@]}"
+  if (( ${#rpms_to_install[@]} > 0 )); then
+    log "Installing local RPM packages:"
+    printf '  - %s\n' "${rpms_to_install[@]}"
 
-  if [[ "${PM}" == "apt-get" ]]; then
-    apt-get install -y "${rpms_to_install[@]}" || rpm -Uvh --replacepkgs "${rpms_to_install[@]}"
-  else
-    "${PM}" install -y "${rpms_to_install[@]}" || rpm -Uvh --replacepkgs "${rpms_to_install[@]}"
+    if [[ "${PM}" == "apt-get" ]]; then
+      apt-get install -y "${rpms_to_install[@]}" || rpm -Uvh --replacepkgs "${rpms_to_install[@]}"
+    else
+      "${PM}" install -y "${rpms_to_install[@]}" || rpm -Uvh --replacepkgs "${rpms_to_install[@]}"
+    fi
+  fi
+
+  if (( ${#rpms_to_reinstall[@]} > 0 )); then
+    log "Reinstalling local RPM packages with --replacepkgs:"
+    printf '  - %s\n' "${rpms_to_reinstall[@]}"
+    rpm -Uvh --replacepkgs "${rpms_to_reinstall[@]}"
   fi
 
   systemctl daemon-reload || true
@@ -867,6 +879,8 @@ join_packages() {
 
   normalize_files_eol
   detect_package_manager
+  reset_join_install_state
+  remove_legacy_generated_salt_unit_if_present
 
   prompt_edition
   save_install_env
@@ -901,6 +915,7 @@ leave_packages() {
   warn "Protected system packages will not be removed"
 
   run_configure_leave_if_needed
+  remove_legacy_generated_salt_unit_if_present
 
   build_removal_list
 
