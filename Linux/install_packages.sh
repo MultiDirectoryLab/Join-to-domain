@@ -325,14 +325,7 @@ track_local_package() {
 
 salt_minion_unit_exists() {
   systemctl daemon-reload >/dev/null 2>&1 || true
-
-  systemctl cat salt-minion.service >/dev/null 2>&1 && return 0
-
-  [[ -f /etc/systemd/system/salt-minion.service ]] && return 0
-  [[ -f /lib/systemd/system/salt-minion.service ]] && return 0
-  [[ -f /usr/lib/systemd/system/salt-minion.service ]] && return 0
-
-  return 1
+  test -f /lib/systemd/system/salt-minion.service || test -f /etc/systemd/system/salt-minion.service
 }
 
 salt_minion_binary_exists() {
