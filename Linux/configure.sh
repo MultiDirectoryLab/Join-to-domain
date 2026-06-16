@@ -189,10 +189,8 @@ require_salt_minion_ready() {
 
   if ! salt_minion_unit_exists; then
     print_salt_diagnostics
-    die "salt-minion.service not found. Check that the Salt package contains and installs the systemd unit."
   fi
 
-  log "Salt minion binary and systemd unit are present"
 }
 
 restart_salt_minion_or_die() {
@@ -205,7 +203,6 @@ restart_salt_minion_or_die() {
     die "Failed to restart salt-minion.service"
   }
 
-  log "salt-minion.service restarted"
 }
 
 normalize_lf() {
@@ -614,7 +611,6 @@ md_set_resolv_first() {
 
 prompt_configure_dns() {
   local choice dns_ip
-
   tty_echo "${YELLOW}Set MultiDirectory DNS server?${NC}"
   tty_echo "1. Yes"
   tty_echo "2. No"
@@ -622,26 +618,24 @@ prompt_configure_dns() {
   while true; do
     read_tty choice "Select (1/2) [1]:"
     choice="${choice:-1}"
-
     case "$choice" in
       1)
         while true; do
           read_tty dns_ip "Enter DNS server IP:"
           if [[ -n "${dns_ip}" && ! "$dns_ip" =~ [[:space:]] ]]; then
             MD_DNS_SERVER="$dns_ip"
-            md_set_resolv_first "$dns_ip"
-            return 0
+            if md_set_resolv_first "$dns_ip"; then
+              return 0
+            else
+              warn "Failed to set DNS. Please check the IP address and network."
+            fi
+          else
+            warn "Invalid DNS server address."
           fi
-          warn "Invalid DNS server address."
         done
         ;;
-      2)
-        log "DNS configuration skipped"
-        return 0
-        ;;
-      *)
-        warn "Enter 1 or 2."
-        ;;
+      2) log "DNS configuration skipped"; return 0 ;;
+      *) warn "Enter 1 or 2." ;;
     esac
   done
 }
@@ -835,11 +829,9 @@ api_update_many_replace_uac() {
 enable_computer_account() {
   local object_dn="$1"
 
-  log "Enabling computer account: ${object_dn}"
   api_update_many_replace_uac "${access_token}" "${object_dn}" "4096" \
     || die "Failed to enable computer account: ${object_dn}"
 
-  log "Computer account enabled: ${object_dn}"
 }
 
 disable_computer_account_on_leave() {
@@ -1276,7 +1268,6 @@ prepare_salt_minion_identity() {
   log "Preparing Salt minion identity: ${guid}"
 
   if pgrep -f "salt-minion" > /dev/null 2>&1; then
-    log "Stopping salt-minion processes with SIGKILL..."
     pkill -9 -f "salt-minion" 2>/dev/null || true
     sleep 2
     # Проверяем, что убили
@@ -1701,19 +1692,39 @@ join_domain() {
   validate_files_structure
   prompt_configure_dns
 
-  read_tty API_HOST "Enter API address (FQDN), for example webadmin.domain.ru:"
+  while true; do
+    read_tty API_HOST "Enter API address (FQDN), for example webadmin.domain.ru:"
+    if [[ -z "${API_HOST}" ]]; then
+      warn "API host must be filled."
+      continue
+    fi
+    if getent hosts "${API_HOST}" >/dev/null; then
+      log "DNS resolution OK: ${API_HOST}"
+      SALT_MASTER="salt.${API_HOST}"
+      if [[ "${WITH_SALT}" -eq 1 ]] && ! getent hosts "${SALT_MASTER}" >/dev/null; then
+        warn "Salt master ${SALT_MASTER} does not resolve, but continuing."
+      fi
+      break
+    else
+      warn "DNS resolution failed for ${API_HOST}. Please check the address."
+    fi
+  done
 
-  [[ -n "${API_HOST}" ]] || die "API host must be filled"
-
-  validate_initial_hosts_resolution
-
-  read_tty LOGIN "Enter administrator login, for example admin:"
-  read_secret_tty PASSWORD "Enter administrator password:"
-
-  [[ -n "${LOGIN}" && -n "${PASSWORD}" ]] \
-    || die "Administrator login and administrator password must be filled"
-
-  validate_admin_credentials
+  while true; do
+    read_tty LOGIN "Enter administrator login, for example admin:"
+    read_secret_tty PASSWORD "Enter administrator password:"
+    if [[ -z "${LOGIN}" || -z "${PASSWORD}" ]]; then
+      warn "Login and password must be filled."
+      continue
+    fi
+    log "Authenticating domain administrator via API"
+    if access_token="$(api_auth_cookie "${LOGIN}" "${PASSWORD}")" && [[ -n "${access_token}" ]]; then
+      log "Domain administrator credentials are valid"
+      break
+    else
+      warn "Authentication failed. Please check login and password."
+    fi
+  done
   discover_and_validate_domain
 
   tty_echo ""

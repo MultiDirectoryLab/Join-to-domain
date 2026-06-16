@@ -392,8 +392,6 @@ create_salt_minion_unit_if_possible() {
     return 1
   fi
 
-  warn "salt-minion.service is missing, but salt-minion binary exists. Creating compatibility systemd unit."
-
   cat > /etc/systemd/system/salt-minion.service <<'EOF2'
 [Unit]
 Description=The Salt Minion
@@ -435,7 +433,6 @@ require_salt_minion_installed() {
     die "salt-minion.service not found after package installation"
   fi
 
-  log "Salt minion binary and systemd unit are present"
 }
 
 install_local_deb_packages() {
