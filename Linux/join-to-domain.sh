@@ -241,6 +241,9 @@ package_binaries() {
     sssd)
       printf '%s\n' sssd
       ;;
+    sssd-tools)
+      printf '%s\n' sssctl
+      ;;
     oddjob)
       printf '%s\n' oddjobd
       ;;
