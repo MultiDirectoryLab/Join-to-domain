@@ -37,6 +37,7 @@ INSTALL_ENV="${INSTALL_STATE_DIR}/install.env"
 LOG_FILE="/var/log/multidirectory-join.log"
 API_CONNECT_TIMEOUT=10
 API_MAX_TIME=30
+KERBEROS_PRINCIPAL_PROVISIONING="unknown"
 
 log_raw() {
   local msg="$1"
@@ -762,19 +763,37 @@ ensure_kerberos_principal() {
   local spn="$2"
   local http_code body detail
 
+  if [[ "${KERBEROS_PRINCIPAL_PROVISIONING}" == "backend" ]]; then
+    warn "Manual Kerberos principal provisioning is unavailable; relying on keytab API provisioning for ${spn}@${REALM}"
+    return 0
+  fi
+
   log "Ensuring Kerberos principal exists: ${spn}@${REALM}"
-  log "Principal API endpoint: https://${API_HOST}/api/kerberos/principal/add"
+  log "[DEBUG] Kerberos API URL: https://${API_HOST}/api/kerberos/principal/add"
 
   http_code="$(api_principal_add "${cookie}" "${spn}")" || http_code="000"
   body="$(cat /tmp/md-principal-add.body 2>/dev/null || true)"
+  log "[DEBUG] Response code: ${http_code}"
 
   if [[ "$http_code" =~ ^2[0-9][0-9]$ ]]; then
+    KERBEROS_PRINCIPAL_PROVISIONING="manual"
     log "Kerberos principal is ready: ${spn}@${REALM}"
     return 0
   fi
 
   if [[ "$http_code" == "409" ]] || printf '%s' "$body" | grep -Eiq 'already|exist|duplicate'; then
+    KERBEROS_PRINCIPAL_PROVISIONING="manual"
     warn "Kerberos principal already exists: ${spn}@${REALM}"
+    return 0
+  fi
+
+  if [[ "$http_code" == "404" ]]; then
+    KERBEROS_PRINCIPAL_PROVISIONING="backend"
+    warn "Kerberos principal API endpoint is not available on this backend: https://${API_HOST}/api/kerberos/principal/add"
+    warn "Skipping client-side principal creation and relying on backend provisioning during keytab retrieval"
+    if [[ -n "$body" ]]; then
+      warn "[DEBUG] Response body: ${body}"
+    fi
     return 0
   fi
 
@@ -789,7 +808,7 @@ ensure_kerberos_principal() {
   )"
   [[ -n "$detail" ]] || detail="$body"
 
-  die "[ERROR] Kerberos principal not found and could not be created: ${spn}@${REALM}. HTTP ${http_code}: ${detail}"
+  die "[ERROR] Kerberos principal provisioning failed for ${spn}@${REALM}. HTTP ${http_code}: ${detail}"
 }
 
 ensure_keytab_principals() {
@@ -873,6 +892,11 @@ api_ktadd_download() {
         end
       ' /tmp/md-ktadd.body 2>/dev/null || head -n 20 /tmp/md-ktadd.body 2>/dev/null || true
     )"
+
+    if [[ "${KERBEROS_PRINCIPAL_PROVISIONING}" == "backend" ]] && printf '%s' "$detail" | grep -Eiq 'principal.*not found|not found'; then
+      die "[ERROR] Kerberos principal provisioning is not available on backend. Manual endpoint /api/kerberos/principal/add returned 404, and keytab API could not find requested principals: $*. HTTP ${http_code}: ${detail}"
+    fi
+
     die "Keytab retrieval failed. HTTP ${http_code}: ${detail}"
   fi
 
