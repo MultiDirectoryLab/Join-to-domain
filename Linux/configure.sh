@@ -759,19 +759,29 @@ api_principal_add() {
 
 api_ktadd_download() {
   local cookie="$1"
-  local spn1="$2"
-  local spn2="$3"
-  local body
+  shift
+  local spn body sep
 
   rm -f /tmp/md-ktadd.hdr /tmp/md-ktadd.body /etc/krb5.keytab
 
   if [[ "${EDITION}" == "community" ]]; then
     log "Community: registering principals"
-    log "${spn1}: HTTP $(api_principal_add "${cookie}" "${spn1}")"
-    log "${spn2}: HTTP $(api_principal_add "${cookie}" "${spn2}")"
-    body="[\"${spn1}@${REALM}\",\"${spn2}@${REALM}\"]"
+    body="["
+    sep=""
+    for spn in "$@"; do
+      log "${spn}: HTTP $(api_principal_add "${cookie}" "${spn}")"
+      body="${body}${sep}\"${spn}@${REALM}\""
+      sep=","
+    done
+    body="${body}]"
   else
-    body="{\"names\":[\"${spn1}\",\"${spn2}\"],\"is_rand_key\":true}"
+    body="{\"names\":["
+    sep=""
+    for spn in "$@"; do
+      body="${body}${sep}\"${spn}\""
+      sep=","
+    done
+    body="${body}],\"is_rand_key\":true}"
   fi
 
   curl -k -sS --fail-with-body \
@@ -1238,10 +1248,21 @@ create_computer_object_if_needed() {
   enable_computer_account "${computer_dn}"
 }
 
+require_keytab_principal() {
+  local principal="$1"
+
+  if ! klist -k /etc/krb5.keytab | awk '{print $NF}' | grep -Fx "${principal}" >/dev/null; then
+    die "[ERROR] Missing ldap service principal in keytab: ${principal}"
+  fi
+}
+
 validate_keytab() {
   log "Checking keytab"
 
   klist -k /etc/krb5.keytab || die "Invalid keytab"
+
+  require_keytab_principal "ldap/${FQDN}@${REALM}"
+  require_keytab_principal "ldap/${DOMAIN}@${REALM}"
 
   if kinit -k "host/${FQDN}@${REALM}"; then
     log "Kerberos authentication succeeded: host/${FQDN}@${REALM}"
@@ -1258,8 +1279,43 @@ validate_keytab() {
   die "Kerberos keytab authentication failed"
 }
 
+ldap_uri_host() {
+  local uri="$1"
+  local host
+
+  host="${uri#ldap://}"
+  host="${host#ldaps://}"
+  host="${host%%/*}"
+  if [[ "$host" == \[*\] ]]; then
+    host="${host#[}"
+    host="${host%%]*}"
+  else
+    host="${host%%:*}"
+  fi
+
+  printf '%s' "$host"
+}
+
+validate_ldap_uri_uses_fqdn() {
+  local host
+
+  host="$(ldap_uri_host "${URI}")"
+
+  [[ -n "$host" ]] || die "LDAP URI is invalid: ${URI}"
+
+  if [[ "$host" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || [[ "$host" == *":"* ]]; then
+    die "LDAP URI must use FQDN, not IP address: ${URI}. IP-based Kerberos SPNs such as ldap/${host}@${REALM} are not supported."
+  fi
+
+  if [[ "$host" != "${DOMAIN}" && "$host" != "${FQDN}" ]]; then
+    warn "LDAP URI host is ${host}; expected ${DOMAIN} or ${FQDN} to avoid Kerberos SPN mismatch"
+  fi
+}
+
 validate_ldap_gssapi_auth() {
   log "Checking LDAP GSSAPI authentication"
+
+  validate_ldap_uri_uses_fqdn
 
   if ! kinit -k "host/${FQDN}@${REALM}"; then
     die "Kerberos GSSAPI initialization failed: host/${FQDN}@${REALM}"
@@ -1821,7 +1877,12 @@ join_domain() {
   create_computer_object_if_needed
 
   log "Getting keytab"
-  api_ktadd_download "${access_token}" "host/${HOSTNAME}" "host/${FQDN}"
+  api_ktadd_download \
+    "${access_token}" \
+    "host/${HOSTNAME}" \
+    "host/${FQDN}" \
+    "ldap/${DOMAIN}" \
+    "ldap/${FQDN}"
 
   validate_keytab
   validate_ldap_gssapi_auth
