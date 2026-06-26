@@ -37,8 +37,6 @@ INSTALL_ENV="${INSTALL_STATE_DIR}/install.env"
 LOG_FILE="/var/log/multidirectory-join.log"
 API_CONNECT_TIMEOUT=10
 API_MAX_TIME=30
-KERBEROS_MODE="unknown"
-KERBEROS_MODE_REASON=""
 
 log_raw() {
   local msg="$1"
@@ -759,146 +757,6 @@ api_principal_add() {
     -w '%{http_code}' 2>/dev/null
 }
 
-api_error_detail() {
-  local body="$1"
-  local detail
-
-  detail="$(
-    printf '%s' "$body" | jq -r '
-      if type == "object" then
-        (.detail // .message // .error // tostring)
-      else
-        tostring
-      end
-    ' 2>/dev/null || true
-  )"
-
-  [[ -n "$detail" ]] || detail="$body"
-  printf '%s' "$detail"
-}
-
-ensure_kerberos_principal() {
-  local cookie="$1"
-  local spn="$2"
-  local http_code body detail
-
-  if [[ "${KERBEROS_MODE}" == "ktadd-only" ]]; then
-    return 2
-  fi
-
-  log "Ensuring Kerberos principal exists: ${spn}@${REALM}"
-  log "[DEBUG] Kerberos API URL: https://${API_HOST}/api/kerberos/principal/add"
-
-  http_code="$(api_principal_add "${cookie}" "${spn}")" || http_code="000"
-  body="$(cat /tmp/md-principal-add.body 2>/dev/null || true)"
-  log "[DEBUG] Response code: ${http_code}"
-
-  if [[ "$http_code" =~ ^2[0-9][0-9]$ ]]; then
-    KERBEROS_MODE="manual"
-    KERBEROS_MODE_REASON="/api/kerberos/principal/add accepted principal creation"
-    log "Kerberos principal is ready: ${spn}@${REALM}"
-    return 0
-  fi
-
-  if [[ "$http_code" == "409" ]] || printf '%s' "$body" | grep -Eiq 'already|exist|duplicate'; then
-    KERBEROS_MODE="manual"
-    KERBEROS_MODE_REASON="/api/kerberos/principal/add reported an existing principal"
-    warn "Kerberos principal already exists: ${spn}@${REALM}"
-    return 0
-  fi
-
-  if [[ "$http_code" == "404" ]]; then
-    KERBEROS_MODE="ktadd-only"
-    KERBEROS_MODE_REASON="/api/kerberos/principal/add returned 404"
-    warn "Kerberos principal API endpoint is not available on this backend: https://${API_HOST}/api/kerberos/principal/add"
-    if [[ -n "$body" ]]; then
-      warn "[DEBUG] Response body: ${body}"
-    fi
-    return 2
-  fi
-
-  detail="$(api_error_detail "$body")"
-
-  die "[ERROR] Kerberos principal provisioning failed for ${spn}@${REALM}. HTTP ${http_code}: ${detail}"
-}
-
-detect_kerberos_backend_mode() {
-  local cookie="$1"
-  local probe_spn="$2"
-  local rc
-
-  log "Detecting Kerberos backend mode"
-
-  if ensure_kerberos_principal "${cookie}" "${probe_spn}"; then
-    log "Kerberos backend mode: manual (${KERBEROS_MODE_REASON})"
-    return 0
-  else
-    rc=$?
-  fi
-
-  if [[ "$rc" -eq 2 ]]; then
-    warn "Kerberos backend mode: ktadd-only (${KERBEROS_MODE_REASON})"
-    return 0
-  fi
-
-  return "$rc"
-}
-
-validate_required_principals() {
-  local cookie="$1"
-  shift
-  local spn rc
-  local missing=()
-
-  log "Validating required Kerberos principals before keytab request"
-  log "Keytab request context: hostname=${HOSTNAME}, fqdn=${FQDN}, realm=${REALM}, computer_dn=cn=${HOSTNAME},${LDAP_COMPUTER_OU}"
-
-  if [[ "${KERBEROS_MODE}" == "unknown" ]]; then
-    detect_kerberos_backend_mode "${cookie}" "$1"
-  fi
-
-  if [[ "${KERBEROS_MODE}" == "ktadd-only" ]]; then
-    for spn in "$@"; do
-      missing+=("${spn}@${REALM}")
-    done
-
-    warn "[ERROR] Keytab generation failed"
-    warn "[ERROR] Missing Kerberos principals:"
-    for spn in "${missing[@]}"; do
-      warn "  - ${spn}"
-    done
-    die "[ERROR] Backend does not expose principal validation/creation API (${KERBEROS_MODE_REASON}); refusing to call ktadd with unconfirmed principals"
-  fi
-
-  [[ "${KERBEROS_MODE}" == "manual" ]] || die "[ERROR] Kerberos backend mode is not confirmed; refusing keytab request"
-
-  for spn in "$@"; do
-    if ensure_kerberos_principal "${cookie}" "${spn}"; then
-      continue
-    else
-      rc=$?
-    fi
-
-    if [[ "$rc" -eq 2 ]]; then
-      missing+=("${spn}@${REALM}")
-      continue
-    fi
-
-    return "$rc"
-  done
-
-  if [[ "${#missing[@]}" -gt 0 ]]; then
-    warn "[ERROR] Keytab generation failed"
-    warn "[ERROR] Missing Kerberos principals:"
-    for spn in "${missing[@]}"; do
-      warn "  - ${spn}"
-    done
-    die "[ERROR] Backend does not support automatic principal provisioning"
-  fi
-
-  log "Required Kerberos principals are confirmed"
-}
-
 response_content_type() {
   local headers="$1"
 
@@ -920,9 +778,11 @@ api_ktadd_download() {
   rm -f /tmp/md-ktadd.hdr /tmp/md-ktadd.body /etc/krb5.keytab
 
   if [[ "${EDITION}" == "community" ]]; then
+    log "Community: registering principals"
     body="["
     sep=""
     for spn in "$@"; do
+      log "${spn}: HTTP $(api_principal_add "${cookie}" "${spn}")"
       body="${body}${sep}\"${spn}@${REALM}\""
       sep=","
     done
@@ -1438,21 +1298,10 @@ create_computer_object_if_needed() {
   enable_computer_account "${computer_dn}"
 }
 
-require_keytab_principal() {
-  local principal="$1"
-
-  if ! klist -k /etc/krb5.keytab | awk '{print $NF}' | grep -Fx "${principal}" >/dev/null; then
-    die "[ERROR] Missing Kerberos principal in keytab: ${principal}"
-  fi
-}
-
 validate_keytab() {
   log "Checking keytab"
 
   klist -k /etc/krb5.keytab || die "Invalid keytab"
-
-  require_keytab_principal "host/${FQDN}@${REALM}"
-  require_keytab_principal "ldap/${FQDN}@${REALM}"
 
   if kinit -k "host/${FQDN}@${REALM}"; then
     log "Kerberos authentication succeeded: host/${FQDN}@${REALM}"
@@ -1460,7 +1309,13 @@ validate_keytab() {
     return 0
   fi
 
-  die "Kerberos keytab authentication failed: host/${FQDN}@${REALM}"
+  if kinit -k "host/${HOSTNAME}@${REALM}"; then
+    log "Kerberos authentication succeeded: host/${HOSTNAME}@${REALM}"
+    kdestroy || true
+    return 0
+  fi
+
+  die "Kerberos keytab authentication failed"
 }
 
 ldap_uri_host() {
@@ -2060,16 +1915,8 @@ join_domain() {
 
   create_computer_object_if_needed
 
-  validate_required_principals \
-    "${access_token}" \
-    "host/${FQDN}" \
-    "ldap/${FQDN}"
-
   log "Getting keytab"
-  api_ktadd_download \
-    "${access_token}" \
-    "host/${FQDN}" \
-    "ldap/${FQDN}"
+  api_ktadd_download "${access_token}" "host/${HOSTNAME}" "host/${FQDN}"
 
   validate_keytab
   validate_ldap_gssapi_auth
