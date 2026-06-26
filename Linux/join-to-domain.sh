@@ -6,7 +6,13 @@ INSTALL_PACKAGES_SCRIPT="${SCRIPT_DIR}/install_packages.sh"
 CONFIGURE_SCRIPT="${SCRIPT_DIR}/configure.sh"
 LOG_FILE="/var/log/join-to-domain.log"
 REJOIN_LOG_FILE="/var/log/multidirectory-rejoin.log"
+MD_CLEANUP_LOG_FILE="/var/log/multidirectory-join.log"
+MD_ETC_DIR="/etc/MultiDirectory"
+MD_STATE_DIR="${MD_ETC_DIR}/state"
+MD_BACKUP_DIR="${MD_STATE_DIR}/backups"
+MD_MANIFEST="${MD_STATE_DIR}/manifest"
 MD_JOIN_ENV="/etc/MultiDirectory/state/join.env"
+SALT_PKG_MODULE_DST="/var/cache/salt/minion/extmods/modules/pkg.py"
 DEBUG=0
 DRY_RUN=0
 LOG_ENABLED=0
@@ -20,7 +26,7 @@ REQUIRED_PACKAGES=()
 MISSING_PACKAGES=()
 MISSING_BINARIES=()
 DETECTED_DOMAIN_STATE=""
-DETECTED_DOMAIN_REASON=""
+DETECTED_DOMAIN_REASONS=()
 
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -42,6 +48,14 @@ rejoin_log() {
   fi
 
   log "REJOIN" "$*"
+}
+
+cleanup_log() {
+  if touch "$MD_CLEANUP_LOG_FILE" 2>/dev/null; then
+    printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$MD_CLEANUP_LOG_FILE" || true
+  fi
+
+  log "CLEANUP" "$*"
 }
 
 info() {
@@ -473,67 +487,69 @@ configure_domain() {
   return $?
 }
 
-detect_domain_state() {
-  DETECTED_DOMAIN_STATE="not_joined"
-  DETECTED_DOMAIN_REASON="No managed domain state detected"
+add_domain_state_reason() {
+  DETECTED_DOMAIN_REASONS+=("$1")
+}
 
-  if [[ -f "$MD_JOIN_ENV" ]]; then
-    DETECTED_DOMAIN_STATE="managed_join"
-    DETECTED_DOMAIN_REASON="MultiDirectory join state found: ${MD_JOIN_ENV}"
+directory_has_entries() {
+  local dir="$1"
+
+  [[ -d "$dir" ]] || return 1
+  find "$dir" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null | grep -q .
+}
+
+krb5_conf_looks_domain_managed() {
+  [[ -f /etc/krb5.conf ]] || return 1
+
+  if [[ -f "$MD_MANIFEST" ]] && grep -Fxq /etc/krb5.conf "$MD_MANIFEST" 2>/dev/null; then
     return 0
   fi
+
+  grep -Eq '^[[:space:]]*dns_lookup_realm[[:space:]]*=[[:space:]]*false' /etc/krb5.conf 2>/dev/null &&
+    grep -Eq '^[[:space:]]*ticket_lifetime[[:space:]]*=[[:space:]]*7d' /etc/krb5.conf 2>/dev/null &&
+    grep -Eq '^[[:space:]]*renew_lifetime[[:space:]]*=[[:space:]]*14d' /etc/krb5.conf 2>/dev/null &&
+    grep -Eq '^[[:space:]]*admin_server[[:space:]]*=' /etc/krb5.conf 2>/dev/null
+}
+
+detect_domain_config_state() {
+  DETECTED_DOMAIN_STATE="clean"
+  DETECTED_DOMAIN_REASONS=()
+
+  [[ -f "$MD_JOIN_ENV" ]] && add_domain_state_reason "MultiDirectory join state found: ${MD_JOIN_ENV}"
+  [[ -f "$MD_MANIFEST" ]] && add_domain_state_reason "MultiDirectory manifest found: ${MD_MANIFEST}"
+  [[ -f "${MD_STATE_DIR}/rollback-in-progress" ]] && add_domain_state_reason "MultiDirectory rollback marker found: ${MD_STATE_DIR}/rollback-in-progress"
 
   if have_cmd realm && realm list 2>/dev/null | grep -q '^[^[:space:]]'; then
-    DETECTED_DOMAIN_STATE="realm_join"
-    DETECTED_DOMAIN_REASON="realm reports configured domain membership"
-    return 0
+    add_domain_state_reason "realm reports configured domain membership"
   fi
 
-  if [[ -f /etc/sssd/sssd.conf ]] && grep -Eq '^\[domain/[^]]+\]' /etc/sssd/sssd.conf 2>/dev/null; then
-    DETECTED_DOMAIN_STATE="unmanaged_sssd"
-    DETECTED_DOMAIN_REASON="SSSD domain configuration found: /etc/sssd/sssd.conf"
-    return 0
+  [[ -f /etc/sssd/sssd.conf ]] && add_domain_state_reason "SSSD configuration found: /etc/sssd/sssd.conf"
+  directory_has_entries /etc/sssd/conf.d && add_domain_state_reason "SSSD snippets found: /etc/sssd/conf.d"
+  [[ -f /etc/krb5.keytab ]] && add_domain_state_reason "Kerberos keytab found: /etc/krb5.keytab"
+  krb5_conf_looks_domain_managed && add_domain_state_reason "Kerberos configuration found: /etc/krb5.conf"
+  [[ -f /etc/sudoers.d/domain-admins ]] && add_domain_state_reason "Domain sudoers file found: /etc/sudoers.d/domain-admins"
+  [[ -f /etc/ssh/sshd_config.d/ssh_md.conf ]] && add_domain_state_reason "Domain SSH configuration found: /etc/ssh/sshd_config.d/ssh_md.conf"
+  [[ -f /etc/systemd/resolved.conf.d/MultiDirectory.conf ]] && add_domain_state_reason "MultiDirectory DNS configuration found: /etc/systemd/resolved.conf.d/MultiDirectory.conf"
+  [[ -f /etc/salt/minion.append ]] && add_domain_state_reason "Salt minion append file found: /etc/salt/minion.append"
+  [[ -f /etc/salt/minion_id ]] && add_domain_state_reason "Salt minion id found: /etc/salt/minion_id"
+  [[ -f "$SALT_PKG_MODULE_DST" ]] && add_domain_state_reason "Salt pkg module override found: ${SALT_PKG_MODULE_DST}"
+
+  if [[ "${#DETECTED_DOMAIN_REASONS[@]}" -gt 0 ]]; then
+    DETECTED_DOMAIN_STATE="configured"
   fi
 
   return 0
 }
 
-confirm_rejoin_leave() {
+confirm_clean_rejoin_cleanup() {
   local choice
 
   cat <<EOF
 
-Machine is currently joined to a domain.
-Do you want to leave the domain before rejoining?
+Domain-related configuration was found.
+This will remove MultiDirectory domain configuration and restore previous system files.
 
-1) Yes
-2) No
-EOF
-
-  while true; do
-    printf 'Select an option: '
-    IFS= read -r choice || choice=""
-
-    case "$choice" in
-      1)
-        return 0
-        ;;
-      2|"")
-        return 1
-        ;;
-      *)
-        warn "Invalid option. Please select 1 or 2."
-        ;;
-    esac
-  done
-}
-
-confirm_unmanaged_sssd_backup() {
-  local choice
-
-  cat <<EOF
-
-1) Backup existing SSSD configuration and continue with fresh join
+1) Continue cleanup
 2) Cancel and return to main menu
 EOF
 
@@ -555,125 +571,266 @@ EOF
   done
 }
 
-backup_unmanaged_sssd_config() {
-  local backup_root="/etc/MultiDirectory/backups"
-  local timestamp backup_dir src dst
-  local paths=(
-    /etc/sssd/sssd.conf
-    /etc/sssd/conf.d
+need_root_for_cleanup() {
+  if [[ "${EUID:-$(id -u)}" -ne 0 && "$DRY_RUN" -eq 0 ]]; then
+    error "Domain cleanup requires root. Run: sudo $0"
+    return 1
+  fi
+
+  return 0
+}
+
+safe_remove_path() {
+  local path="$1"
+
+  [[ -n "$path" && "$path" != "/" ]] || return 0
+  [[ -e "$path" || -L "$path" ]] || {
+    cleanup_log "Skipped absent path: ${path}"
+    return 0
+  }
+
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    info "Dry-run: remove ${path}"
+    cleanup_log "Dry-run remove: ${path}"
+    return 0
+  fi
+
+  if rm -rf -- "$path"; then
+    cleanup_log "Removed: ${path}"
+    return 0
+  fi
+
+  error "Failed to remove: ${path}"
+  cleanup_log "Failed to remove: ${path}"
+  return 1
+}
+
+backup_exists_for_path() {
+  local path="$1"
+  local safe
+
+  safe="$(printf '%s' "$path" | sed 's#/#__#g')"
+  [[ -e "${MD_BACKUP_DIR}/${safe}" || -L "${MD_BACKUP_DIR}/${safe}" ]]
+}
+
+restore_backup_for_path() {
+  local path="$1"
+  local safe backup
+
+  safe="$(printf '%s' "$path" | sed 's#/#__#g')"
+  backup="${MD_BACKUP_DIR}/${safe}"
+
+  if [[ ! -e "$backup" && ! -L "$backup" ]]; then
+    warn "No backup found for: ${path}"
+    cleanup_log "Backup not found: ${path}"
+    return 0
+  fi
+
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    info "Dry-run: restore ${path} from ${backup}"
+    cleanup_log "Dry-run restore: ${path}"
+    return 0
+  fi
+
+  rm -rf -- "$path"
+  mkdir -p "$(dirname "$path")"
+
+  if cp -a "$backup" "$path"; then
+    info "Restored: ${path}"
+    cleanup_log "Restored: ${path}"
+    return 0
+  fi
+
+  error "Failed to restore: ${path}"
+  cleanup_log "Failed to restore: ${path}"
+  return 1
+}
+
+stop_domain_services_for_cleanup() {
+  local service
+
+  if ! have_cmd systemctl; then
+    warn "systemctl not found, skipping service stop"
+    cleanup_log "systemctl not found, service stop skipped"
+    return 0
+  fi
+
+  for service in sssd.service salt-minion.service; do
+    if systemctl list-unit-files "$service" >/dev/null 2>&1 || systemctl status "$service" >/dev/null 2>&1; then
+      if [[ "$DRY_RUN" -eq 1 ]]; then
+        info "Dry-run: stop ${service}"
+        cleanup_log "Dry-run stop service: ${service}"
+      else
+        systemctl stop "$service" 2>/dev/null || true
+        cleanup_log "Stopped service if active: ${service}"
+      fi
+    else
+      cleanup_log "Service not present, skipped: ${service}"
+    fi
+  done
+}
+
+remove_managed_files_from_manifest() {
+  local path
+
+  if [[ ! -f "$MD_MANIFEST" ]]; then
+    warn "Manifest not found, skipping manifest cleanup: ${MD_MANIFEST}"
+    cleanup_log "Manifest not found: ${MD_MANIFEST}"
+    return 0
+  fi
+
+  while IFS= read -r path; do
+    [[ -n "$path" ]] || continue
+    [[ "$path" == "$MD_MANIFEST" ]] && continue
+    safe_remove_path "$path" || return 1
+  done < "$MD_MANIFEST"
+}
+
+restore_original_configs() {
+  local path failed=0
+  local restore_paths=(
     /etc/krb5.conf
-    /etc/krb5.keytab
     /etc/nsswitch.conf
+    /etc/hostname
+    /etc/hosts
     /etc/pam.d/common-auth
     /etc/pam.d/common-account
     /etc/pam.d/common-session
     /etc/pam.d/common-password
-    /etc/sudoers.d/domain-admins
+    /etc/pam.d/system-auth
+    /etc/pam.d/su
+    /etc/pam.d/sshd
+    /etc/pam.d/gdm-password
+    /etc/pam.d/login
+    /etc/pam.d/common-login
+    /etc/sssd/conf.d
+    /etc/salt/minion
   )
 
-  if [[ "${EUID:-$(id -u)}" -ne 0 && "$DRY_RUN" -eq 0 ]]; then
-    error "Backing up unmanaged SSSD configuration requires root. Run: sudo $0"
-    return 1
-  fi
+  for path in "${restore_paths[@]}"; do
+    restore_backup_for_path "$path" || failed=1
+  done
 
-  timestamp="$(date '+%Y%m%d-%H%M%S')"
-  backup_dir="${backup_root}/unmanaged-sssd-${timestamp}"
+  return "$failed"
+}
 
-  if [[ "$DRY_RUN" -eq 1 ]]; then
-    info "Dry-run: backup unmanaged SSSD configuration to ${backup_dir}"
-    return 0
-  fi
+remove_domain_generated_files() {
+  local path failed=0
+  local generated_paths=(
+    /etc/sssd/sssd.conf
+    /etc/krb5.keytab
+    /etc/sudoers.d/domain-admins
+    /etc/ssh/sshd_config.d/ssh_md.conf
+    /etc/systemd/resolved.conf.d/MultiDirectory.conf
+    /etc/salt/minion.append
+    /etc/salt/minion_id
+    "$MD_JOIN_ENV"
+    "${MD_STATE_DIR}/rollback-in-progress"
+    "$MD_MANIFEST"
+    "$SALT_PKG_MODULE_DST"
+  )
 
-  if ! mkdir -p "$backup_dir"; then
-    error "Failed to create backup directory: ${backup_dir}"
-    return 1
-  fi
+  remove_managed_files_from_manifest || failed=1
 
-  chmod 700 "$backup_dir" 2>/dev/null || true
-
-  for src in "${paths[@]}"; do
-    [[ -e "$src" || -L "$src" ]] || continue
-
-    dst="${backup_dir}${src}"
-    mkdir -p "$(dirname "$dst")" || {
-      error "Failed to create backup parent directory for: ${src}"
-      return 1
-    }
-
-    if cp -a "$src" "$dst"; then
-      info "Backed up: ${src}"
-      rejoin_log "Backed up unmanaged file: ${src} -> ${dst}"
+  for path in "${generated_paths[@]}"; do
+    if backup_exists_for_path "$path"; then
+      restore_backup_for_path "$path" || failed=1
     else
-      error "Failed to backup: ${src}"
-      return 1
+      safe_remove_path "$path" || failed=1
     fi
   done
 
-  info "Unmanaged SSSD backup created: ${backup_dir}"
-  rejoin_log "Unmanaged SSSD backup created: ${backup_dir}"
-  return 0
+  return "$failed"
 }
 
-leave_domain_for_rejoin() {
-  if [[ "${EUID:-$(id -u)}" -ne 0 && "$DRY_RUN" -eq 0 ]]; then
-    error "Domain leave requires root. Run: sudo $0"
+clear_sssd_cache() {
+  local cache_dir
+
+  stop_domain_services_for_cleanup
+
+  for cache_dir in /var/lib/sss/db /var/lib/sss/mc; do
+    [[ -d "$cache_dir" ]] || {
+      cleanup_log "SSSD cache directory absent: ${cache_dir}"
+      continue
+    }
+
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+      info "Dry-run: clear ${cache_dir}"
+      cleanup_log "Dry-run clear SSSD cache: ${cache_dir}"
+      continue
+    fi
+
+    rm -rf -- "${cache_dir:?}/"* 2>/dev/null || true
+    cleanup_log "Cleared SSSD cache: ${cache_dir}"
+  done
+}
+
+cleanup_empty_domain_dirs() {
+  local dir
+  local dirs=(
+    /var/cache/salt/minion/extmods/modules
+    /var/cache/salt/minion/extmods
+    /etc/systemd/resolved.conf.d
+    "$MD_STATE_DIR"
+    "$MD_ETC_DIR"
+  )
+
+  [[ "$DRY_RUN" -eq 1 ]] && return 0
+
+  for dir in "${dirs[@]}"; do
+    [[ -d "$dir" ]] || continue
+    rmdir "$dir" 2>/dev/null || true
+  done
+}
+
+reload_services_after_cleanup() {
+  if ! have_cmd systemctl; then
+    return 0
+  fi
+
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    info "Dry-run: reload affected services"
+    cleanup_log "Dry-run service reload after cleanup"
+    return 0
+  fi
+
+  systemctl daemon-reload 2>/dev/null || true
+  systemctl restart systemd-resolved.service 2>/dev/null || true
+  systemctl restart ssh.service 2>/dev/null || true
+  systemctl restart sshd.service 2>/dev/null || true
+  cleanup_log "Reloaded affected services after cleanup"
+}
+
+clean_domain_configuration() {
+  local failed=0
+
+  need_root_for_cleanup || return 1
+  cleanup_log "Clean rejoin cleanup started"
+
+  if [[ -f "$MD_JOIN_ENV" ]]; then
+    warn "Managed join state found, remote LDAP cleanup is skipped by clean rejoin workflow"
+    cleanup_log "Remote LDAP cleanup skipped; local cleanup will continue"
+  else
+    cleanup_log "No managed join state found; remote LDAP cleanup skipped"
+  fi
+
+  stop_domain_services_for_cleanup
+  restore_original_configs || failed=1
+  remove_domain_generated_files || failed=1
+  clear_sssd_cache
+  cleanup_empty_domain_dirs
+  reload_services_after_cleanup
+
+  if [[ "$failed" -ne 0 ]]; then
+    error "Domain cleanup completed with errors"
+    cleanup_log "Clean rejoin cleanup completed with errors"
     return 1
   fi
 
-  if [[ "$DRY_RUN" -eq 1 ]]; then
-    if [[ "$DETECTED_DOMAIN_STATE" == "managed_join" ]]; then
-      info "Dry-run: MD_CALLED_FROM_INSTALL_PACKAGES=1 bash ${CONFIGURE_SCRIPT} leave"
-    elif [[ "$DETECTED_DOMAIN_STATE" == "realm_join" ]]; then
-      info "Dry-run: realm leave"
-    else
-      warn "Dry-run: no safe leave backend detected"
-    fi
-    return 0
-  fi
-
-  if [[ "$DETECTED_DOMAIN_STATE" == "managed_join" ]]; then
-    rejoin_log "Leaving managed MultiDirectory domain using configure.sh leave"
-    MD_CALLED_FROM_INSTALL_PACKAGES=1 bash "$CONFIGURE_SCRIPT" leave
-    local code=$?
-    rejoin_log "configure.sh leave exit code: ${code}"
-    return "$code"
-  fi
-
-  if [[ "$DETECTED_DOMAIN_STATE" == "realm_join" ]]; then
-    rejoin_log "Leaving domain using realm leave"
-    realm leave
-    local code=$?
-    rejoin_log "realm leave exit code: ${code}"
-
-    if [[ "$code" -eq 0 ]] && have_cmd systemctl; then
-      systemctl stop sssd.service 2>/dev/null || true
-      rejoin_log "sssd.service stopped after realm leave"
-    fi
-
-    return "$code"
-  fi
-
-  error "No safe leave backend is available for state: ${DETECTED_DOMAIN_STATE}"
-  warn "Rejoin aborted before local configuration changes"
-  rejoin_log "Leave aborted: no safe leave backend"
-  return 1
-}
-
-ensure_dependencies_for_rejoin() {
-  if check_dependencies; then
-    rejoin_log "Dependency validation succeeded"
-    return 0
-  fi
-
-  rejoin_log "Dependencies are missing, running install step"
-  install_packages || return 1
-
-  if [[ "$DRY_RUN" -eq 1 ]]; then
-    rejoin_log "Dry-run mode: dependency recheck skipped after simulated install"
-    return 0
-  fi
-
-  check_dependencies
+  info "MultiDirectory domain configuration cleanup completed"
+  warn "System reboot is recommended"
+  cleanup_log "Clean rejoin cleanup completed successfully"
+  return 0
 }
 
 rejoin_domain() {
@@ -684,70 +841,36 @@ rejoin_domain() {
     return 1
   fi
 
-  detect_domain_state
-  rejoin_log "Detected domain state: ${DETECTED_DOMAIN_STATE}; ${DETECTED_DOMAIN_REASON}"
+  detect_domain_config_state
+  rejoin_log "Detected domain config state: ${DETECTED_DOMAIN_STATE}"
 
-  case "$DETECTED_DOMAIN_STATE" in
-    managed_join|realm_join)
-      warn "$DETECTED_DOMAIN_REASON"
+  if [[ "$DETECTED_DOMAIN_STATE" == "configured" ]]; then
+    warn "Domain-related configuration was found:"
+    printf '  - %s\n' "${DETECTED_DOMAIN_REASONS[@]}"
+    rejoin_log "Detected config indicators: ${DETECTED_DOMAIN_REASONS[*]}"
 
-      if ! confirm_rejoin_leave; then
-        warn "Rejoin cancelled by user"
-        rejoin_log "Rejoin cancelled by user"
-        return 0
-      fi
-
-      if ! leave_domain_for_rejoin; then
-        error "Domain leave failed. Rejoin aborted."
-        rejoin_log "Leave failed, rejoin aborted"
-        return 1
-      fi
-
-      rejoin_log "Leave completed"
-      info "Return to main menu and run Configure domain join when ready"
-      rejoin_log "Returning to main menu after leave"
+    if ! confirm_clean_rejoin_cleanup; then
+      warn "Rejoin cleanup cancelled by user"
+      rejoin_log "Rejoin cleanup cancelled by user"
       return 0
-      ;;
-    unmanaged_sssd)
-      warn "Existing SSSD configuration found, but it is not managed by MultiDirectory."
-      warn "No safe managed leave state was found."
-      rejoin_log "Unmanaged SSSD configuration detected"
+    fi
 
-      if ! confirm_unmanaged_sssd_backup; then
-        warn "Rejoin cancelled by user"
-        rejoin_log "Rejoin cancelled for unmanaged SSSD state"
-        return 0
-      fi
-
-      backup_unmanaged_sssd_config || {
-        error "Backup failed. Rejoin aborted."
-        rejoin_log "Backup failed for unmanaged SSSD state"
-        return 1
-      }
-
-      info "Unmanaged SSSD configuration backed up. Starting fresh join flow."
-      rejoin_log "Proceeding to fresh join after unmanaged SSSD backup"
-      ;;
-    not_joined)
-      info "Machine is not joined to a domain. Starting normal join flow."
-      rejoin_log "No domain membership detected"
-      ;;
-    *)
-      error "Unknown domain state: ${DETECTED_DOMAIN_STATE}"
-      rejoin_log "Unknown domain state: ${DETECTED_DOMAIN_STATE}"
+    if ! clean_domain_configuration; then
+      error "Local domain cleanup failed"
+      rejoin_log "Local cleanup failed"
       return 1
-      ;;
-  esac
+    fi
 
-  ensure_dependencies_for_rejoin || {
-    error "Dependency validation failed. Rejoin aborted."
-    rejoin_log "Dependency validation failed after install attempt"
-    return 1
-  }
+    info "Return to main menu and run Configure domain join when ready"
+    rejoin_log "Returning to main menu after cleanup"
+    return 0
+  fi
 
-  configure_domain
+  info "No domain-related configuration detected. Starting normal join flow."
+  rejoin_log "No domain-related configuration detected; running configure flow"
+  run_configure_flow
   local code=$?
-  rejoin_log "configure_domain exit code: ${code}"
+  rejoin_log "run_configure_flow exit code: ${code}"
   return "$code"
 }
 
