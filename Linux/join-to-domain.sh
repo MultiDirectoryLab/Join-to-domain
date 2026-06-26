@@ -19,6 +19,8 @@ OS_NAME=""
 REQUIRED_PACKAGES=()
 MISSING_PACKAGES=()
 MISSING_BINARIES=()
+DETECTED_DOMAIN_STATE=""
+DETECTED_DOMAIN_REASON=""
 
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -471,27 +473,29 @@ configure_domain() {
   return $?
 }
 
-domain_state_reason() {
+detect_domain_state() {
+  DETECTED_DOMAIN_STATE="not_joined"
+  DETECTED_DOMAIN_REASON="No managed domain state detected"
+
   if [[ -f "$MD_JOIN_ENV" ]]; then
-    printf 'MultiDirectory join state found: %s\n' "$MD_JOIN_ENV"
+    DETECTED_DOMAIN_STATE="managed_join"
+    DETECTED_DOMAIN_REASON="MultiDirectory join state found: ${MD_JOIN_ENV}"
     return 0
   fi
 
   if have_cmd realm && realm list 2>/dev/null | grep -q '^[^[:space:]]'; then
-    printf 'realm reports configured domain membership\n'
+    DETECTED_DOMAIN_STATE="realm_join"
+    DETECTED_DOMAIN_REASON="realm reports configured domain membership"
     return 0
   fi
 
   if [[ -f /etc/sssd/sssd.conf ]] && grep -Eq '^\[domain/[^]]+\]' /etc/sssd/sssd.conf 2>/dev/null; then
-    printf 'SSSD domain configuration found: /etc/sssd/sssd.conf\n'
+    DETECTED_DOMAIN_STATE="unmanaged_sssd"
+    DETECTED_DOMAIN_REASON="SSSD domain configuration found: /etc/sssd/sssd.conf"
     return 0
   fi
 
-  return 1
-}
-
-is_domain_joined() {
-  domain_state_reason >/dev/null
+  return 0
 }
 
 confirm_rejoin_leave() {
@@ -524,6 +528,92 @@ EOF
   done
 }
 
+confirm_unmanaged_sssd_backup() {
+  local choice
+
+  cat <<EOF
+
+1) Backup existing SSSD configuration and continue with fresh join
+2) Cancel and return to main menu
+EOF
+
+  while true; do
+    printf 'Select an option: '
+    IFS= read -r choice || choice=""
+
+    case "$choice" in
+      1)
+        return 0
+        ;;
+      2|"")
+        return 1
+        ;;
+      *)
+        warn "Invalid option. Please select 1 or 2."
+        ;;
+    esac
+  done
+}
+
+backup_unmanaged_sssd_config() {
+  local backup_root="/etc/MultiDirectory/backups"
+  local timestamp backup_dir src dst
+  local paths=(
+    /etc/sssd/sssd.conf
+    /etc/sssd/conf.d
+    /etc/krb5.conf
+    /etc/krb5.keytab
+    /etc/nsswitch.conf
+    /etc/pam.d/common-auth
+    /etc/pam.d/common-account
+    /etc/pam.d/common-session
+    /etc/pam.d/common-password
+    /etc/sudoers.d/domain-admins
+  )
+
+  if [[ "${EUID:-$(id -u)}" -ne 0 && "$DRY_RUN" -eq 0 ]]; then
+    error "Backing up unmanaged SSSD configuration requires root. Run: sudo $0"
+    return 1
+  fi
+
+  timestamp="$(date '+%Y%m%d-%H%M%S')"
+  backup_dir="${backup_root}/unmanaged-sssd-${timestamp}"
+
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    info "Dry-run: backup unmanaged SSSD configuration to ${backup_dir}"
+    return 0
+  fi
+
+  if ! mkdir -p "$backup_dir"; then
+    error "Failed to create backup directory: ${backup_dir}"
+    return 1
+  fi
+
+  chmod 700 "$backup_dir" 2>/dev/null || true
+
+  for src in "${paths[@]}"; do
+    [[ -e "$src" || -L "$src" ]] || continue
+
+    dst="${backup_dir}${src}"
+    mkdir -p "$(dirname "$dst")" || {
+      error "Failed to create backup parent directory for: ${src}"
+      return 1
+    }
+
+    if cp -a "$src" "$dst"; then
+      info "Backed up: ${src}"
+      rejoin_log "Backed up unmanaged file: ${src} -> ${dst}"
+    else
+      error "Failed to backup: ${src}"
+      return 1
+    fi
+  done
+
+  info "Unmanaged SSSD backup created: ${backup_dir}"
+  rejoin_log "Unmanaged SSSD backup created: ${backup_dir}"
+  return 0
+}
+
 leave_domain_for_rejoin() {
   if [[ "${EUID:-$(id -u)}" -ne 0 && "$DRY_RUN" -eq 0 ]]; then
     error "Domain leave requires root. Run: sudo $0"
@@ -531,9 +621,9 @@ leave_domain_for_rejoin() {
   fi
 
   if [[ "$DRY_RUN" -eq 1 ]]; then
-    if [[ -f "$MD_JOIN_ENV" ]]; then
+    if [[ "$DETECTED_DOMAIN_STATE" == "managed_join" ]]; then
       info "Dry-run: MD_CALLED_FROM_INSTALL_PACKAGES=1 bash ${CONFIGURE_SCRIPT} leave"
-    elif have_cmd realm; then
+    elif [[ "$DETECTED_DOMAIN_STATE" == "realm_join" ]]; then
       info "Dry-run: realm leave"
     else
       warn "Dry-run: no safe leave backend detected"
@@ -541,7 +631,7 @@ leave_domain_for_rejoin() {
     return 0
   fi
 
-  if [[ -f "$MD_JOIN_ENV" ]]; then
+  if [[ "$DETECTED_DOMAIN_STATE" == "managed_join" ]]; then
     rejoin_log "Leaving managed MultiDirectory domain using configure.sh leave"
     MD_CALLED_FROM_INSTALL_PACKAGES=1 bash "$CONFIGURE_SCRIPT" leave
     local code=$?
@@ -549,7 +639,7 @@ leave_domain_for_rejoin() {
     return "$code"
   fi
 
-  if have_cmd realm && realm list 2>/dev/null | grep -q '^[^[:space:]]'; then
+  if [[ "$DETECTED_DOMAIN_STATE" == "realm_join" ]]; then
     rejoin_log "Leaving domain using realm leave"
     realm leave
     local code=$?
@@ -563,8 +653,8 @@ leave_domain_for_rejoin() {
     return "$code"
   fi
 
-  error "Domain-like SSSD configuration found, but no managed join state or realm backend is available."
-  warn "Rejoin aborted to avoid destroying existing SSSD configuration without a safe leave mechanism."
+  error "No safe leave backend is available for state: ${DETECTED_DOMAIN_STATE}"
+  warn "Rejoin aborted before local configuration changes"
   rejoin_log "Leave aborted: no safe leave backend"
   return 1
 }
@@ -587,8 +677,6 @@ ensure_dependencies_for_rejoin() {
 }
 
 rejoin_domain() {
-  local reason
-
   rejoin_log "Rejoin requested"
 
   if ! need_script "$CONFIGURE_SCRIPT"; then
@@ -596,30 +684,60 @@ rejoin_domain() {
     return 1
   fi
 
-  if reason="$(domain_state_reason)"; then
-    warn "$reason"
-    rejoin_log "Domain detected: ${reason}"
+  detect_domain_state
+  rejoin_log "Detected domain state: ${DETECTED_DOMAIN_STATE}; ${DETECTED_DOMAIN_REASON}"
 
-    if ! confirm_rejoin_leave; then
-      warn "Rejoin cancelled by user"
-      rejoin_log "Rejoin cancelled by user"
+  case "$DETECTED_DOMAIN_STATE" in
+    managed_join|realm_join)
+      warn "$DETECTED_DOMAIN_REASON"
+
+      if ! confirm_rejoin_leave; then
+        warn "Rejoin cancelled by user"
+        rejoin_log "Rejoin cancelled by user"
+        return 0
+      fi
+
+      if ! leave_domain_for_rejoin; then
+        error "Domain leave failed. Rejoin aborted."
+        rejoin_log "Leave failed, rejoin aborted"
+        return 1
+      fi
+
+      rejoin_log "Leave completed"
+      info "Return to main menu and run Configure domain join when ready"
+      rejoin_log "Returning to main menu after leave"
       return 0
-    fi
+      ;;
+    unmanaged_sssd)
+      warn "Existing SSSD configuration found, but it is not managed by MultiDirectory."
+      warn "No safe managed leave state was found."
+      rejoin_log "Unmanaged SSSD configuration detected"
 
-    if ! leave_domain_for_rejoin; then
-      error "Domain leave failed. Rejoin aborted."
-      rejoin_log "Leave failed, rejoin aborted"
+      if ! confirm_unmanaged_sssd_backup; then
+        warn "Rejoin cancelled by user"
+        rejoin_log "Rejoin cancelled for unmanaged SSSD state"
+        return 0
+      fi
+
+      backup_unmanaged_sssd_config || {
+        error "Backup failed. Rejoin aborted."
+        rejoin_log "Backup failed for unmanaged SSSD state"
+        return 1
+      }
+
+      info "Unmanaged SSSD configuration backed up. Starting fresh join flow."
+      rejoin_log "Proceeding to fresh join after unmanaged SSSD backup"
+      ;;
+    not_joined)
+      info "Machine is not joined to a domain. Starting normal join flow."
+      rejoin_log "No domain membership detected"
+      ;;
+    *)
+      error "Unknown domain state: ${DETECTED_DOMAIN_STATE}"
+      rejoin_log "Unknown domain state: ${DETECTED_DOMAIN_STATE}"
       return 1
-    fi
-
-    rejoin_log "Leave completed"
-    info "Return to main menu and run Configure domain join when ready"
-    rejoin_log "Returning to main menu after leave"
-    return 0
-  else
-    info "Machine is not joined to a domain. Starting normal join flow."
-    rejoin_log "No domain membership detected"
-  fi
+      ;;
+  esac
 
   ensure_dependencies_for_rejoin || {
     error "Dependency validation failed. Rejoin aborted."
