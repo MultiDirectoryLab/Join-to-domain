@@ -35,6 +35,8 @@ INSTALL_STATE_DIR="/var/lib/MultiDirectory/install"
 INSTALL_ENV="${INSTALL_STATE_DIR}/install.env"
 
 LOG_FILE="/var/log/multidirectory-join.log"
+API_CONNECT_TIMEOUT=10
+API_MAX_TIME=30
 
 log_raw() {
   local msg="$1"
@@ -651,6 +653,8 @@ api_auth_cookie() {
   local pass="$2"
 
   curl -k -sS -X POST "https://${API_HOST}/api/auth/" \
+    --connect-timeout "${API_CONNECT_TIMEOUT}" \
+    --max-time "${API_MAX_TIME}" \
     -H "accept: application/json" \
     -H "Content-Type: application/x-www-form-urlencoded" \
     --data-urlencode "username=${user}" \
@@ -668,6 +672,8 @@ api_search() {
   local attrs_json="$5"
 
   curl -k -sS -X POST "https://${API_HOST}/api/entry/search" \
+    --connect-timeout "${API_CONNECT_TIMEOUT}" \
+    --max-time "${API_MAX_TIME}" \
     -H "accept: application/json" \
     -H "Cookie: id=${cookie}" \
     -H "Content-Type: application/json" \
@@ -741,6 +747,8 @@ api_principal_add() {
   local instance="${spn#*/}"
 
   curl -k -sS -X POST "https://${API_HOST}/api/kerberos/principal/add" \
+    --connect-timeout "${API_CONNECT_TIMEOUT}" \
+    --max-time "${API_MAX_TIME}" \
     -H "accept: application/json" \
     -H "Content-Type: application/json" \
     -H "Cookie: id=${cookie}" \
@@ -767,6 +775,8 @@ api_ktadd_download() {
   fi
 
   curl -k -sS --fail-with-body \
+    --connect-timeout "${API_CONNECT_TIMEOUT}" \
+    --max-time "${API_MAX_TIME}" \
     -D /tmp/md-ktadd.hdr \
     -o /tmp/md-ktadd.body \
     -X POST "https://${API_HOST}/api/kerberos/ktadd" \
@@ -814,6 +824,8 @@ api_update_many_replace_uac() {
 
   resp="$(
     curl -k -sS -w "\n%{http_code}" \
+      --connect-timeout "${API_CONNECT_TIMEOUT}" \
+      --max-time "${API_MAX_TIME}" \
       -X PATCH "https://${API_HOST}/api/entry/update_many" \
       -H 'accept: application/json' \
       -H 'Content-Type: application/json' \
@@ -832,6 +844,25 @@ api_update_many_replace_uac() {
   return 1
 }
 
+api_find_computer_object_dn() {
+  local cookie="$1"
+  local computer_ou="$2"
+  local computer_name="$3"
+  local resp dn
+
+  resp="$(
+    api_search "$cookie" "$computer_ou" 2 "(&(objectClass=computer)(cn=${computer_name}))" "[\"cn\",\"userAccountControl\"]" 2>&1
+  )" || {
+    return 2
+  }
+
+  dn="$(printf '%s' "$resp" | jq -r '.search_result[0].object_name // empty' 2>/dev/null || true)"
+  [[ -n "$dn" ]] || return 1
+
+  printf '%s' "$dn"
+  return 0
+}
+
 enable_computer_account() {
   local object_dn="$1"
 
@@ -841,7 +872,7 @@ enable_computer_account() {
 }
 
 disable_computer_account_on_leave() {
-  local object_dn
+  local object_dn expected_dn lookup_rc
 
   [[ -n "${HOSTNAME:-}" ]] || {
     warn "HOSTNAME is unknown, computer account disable skipped"
@@ -858,7 +889,27 @@ disable_computer_account_on_leave() {
     return 0
   }
 
-  object_dn="cn=${HOSTNAME},${LDAP_COMPUTER_OU}"
+  expected_dn="cn=${HOSTNAME},${LDAP_COMPUTER_OU}"
+
+  object_dn="$(api_find_computer_object_dn "${access_token}" "${LDAP_COMPUTER_OU}" "${HOSTNAME}")"
+  lookup_rc=$?
+
+  case "$lookup_rc" in
+    0)
+      ;;
+    1)
+      warn "Computer object not found in LDAP, skipping disable: ${expected_dn}"
+      return 0
+      ;;
+    2)
+      warn "Timeout while checking computer object, skipping remote disable"
+      return 0
+      ;;
+    *)
+      warn "Failed to check computer object, skipping remote disable: ${expected_dn}"
+      return 0
+      ;;
+  esac
 
   warn "Disabling computer account: ${object_dn}"
   if api_update_many_replace_uac "${access_token}" "${object_dn}" "4098"; then
@@ -1157,6 +1208,8 @@ create_computer_object_if_needed() {
 
   add_resp="$(
     curl -k -sS -w "\n%{http_code}" \
+      --connect-timeout "${API_CONNECT_TIMEOUT}" \
+      --max-time "${API_MAX_TIME}" \
       -X POST "https://${API_HOST}/api/entry/add" \
       -H 'accept: application/json' \
       -H 'Content-Type: application/json' \
@@ -1226,6 +1279,8 @@ api_delete_salt_minion_key() {
   [[ -n "$minion_id" ]] || return 0
 
   curl -k -sS -X DELETE "https://${API_HOST}/api/salt/minion/${minion_id}" \
+    --connect-timeout "${API_CONNECT_TIMEOUT}" \
+    --max-time "${API_MAX_TIME}" \
     -H "Cookie: id=${cookie}" \
     -H 'accept: application/json' \
     -o /dev/null || true
@@ -1329,7 +1384,10 @@ accept_salt_minion_key() {
     log "Attempt ${attempt}/${retries}: accepting Salt minion key"
 
     resp="$(
-      curl -k -sS -w "\n%{http_code}" -X POST "https://${API_HOST}/api/salt/minion" \
+      curl -k -sS -w "\n%{http_code}" \
+        --connect-timeout "${API_CONNECT_TIMEOUT}" \
+        --max-time "${API_MAX_TIME}" \
+        -X POST "https://${API_HOST}/api/salt/minion" \
         -H 'accept: application/json' \
         -H "Cookie: id=${access_token}" \
         -H 'Content-Type: application/json' \
@@ -1396,6 +1454,8 @@ configure_salt() {
 
   gpo_token="$(
     curl -k -sS -X GET "https://${API_HOST}/api/salt/master/key" \
+      --connect-timeout "${API_CONNECT_TIMEOUT}" \
+      --max-time "${API_MAX_TIME}" \
       -H "Cookie: id=${access_token}" \
       -H 'accept: application/json' \
       | tr -d '\r\n"'
