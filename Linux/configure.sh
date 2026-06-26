@@ -891,14 +891,18 @@ disable_computer_account_on_leave() {
 
   expected_dn="cn=${HOSTNAME},${LDAP_COMPUTER_OU}"
 
-  object_dn="$(api_find_computer_object_dn "${access_token}" "${LDAP_COMPUTER_OU}" "${HOSTNAME}")"
-  lookup_rc=$?
+  if object_dn="$(api_find_computer_object_dn "${access_token}" "${LDAP_COMPUTER_OU}" "${HOSTNAME}")"; then
+    lookup_rc=0
+  else
+    lookup_rc=$?
+  fi
 
   case "$lookup_rc" in
     0)
       ;;
     1)
-      warn "Computer object not found in LDAP, skipping disable: ${expected_dn}"
+      warn "Computer object not found in LDAP: ${expected_dn}"
+      warn "Skipping remote computer disable"
       return 0
       ;;
     2)
@@ -1679,8 +1683,11 @@ leave_domain() {
   need_cmd tr
 
   validate_leave_credentials
+  log "Starting optional remote LDAP cleanup"
   disable_computer_account_on_leave
+  log "Remote LDAP cleanup step completed"
 
+  log "Starting local leave cleanup"
   stop_domain_services
   remove_managed_files
   restore_backups
@@ -1690,6 +1697,7 @@ leave_domain() {
 
   restart_after_leave
 
+  log "Local leave cleanup completed"
   log "MultiDirectory leave completed"
   warn "System reboot is recommended"
 }
