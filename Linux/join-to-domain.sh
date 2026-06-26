@@ -613,6 +613,9 @@ rejoin_domain() {
     fi
 
     rejoin_log "Leave completed"
+    info "Return to main menu and run Configure domain join when ready"
+    rejoin_log "Returning to main menu after leave"
+    return 0
   else
     info "Machine is not joined to a domain. Starting normal join flow."
     rejoin_log "No domain membership detected"
