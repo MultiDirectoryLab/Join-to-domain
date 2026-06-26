@@ -1352,6 +1352,8 @@ validate_ldap_uri_uses_fqdn() {
 }
 
 validate_ldap_gssapi_auth() {
+  local ldap_client_conf="/tmp/md-ldap-gssapi.conf"
+
   log "Checking LDAP GSSAPI authentication"
 
   validate_ldap_uri_uses_fqdn
@@ -1360,14 +1362,22 @@ validate_ldap_gssapi_auth() {
     die "Kerberos GSSAPI initialization failed: host/${FQDN}@${REALM}"
   fi
 
-  ldapwhoami -Y GSSAPI -H "${URI}" >/dev/null \
+  cat > "$ldap_client_conf" <<EOF
+SASL_NOCANON on
+URI ${URI}
+BASE ${LDAP_BASE_DN}
+EOF
+
+  LDAPCONF="$ldap_client_conf" ldapwhoami -Y GSSAPI -H "${URI}" >/dev/null \
     || {
+      rm -f "$ldap_client_conf"
       kdestroy || true
       die "LDAP GSSAPI authentication failed"
     }
 
   log "LDAP GSSAPI authentication succeeded"
 
+  rm -f "$ldap_client_conf"
   kdestroy || true
 }
 
