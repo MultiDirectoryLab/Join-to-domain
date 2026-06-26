@@ -37,7 +37,7 @@ DEB_REQUIRED_PACKAGES=(
   sssd-tools
   libnss-sss
   libpam-sss
-  libpam-mkhomedir
+  libpam-modules
   oddjob
   oddjob-mkhomedir
   openssh-server
@@ -708,7 +708,7 @@ is_removable_domain_package() {
   local pkg="$1"
 
   case "$pkg" in
-    sssd|sssd-tools|sssd-client|sssd-dbus|libnss-sss|libpam-sss|libpam-mkhomedir|oddjob|oddjob-mkhomedir)
+    sssd|sssd-tools|sssd-client|sssd-dbus|libnss-sss|libpam-sss|oddjob|oddjob-mkhomedir)
       return 0
       ;;
     krb5-user|krb5-workstation)

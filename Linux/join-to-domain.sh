@@ -218,7 +218,7 @@ need_script() {
 
 package_binaries() {
   case "$1" in
-    ca-certificates|libnss-sss|libpam-sss|libpam-mkhomedir|sssd-client|oddjob-mkhomedir)
+    ca-certificates|libnss-sss|libpam-sss|libpam-modules|sssd-client|oddjob-mkhomedir)
       ;;
     curl)
       printf '%s\n' curl
@@ -459,30 +459,10 @@ configure_domain() {
 }
 
 handle_missing_dependencies() {
-  local choice
-
-  while true; do
-    cat <<EOF
-
-1) Install missing packages
-2) Return to main menu
-EOF
-    printf 'Select an option: '
-    IFS= read -r choice || choice=""
-
-    case "$choice" in
-      1)
-        install_packages "${MISSING_PACKAGES[@]}"
-        return $?
-        ;;
-      2|"")
-        return 0
-        ;;
-      *)
-        warn "Invalid option. Please select 1 or 2."
-        ;;
-    esac
-  done
+  error "Dependency validation failed after installation."
+  warn "Run 'Install required packages' from the main menu and check the installer log if this repeats."
+  warn "Configuration will not install packages automatically."
+  return 1
 }
 
 run_configure_flow() {
