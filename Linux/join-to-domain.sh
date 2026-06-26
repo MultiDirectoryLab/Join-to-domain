@@ -1,14 +1,23 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
+# Must mirror packages installed by install_packages.sh.
+# Do not add packages here unless install_packages.sh installs them too.
 REQUIRED_PACKAGES=(
+  ca-certificates
+  curl
+  jq
+  file
+  sudo
+  krb5
   sssd
-  realmd
-  adcli
-  krb5-user
+  sssd-tools
+  nss-sss
+  pam-sss
+  pam-mkhomedir
   oddjob
   oddjob-mkhomedir
-  samba-common-bin
+  openssh-server
 )
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -165,26 +174,36 @@ need_script() {
 
 package_binaries() {
   case "$1" in
+    ca-certificates)
+      ;;
+    curl)
+      printf '%s\n' curl
+      ;;
+    jq)
+      printf '%s\n' jq
+      ;;
+    file)
+      printf '%s\n' file
+      ;;
+    sudo)
+      printf '%s\n' sudo
+      ;;
+    krb5)
+      printf '%s\n' kinit klist
+      ;;
     sssd)
       printf '%s\n' sssd
       ;;
-    realmd)
-      printf '%s\n' realm
+    sssd-tools)
+      printf '%s\n' sss_obfuscate
       ;;
-    adcli)
-      printf '%s\n' adcli
-      ;;
-    krb5-user)
-      printf '%s\n' kinit klist
+    nss-sss|pam-sss|pam-mkhomedir|oddjob-mkhomedir)
       ;;
     oddjob)
       printf '%s\n' oddjobd
       ;;
-    oddjob-mkhomedir)
-      printf '%s\n' oddjobd
-      ;;
-    samba-common-bin)
-      printf '%s\n' net
+    openssh-server)
+      printf '%s\n' sshd
       ;;
     *)
       printf '%s\n' "$1"
@@ -195,17 +214,27 @@ package_binaries() {
 manager_package_name() {
   local package="$1"
 
-  if [[ "$PACKAGE_MANAGER" == "apt" ]]; then
-    printf '%s\n' "$package"
-    return 0
-  fi
-
-  case "$package" in
-    krb5-user)
+  case "$PACKAGE_MANAGER:$package" in
+    apt:krb5)
+      printf '%s\n' krb5-user
+      ;;
+    apt:nss-sss)
+      printf '%s\n' libnss-sss
+      ;;
+    apt:pam-sss)
+      printf '%s\n' libpam-sss
+      ;;
+    apt:pam-mkhomedir)
+      printf '%s\n' libpam-mkhomedir
+      ;;
+    dnf:krb5|yum:krb5)
       printf '%s\n' krb5-workstation
       ;;
-    samba-common-bin)
-      printf '%s\n' samba-common-tools
+    dnf:nss-sss|yum:nss-sss|dnf:pam-sss|yum:pam-sss)
+      printf '%s\n' sssd-client
+      ;;
+    dnf:pam-mkhomedir|yum:pam-mkhomedir)
+      printf '%s\n' oddjob-mkhomedir
       ;;
     *)
       printf '%s\n' "$package"
