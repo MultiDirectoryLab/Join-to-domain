@@ -5,6 +5,8 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 INSTALL_PACKAGES_SCRIPT="${SCRIPT_DIR}/install_packages.sh"
 CONFIGURE_SCRIPT="${SCRIPT_DIR}/configure.sh"
 LOG_FILE="/var/log/join-to-domain.log"
+REJOIN_LOG_FILE="/var/log/multidirectory-rejoin.log"
+MD_JOIN_ENV="/etc/MultiDirectory/state/join.env"
 DEBUG=0
 DRY_RUN=0
 LOG_ENABLED=0
@@ -30,6 +32,14 @@ log() {
   if [[ "$LOG_ENABLED" -eq 1 ]]; then
     printf '[%s] %s\n' "$level" "$*" >> "$LOG_FILE" || true
   fi
+}
+
+rejoin_log() {
+  if touch "$REJOIN_LOG_FILE" 2>/dev/null; then
+    printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$REJOIN_LOG_FILE" || true
+  fi
+
+  log "REJOIN" "$*"
 }
 
 info() {
@@ -461,6 +471,165 @@ configure_domain() {
   return $?
 }
 
+domain_state_reason() {
+  if [[ -f "$MD_JOIN_ENV" ]]; then
+    printf 'MultiDirectory join state found: %s\n' "$MD_JOIN_ENV"
+    return 0
+  fi
+
+  if have_cmd realm && realm list 2>/dev/null | grep -q '^[^[:space:]]'; then
+    printf 'realm reports configured domain membership\n'
+    return 0
+  fi
+
+  if [[ -f /etc/sssd/sssd.conf ]] && grep -Eq '^\[domain/[^]]+\]' /etc/sssd/sssd.conf 2>/dev/null; then
+    printf 'SSSD domain configuration found: /etc/sssd/sssd.conf\n'
+    return 0
+  fi
+
+  return 1
+}
+
+is_domain_joined() {
+  domain_state_reason >/dev/null
+}
+
+confirm_rejoin_leave() {
+  local choice
+
+  cat <<EOF
+
+Machine is currently joined to a domain.
+Do you want to leave the domain before rejoining?
+
+1) Yes
+2) No
+EOF
+
+  while true; do
+    printf 'Select an option: '
+    IFS= read -r choice || choice=""
+
+    case "$choice" in
+      1)
+        return 0
+        ;;
+      2|"")
+        return 1
+        ;;
+      *)
+        warn "Invalid option. Please select 1 or 2."
+        ;;
+    esac
+  done
+}
+
+leave_domain_for_rejoin() {
+  if [[ "${EUID:-$(id -u)}" -ne 0 && "$DRY_RUN" -eq 0 ]]; then
+    error "Domain leave requires root. Run: sudo $0"
+    return 1
+  fi
+
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    if [[ -f "$MD_JOIN_ENV" ]]; then
+      info "Dry-run: MD_CALLED_FROM_INSTALL_PACKAGES=1 bash ${CONFIGURE_SCRIPT} leave"
+    elif have_cmd realm; then
+      info "Dry-run: realm leave"
+    else
+      warn "Dry-run: no safe leave backend detected"
+    fi
+    return 0
+  fi
+
+  if [[ -f "$MD_JOIN_ENV" ]]; then
+    rejoin_log "Leaving managed MultiDirectory domain using configure.sh leave"
+    MD_CALLED_FROM_INSTALL_PACKAGES=1 bash "$CONFIGURE_SCRIPT" leave
+    local code=$?
+    rejoin_log "configure.sh leave exit code: ${code}"
+    return "$code"
+  fi
+
+  if have_cmd realm && realm list 2>/dev/null | grep -q '^[^[:space:]]'; then
+    rejoin_log "Leaving domain using realm leave"
+    realm leave
+    local code=$?
+    rejoin_log "realm leave exit code: ${code}"
+
+    if [[ "$code" -eq 0 ]] && have_cmd systemctl; then
+      systemctl stop sssd.service 2>/dev/null || true
+      rejoin_log "sssd.service stopped after realm leave"
+    fi
+
+    return "$code"
+  fi
+
+  error "Domain-like SSSD configuration found, but no managed join state or realm backend is available."
+  warn "Rejoin aborted to avoid destroying existing SSSD configuration without a safe leave mechanism."
+  rejoin_log "Leave aborted: no safe leave backend"
+  return 1
+}
+
+ensure_dependencies_for_rejoin() {
+  if check_dependencies; then
+    rejoin_log "Dependency validation succeeded"
+    return 0
+  fi
+
+  rejoin_log "Dependencies are missing, running install step"
+  install_packages || return 1
+
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    rejoin_log "Dry-run mode: dependency recheck skipped after simulated install"
+    return 0
+  fi
+
+  check_dependencies
+}
+
+rejoin_domain() {
+  local reason
+
+  rejoin_log "Rejoin requested"
+
+  if ! need_script "$CONFIGURE_SCRIPT"; then
+    rejoin_log "configure.sh not found"
+    return 1
+  fi
+
+  if reason="$(domain_state_reason)"; then
+    warn "$reason"
+    rejoin_log "Domain detected: ${reason}"
+
+    if ! confirm_rejoin_leave; then
+      warn "Rejoin cancelled by user"
+      rejoin_log "Rejoin cancelled by user"
+      return 0
+    fi
+
+    if ! leave_domain_for_rejoin; then
+      error "Domain leave failed. Rejoin aborted."
+      rejoin_log "Leave failed, rejoin aborted"
+      return 1
+    fi
+
+    rejoin_log "Leave completed"
+  else
+    info "Machine is not joined to a domain. Starting normal join flow."
+    rejoin_log "No domain membership detected"
+  fi
+
+  ensure_dependencies_for_rejoin || {
+    error "Dependency validation failed. Rejoin aborted."
+    rejoin_log "Dependency validation failed after install attempt"
+    return 1
+  }
+
+  configure_domain
+  local code=$?
+  rejoin_log "configure_domain exit code: ${code}"
+  return "$code"
+}
+
 handle_missing_dependencies() {
   error "Dependency validation failed after installation."
   warn "Run 'Install required packages' from the main menu and check the installer log if this repeats."
@@ -485,7 +654,8 @@ show_menu() {
 ========================================
 1) Install required packages
 2) Configure domain join
-3) Exit
+3) Rejoin domain
+4) Exit
 EOF
 }
 
@@ -506,7 +676,11 @@ main_menu() {
         run_configure_flow
         pause
         ;;
-      3|q|Q|exit|quit)
+      3)
+        rejoin_domain
+        pause
+        ;;
+      4|q|Q|exit|quit)
         info "Exiting"
         exit 0
         ;;
@@ -514,7 +688,7 @@ main_menu() {
         warn "Empty input. Please select a menu item."
         ;;
       *)
-        warn "Invalid option. Please select 1, 2 or 3."
+        warn "Invalid option. Please select 1, 2, 3 or 4."
         ;;
     esac
   done

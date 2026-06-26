@@ -13,6 +13,8 @@ Menu options:
 
 1. Install required packages
 2. Configure domain join
+3. Rejoin domain
+4. Exit
 
 Optional flags:
 
