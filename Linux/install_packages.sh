@@ -796,6 +796,12 @@ remove_packages_rpm() {
 prompt_run_configure() {
   local choice
 
+  if [[ "${JOIN_TO_DOMAIN_SKIP_CONFIGURE_PROMPT:-0}" == "1" ]]; then
+    log "Configuration prompt skipped by join-to-domain.sh"
+    log "Run configuration later through: sudo ${SCRIPT_DIR}/join-to-domain.sh"
+    return 0
+  fi
+
   [[ -f "$CONFIGURE_SCRIPT" ]] || {
     warn "configure.sh not found: ${CONFIGURE_SCRIPT}"
     return 0

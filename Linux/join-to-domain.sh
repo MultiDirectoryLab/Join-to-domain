@@ -11,6 +11,9 @@ REQUIRED_PACKAGES=(
   samba-common-bin
 )
 
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+INSTALL_PACKAGES_SCRIPT="${SCRIPT_DIR}/install_packages.sh"
+CONFIGURE_SCRIPT="${SCRIPT_DIR}/configure.sh"
 LOG_FILE="/var/log/join-to-domain.log"
 DEBUG=0
 DRY_RUN=0
@@ -149,6 +152,17 @@ detect_package_manager() {
   return 0
 }
 
+need_script() {
+  local path="$1"
+
+  if [[ ! -f "$path" ]]; then
+    error "Required script not found: ${path}"
+    return 1
+  fi
+
+  return 0
+}
+
 package_binaries() {
   case "$1" in
     sssd)
@@ -242,6 +256,21 @@ install_packages() {
   fi
 
   log "INFO" "Install packages requested: ${packages[*]}"
+
+  if [[ "$#" -eq 0 && -f "$INSTALL_PACKAGES_SCRIPT" ]]; then
+    if ! need_root_for_install; then
+      return 1
+    fi
+
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+      info "Dry-run: JOIN_TO_DOMAIN_SKIP_CONFIGURE_PROMPT=1 bash ${INSTALL_PACKAGES_SCRIPT} join"
+      return 0
+    fi
+
+    info "Running package installer: ${INSTALL_PACKAGES_SCRIPT}"
+    JOIN_TO_DOMAIN_SKIP_CONFIGURE_PROMPT=1 bash "$INSTALL_PACKAGES_SCRIPT" join
+    return $?
+  fi
 
   if ! detect_package_manager; then
     return 1
@@ -376,11 +405,25 @@ check_dependencies() {
 
 configure_domain() {
   log "INFO" "Domain configuration requested"
-  info "Running domain configuration"
 
-  warn "configure_domain is a stub. Add domain join implementation here."
+  if ! need_script "$CONFIGURE_SCRIPT"; then
+    return 1
+  fi
 
-  return 0
+  if [[ "${EUID:-$(id -u)}" -ne 0 && "$DRY_RUN" -eq 0 ]]; then
+    error "Domain configuration requires root. Run: sudo $0"
+    return 1
+  fi
+
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    info "Dry-run: MD_CALLED_FROM_INSTALL_PACKAGES=1 bash ${CONFIGURE_SCRIPT} join"
+    return 0
+  fi
+
+  info "Running domain configuration: ${CONFIGURE_SCRIPT}"
+  MD_CALLED_FROM_INSTALL_PACKAGES=1 bash "$CONFIGURE_SCRIPT" join
+
+  return $?
 }
 
 handle_missing_dependencies() {
