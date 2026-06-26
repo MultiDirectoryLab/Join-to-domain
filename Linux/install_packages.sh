@@ -26,6 +26,50 @@ MD_JOIN_ENV="/etc/MultiDirectory/state/join.env"
 
 LOG_FILE="/var/log/multidirectory-install-packages.log"
 
+DEB_REQUIRED_PACKAGES=(
+  ca-certificates
+  curl
+  jq
+  file
+  sudo
+  krb5-user
+  sssd
+  sssd-tools
+  libnss-sss
+  libpam-sss
+  libpam-mkhomedir
+  oddjob
+  oddjob-mkhomedir
+  openssh-server
+)
+
+RPM_REQUIRED_PACKAGES=(
+  ca-certificates
+  curl
+  jq
+  file
+  sudo
+  krb5-workstation
+  sssd
+  sssd-tools
+  sssd-client
+  oddjob
+  oddjob-mkhomedir
+  openssh-server
+)
+
+RPM_APT_REQUIRED_PACKAGES=(
+  ca-certificates
+  curl
+  jq
+  file
+  sudo
+  krb5-workstation
+  sssd
+  sssd-tools
+  openssh-server
+)
+
 STATE_DIR="/var/lib/MultiDirectory/install"
 PKGS_BEFORE="${STATE_DIR}/packages-before.list"
 PKGS_AFTER="${STATE_DIR}/packages-after.list"
@@ -35,7 +79,7 @@ PACKAGES_TO_REMOVE="${STATE_DIR}/packages-to-remove.list"
 INSTALL_ENV="${STATE_DIR}/install.env"
 
 usage() {
-  echo "Usage: $0 {join|leave}"
+  echo "Usage: $0 {join|leave|list-required-packages}"
   exit 1
 }
 
@@ -110,7 +154,9 @@ detect_package_manager() {
     die "No supported package manager found: dnf/yum/apt-get"
   fi
 
-  log "Package manager: ${PM}"
+  if [[ "${LIST_REQUIRED_PACKAGES_MODE:-0}" != "1" ]]; then
+    log "Package manager: ${PM}"
+  fi
 }
 
 normalize_lf() {
@@ -616,21 +662,7 @@ install_deb_packages() {
 
   apt-get update
 
-  apt-get install -y \
-    ca-certificates \
-    curl \
-    jq \
-    file \
-    sudo \
-    krb5-user \
-    sssd \
-    sssd-tools \
-    libnss-sss \
-    libpam-sss \
-    libpam-mkhomedir \
-    oddjob \
-    oddjob-mkhomedir \
-    openssh-server
+  apt-get install -y "${DEB_REQUIRED_PACKAGES[@]}"
 
   install_local_deb_packages
 }
@@ -643,35 +675,33 @@ install_rpm_packages() {
   if [[ "${PM}" == "apt-get" ]]; then
     apt-get update || true
 
-    apt-get install -y \
-      ca-certificates \
-      curl \
-      jq \
-      file \
-      sudo \
-      krb5-workstation \
-      sssd \
-      sssd-tools \
-      openssh-server
+    apt-get install -y "${RPM_APT_REQUIRED_PACKAGES[@]}"
   else
-    "${PM}" install -y \
-      ca-certificates \
-      curl \
-      jq \
-      file \
-      sudo \
-      krb5-workstation \
-      sssd \
-      sssd-tools \
-      sssd-client \
-      oddjob \
-      oddjob-mkhomedir \
-      openssh-server
+    "${PM}" install -y "${RPM_REQUIRED_PACKAGES[@]}"
 
     "${PM}" install -y authselect || warn "Optional package authselect was not installed"
   fi
 
   install_local_rpm_packages
+}
+
+list_required_packages() {
+  LIST_REQUIRED_PACKAGES_MODE=1
+
+  load_os_release
+  detect_package_manager
+
+  if is_deb_based; then
+    printf '%s\n' "${DEB_REQUIRED_PACKAGES[@]}"
+  elif is_rpm_based; then
+    if [[ "${PM}" == "apt-get" ]]; then
+      printf '%s\n' "${RPM_APT_REQUIRED_PACKAGES[@]}"
+    else
+      printf '%s\n' "${RPM_REQUIRED_PACKAGES[@]}"
+    fi
+  else
+    die "Unsupported OS: ${OS_NAME}"
+  fi
 }
 
 is_removable_domain_package() {
@@ -926,12 +956,17 @@ preflight() {
 
 main() {
   case "${1:-}" in
-    join|leave)
+    join|leave|list-required-packages)
       ;;
     *)
       usage
       ;;
   esac
+
+  if [[ "$1" == "list-required-packages" ]]; then
+    list_required_packages
+    exit 0
+  fi
 
   preflight
 

@@ -1,25 +1,6 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-# Must mirror packages installed by install_packages.sh.
-# Do not add packages here unless install_packages.sh installs them too.
-REQUIRED_PACKAGES=(
-  ca-certificates
-  curl
-  jq
-  file
-  sudo
-  krb5
-  sssd
-  sssd-tools
-  nss-sss
-  pam-sss
-  pam-mkhomedir
-  oddjob
-  oddjob-mkhomedir
-  openssh-server
-)
-
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 INSTALL_PACKAGES_SCRIPT="${SCRIPT_DIR}/install_packages.sh"
 CONFIGURE_SCRIPT="${SCRIPT_DIR}/configure.sh"
@@ -28,6 +9,12 @@ DEBUG=0
 DRY_RUN=0
 LOG_ENABLED=0
 PACKAGE_MANAGER=""
+PACKAGE_DB=""
+INSTALL_PROFILE=""
+OS_ID=""
+OS_LIKE=""
+OS_NAME=""
+REQUIRED_PACKAGES=()
 MISSING_PACKAGES=()
 MISSING_BINARIES=()
 
@@ -144,20 +131,77 @@ have_cmd() {
   command -v "$1" >/dev/null 2>&1
 }
 
+load_os_release() {
+  if [[ -r /etc/os-release ]]; then
+    # shellcheck disable=SC1091
+    . /etc/os-release
+  fi
+
+  OS_ID="${ID:-}"
+  OS_LIKE="${ID_LIKE:-}"
+  OS_NAME="${PRETTY_NAME:-${OS_ID:-unknown}}"
+}
+
+is_deb_based() {
+  [[ "${OS_ID}" =~ ^(debian|ubuntu|astra)$ ]] || [[ "${OS_LIKE}" =~ debian ]]
+}
+
+is_rpm_based() {
+  [[ "${OS_ID}" =~ ^(rhel|centos|rocky|almalinux|fedora|redos|altlinux)$ ]] || [[ "${OS_LIKE}" =~ (rhel|fedora|sisyphus|altlinux) ]]
+}
+
+is_altlinux() {
+  [[ "${OS_ID}" == "altlinux" ]] || [[ "${OS_LIKE}" =~ (altlinux|sisyphus) ]]
+}
+
 detect_package_manager() {
-  if have_cmd apt-get; then
-    PACKAGE_MANAGER="apt"
+  load_os_release
+
+  if is_altlinux && have_cmd apt-get; then
+    PACKAGE_MANAGER="apt-get"
+    PACKAGE_DB="rpm"
+    INSTALL_PROFILE="rpm-apt"
   elif have_cmd dnf; then
     PACKAGE_MANAGER="dnf"
+    PACKAGE_DB="rpm"
+    INSTALL_PROFILE="rpm"
   elif have_cmd yum; then
     PACKAGE_MANAGER="yum"
+    PACKAGE_DB="rpm"
+    INSTALL_PROFILE="rpm"
+  elif have_cmd apt-get; then
+    PACKAGE_MANAGER="apt"
+    PACKAGE_DB="deb"
+    INSTALL_PROFILE="deb"
   else
     PACKAGE_MANAGER=""
-    error "No supported package manager found: apt, dnf or yum"
+    PACKAGE_DB=""
+    INSTALL_PROFILE=""
+    error "No supported package manager found: apt-get, dnf or yum"
     return 1
   fi
 
+  debug "Detected OS: ${OS_NAME}"
   debug "Detected package manager: ${PACKAGE_MANAGER}"
+  debug "Detected package database: ${PACKAGE_DB}"
+  return 0
+}
+
+load_required_packages() {
+  REQUIRED_PACKAGES=()
+
+  if ! need_script "$INSTALL_PACKAGES_SCRIPT"; then
+    return 1
+  fi
+
+  mapfile -t REQUIRED_PACKAGES < <(bash "$INSTALL_PACKAGES_SCRIPT" list-required-packages)
+
+  if [[ "${#REQUIRED_PACKAGES[@]}" -eq 0 ]]; then
+    error "Installer returned an empty dependency list"
+    return 1
+  fi
+
+  debug "Required packages: ${REQUIRED_PACKAGES[*]}"
   return 0
 }
 
@@ -174,7 +218,7 @@ need_script() {
 
 package_binaries() {
   case "$1" in
-    ca-certificates)
+    ca-certificates|libnss-sss|libpam-sss|libpam-mkhomedir|sssd-client|oddjob-mkhomedir)
       ;;
     curl)
       printf '%s\n' curl
@@ -188,7 +232,7 @@ package_binaries() {
     sudo)
       printf '%s\n' sudo
       ;;
-    krb5)
+    krb5-user|krb5-workstation)
       printf '%s\n' kinit klist
       ;;
     sssd)
@@ -196,8 +240,6 @@ package_binaries() {
       ;;
     sssd-tools)
       printf '%s\n' sss_obfuscate
-      ;;
-    nss-sss|pam-sss|pam-mkhomedir|oddjob-mkhomedir)
       ;;
     oddjob)
       printf '%s\n' oddjobd
@@ -211,49 +253,15 @@ package_binaries() {
   esac
 }
 
-manager_package_name() {
-  local package="$1"
-
-  case "$PACKAGE_MANAGER:$package" in
-    apt:krb5)
-      printf '%s\n' krb5-user
-      ;;
-    apt:nss-sss)
-      printf '%s\n' libnss-sss
-      ;;
-    apt:pam-sss)
-      printf '%s\n' libpam-sss
-      ;;
-    apt:pam-mkhomedir)
-      printf '%s\n' libpam-mkhomedir
-      ;;
-    dnf:krb5|yum:krb5)
-      printf '%s\n' krb5-workstation
-      ;;
-    dnf:nss-sss|yum:nss-sss|dnf:pam-sss|yum:pam-sss)
-      printf '%s\n' sssd-client
-      ;;
-    dnf:pam-mkhomedir|yum:pam-mkhomedir)
-      printf '%s\n' oddjob-mkhomedir
-      ;;
-    *)
-      printf '%s\n' "$package"
-      ;;
-  esac
-}
-
 is_package_installed() {
   local package="$1"
-  local manager_package
 
-  manager_package="$(manager_package_name "$package")"
-
-  case "$PACKAGE_MANAGER" in
-    apt)
-      dpkg-query -W -f='${Status}' "$manager_package" 2>/dev/null | grep -q "install ok installed"
+  case "$PACKAGE_DB" in
+    deb)
+      dpkg-query -W -f='${Status}' "$package" 2>/dev/null | grep -q "install ok installed"
       ;;
-    dnf|yum)
-      rpm -q "$manager_package" >/dev/null 2>&1
+    rpm)
+      rpm -q "$package" >/dev/null 2>&1
       ;;
     *)
       return 1
@@ -275,18 +283,15 @@ verify_package_installation() {
 
 install_packages() {
   local packages=()
-  local manager_packages=()
   local package failed=0
 
   if [[ "$#" -gt 0 ]]; then
     packages=("$@")
-  else
-    packages=("${REQUIRED_PACKAGES[@]}")
   fi
 
-  log "INFO" "Install packages requested: ${packages[*]}"
+  log "INFO" "Install packages requested"
 
-  if [[ "$#" -eq 0 && -f "$INSTALL_PACKAGES_SCRIPT" ]]; then
+  if [[ -f "$INSTALL_PACKAGES_SCRIPT" ]]; then
     if ! need_root_for_install; then
       return 1
     fi
@@ -305,6 +310,12 @@ install_packages() {
     return 1
   fi
 
+  load_required_packages || return 1
+
+  if [[ "$#" -eq 0 ]]; then
+    packages=("${REQUIRED_PACKAGES[@]}")
+  fi
+
   if ! need_root_for_install; then
     return 1
   fi
@@ -314,15 +325,11 @@ install_packages() {
     return 0
   fi
 
-  for package in "${packages[@]}"; do
-    manager_packages+=("$(manager_package_name "$package")")
-  done
-
   case "$PACKAGE_MANAGER" in
-    apt)
+    apt|apt-get)
       if [[ "$DRY_RUN" -eq 1 ]]; then
         info "Dry-run: apt-get update"
-        info "Dry-run: apt-get install -y ${manager_packages[*]}"
+        info "Dry-run: apt-get install -y ${packages[*]}"
       else
         info "Updating package index"
         if ! apt-get update; then
@@ -331,7 +338,7 @@ install_packages() {
         fi
 
         info "Installing required packages"
-        if ! apt-get install -y "${manager_packages[@]}"; then
+        if ! apt-get install -y "${packages[@]}"; then
           error "apt-get install failed"
           return 1
         fi
@@ -339,10 +346,10 @@ install_packages() {
       ;;
     dnf|yum)
       if [[ "$DRY_RUN" -eq 1 ]]; then
-        info "Dry-run: ${PACKAGE_MANAGER} install -y ${manager_packages[*]}"
+        info "Dry-run: ${PACKAGE_MANAGER} install -y ${packages[*]}"
       else
         info "Installing required packages"
-        if ! "$PACKAGE_MANAGER" install -y "${manager_packages[@]}"; then
+        if ! "$PACKAGE_MANAGER" install -y "${packages[@]}"; then
           error "${PACKAGE_MANAGER} install failed"
           return 1
         fi
@@ -377,15 +384,11 @@ check_dependencies() {
   log "INFO" "Dependency check started"
 
   if ! detect_package_manager; then
-    MISSING_PACKAGES=("${REQUIRED_PACKAGES[@]}")
     error "Missing required dependencies"
-    printf '\nMissing packages:\n'
-    for package in "${MISSING_PACKAGES[@]}"; do
-      printf '  - %s\n' "$package"
-    done
-
     return 1
   fi
+
+  load_required_packages || return 1
 
   for package in "${REQUIRED_PACKAGES[@]}"; do
     package_missing=0
