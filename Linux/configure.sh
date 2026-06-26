@@ -757,19 +757,78 @@ api_principal_add() {
     -w '%{http_code}' 2>/dev/null
 }
 
+ensure_kerberos_principal() {
+  local cookie="$1"
+  local spn="$2"
+  local http_code body detail
+
+  log "Ensuring Kerberos principal exists: ${spn}@${REALM}"
+  log "Principal API endpoint: https://${API_HOST}/api/kerberos/principal/add"
+
+  http_code="$(api_principal_add "${cookie}" "${spn}")" || http_code="000"
+  body="$(cat /tmp/md-principal-add.body 2>/dev/null || true)"
+
+  if [[ "$http_code" =~ ^2[0-9][0-9]$ ]]; then
+    log "Kerberos principal is ready: ${spn}@${REALM}"
+    return 0
+  fi
+
+  if [[ "$http_code" == "409" ]] || printf '%s' "$body" | grep -Eiq 'already|exist|duplicate'; then
+    warn "Kerberos principal already exists: ${spn}@${REALM}"
+    return 0
+  fi
+
+  detail="$(
+    printf '%s' "$body" | jq -r '
+      if type == "object" then
+        (.detail // .message // .error // empty)
+      else
+        empty
+      end
+    ' 2>/dev/null || true
+  )"
+  [[ -n "$detail" ]] || detail="$body"
+
+  die "[ERROR] Kerberos principal not found and could not be created: ${spn}@${REALM}. HTTP ${http_code}: ${detail}"
+}
+
+ensure_keytab_principals() {
+  local cookie="$1"
+  shift
+  local spn
+
+  log "Preparing Kerberos principals for keytab"
+  log "Keytab request context: hostname=${HOSTNAME}, fqdn=${FQDN}, realm=${REALM}, computer_dn=cn=${HOSTNAME},${LDAP_COMPUTER_OU}"
+
+  for spn in "$@"; do
+    ensure_kerberos_principal "${cookie}" "${spn}"
+  done
+}
+
+response_content_type() {
+  local headers="$1"
+
+  awk -F': *' '
+    BEGIN { IGNORECASE=1 }
+    /^content-type:/ {
+      gsub(/\r$/, "", $2)
+      value=$2
+    }
+    END { print value }
+  ' "$headers" 2>/dev/null || true
+}
+
 api_ktadd_download() {
   local cookie="$1"
   shift
-  local spn body sep
+  local spn body sep http_code content_type detail
 
   rm -f /tmp/md-ktadd.hdr /tmp/md-ktadd.body /etc/krb5.keytab
 
   if [[ "${EDITION}" == "community" ]]; then
-    log "Community: registering principals"
     body="["
     sep=""
     for spn in "$@"; do
-      log "${spn}: HTTP $(api_principal_add "${cookie}" "${spn}")"
       body="${body}${sep}\"${spn}@${REALM}\""
       sep=","
     done
@@ -784,16 +843,48 @@ api_ktadd_download() {
     body="${body}],\"is_rand_key\":true}"
   fi
 
-  curl -k -sS --fail-with-body \
-    --connect-timeout "${API_CONNECT_TIMEOUT}" \
-    --max-time "${API_MAX_TIME}" \
-    -D /tmp/md-ktadd.hdr \
-    -o /tmp/md-ktadd.body \
-    -X POST "https://${API_HOST}/api/kerberos/ktadd" \
-    -H "accept: application/octet-stream" \
-    -H "Content-Type: application/json" \
-    -H "Cookie: id=${cookie}" \
-    -d "${body}" || true
+  log "Keytab API endpoint: https://${API_HOST}/api/kerberos/ktadd"
+  log "Keytab principals: $*"
+
+  http_code="$(
+    curl -k -sS \
+      --connect-timeout "${API_CONNECT_TIMEOUT}" \
+      --max-time "${API_MAX_TIME}" \
+      -D /tmp/md-ktadd.hdr \
+      -o /tmp/md-ktadd.body \
+      -X POST "https://${API_HOST}/api/kerberos/ktadd" \
+      -H "accept: application/octet-stream" \
+      -H "Content-Type: application/json" \
+      -H "Cookie: id=${cookie}" \
+      -d "${body}" \
+      -w '%{http_code}' 2>/dev/null
+  )" || http_code="000"
+
+  content_type="$(response_content_type /tmp/md-ktadd.hdr)"
+  log "Keytab API response: HTTP ${http_code}, content-type=${content_type:-unknown}"
+
+  if [[ ! "$http_code" =~ ^2[0-9][0-9]$ ]]; then
+    detail="$(
+      jq -r '
+        if type == "object" then
+          (.detail // .message // .error // tostring)
+        else
+          tostring
+        end
+      ' /tmp/md-ktadd.body 2>/dev/null || head -n 20 /tmp/md-ktadd.body 2>/dev/null || true
+    )"
+    die "Keytab retrieval failed. HTTP ${http_code}: ${detail}"
+  fi
+
+  if printf '%s' "$content_type" | grep -Eiq 'json|text|html'; then
+    warn "API returned non-binary keytab:"
+    head -n 60 /tmp/md-ktadd.body || true
+    die "keytab was not received as a binary file"
+  fi
+
+  if [[ ! -s /tmp/md-ktadd.body ]]; then
+    die "keytab was not received: empty API response body"
+  fi
 
   if file /tmp/md-ktadd.body 2>/dev/null | grep -Ei 'json|text|html' >/dev/null; then
     warn "API returned non-binary keytab:"
@@ -1252,7 +1343,7 @@ require_keytab_principal() {
   local principal="$1"
 
   if ! klist -k /etc/krb5.keytab | awk '{print $NF}' | grep -Fx "${principal}" >/dev/null; then
-    die "[ERROR] Missing ldap service principal in keytab: ${principal}"
+    die "[ERROR] Missing Kerberos principal in keytab: ${principal}"
   fi
 }
 
@@ -1261,6 +1352,7 @@ validate_keytab() {
 
   klist -k /etc/krb5.keytab || die "Invalid keytab"
 
+  require_keytab_principal "host/${FQDN}@${REALM}"
   require_keytab_principal "ldap/${FQDN}@${REALM}"
   require_keytab_principal "ldap/${DOMAIN}@${REALM}"
 
@@ -1270,13 +1362,7 @@ validate_keytab() {
     return 0
   fi
 
-  if kinit -k "host/${HOSTNAME}@${REALM}"; then
-    log "Kerberos authentication succeeded: host/${HOSTNAME}@${REALM}"
-    kdestroy || true
-    return 0
-  fi
-
-  die "Kerberos keytab authentication failed"
+  die "Kerberos keytab authentication failed: host/${FQDN}@${REALM}"
 }
 
 ldap_uri_host() {
@@ -1876,10 +1962,15 @@ join_domain() {
 
   create_computer_object_if_needed
 
+  ensure_keytab_principals \
+    "${access_token}" \
+    "host/${FQDN}" \
+    "ldap/${DOMAIN}" \
+    "ldap/${FQDN}"
+
   log "Getting keytab"
   api_ktadd_download \
     "${access_token}" \
-    "host/${HOSTNAME}" \
     "host/${FQDN}" \
     "ldap/${DOMAIN}" \
     "ldap/${FQDN}"
