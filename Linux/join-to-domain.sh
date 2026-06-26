@@ -27,6 +27,7 @@ MISSING_PACKAGES=()
 MISSING_BINARIES=()
 DETECTED_DOMAIN_STATE=""
 DETECTED_DOMAIN_REASONS=()
+PAM_SAFETY_OK=0
 
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -511,45 +512,110 @@ krb5_conf_looks_domain_managed() {
     grep -Eq '^[[:space:]]*admin_server[[:space:]]*=' /etc/krb5.conf 2>/dev/null
 }
 
-detect_domain_config_state() {
-  DETECTED_DOMAIN_STATE="clean"
+sssd_conf_has_domain_block() {
+  [[ -f /etc/sssd/sssd.conf ]] || return 1
+  grep -Eq '^\[domain/[^]]+\]|MultiDirectory|Source template: .*domain' /etc/sssd/sssd.conf 2>/dev/null
+}
+
+detect_domain_state() {
+  local managed=0 partial=0 unmanaged_sssd=0
+
+  DETECTED_DOMAIN_STATE="not_joined"
   DETECTED_DOMAIN_REASONS=()
 
-  [[ -f "$MD_JOIN_ENV" ]] && add_domain_state_reason "MultiDirectory join state found: ${MD_JOIN_ENV}"
-  [[ -f "$MD_MANIFEST" ]] && add_domain_state_reason "MultiDirectory manifest found: ${MD_MANIFEST}"
-  [[ -f "${MD_STATE_DIR}/rollback-in-progress" ]] && add_domain_state_reason "MultiDirectory rollback marker found: ${MD_STATE_DIR}/rollback-in-progress"
+  if [[ -f "$MD_JOIN_ENV" ]]; then
+    managed=1
+    add_domain_state_reason "MultiDirectory join state found: ${MD_JOIN_ENV}"
+  fi
+
+  if [[ -f "$MD_MANIFEST" ]]; then
+    managed=1
+    add_domain_state_reason "MultiDirectory manifest found: ${MD_MANIFEST}"
+  fi
+
+  if [[ -f "${MD_STATE_DIR}/rollback-in-progress" ]]; then
+    partial=1
+    add_domain_state_reason "MultiDirectory rollback marker found: ${MD_STATE_DIR}/rollback-in-progress"
+  fi
 
   if have_cmd realm && realm list 2>/dev/null | grep -q '^[^[:space:]]'; then
+    partial=1
     add_domain_state_reason "realm reports configured domain membership"
   fi
 
-  [[ -f /etc/sssd/sssd.conf ]] && add_domain_state_reason "SSSD configuration found: /etc/sssd/sssd.conf"
-  directory_has_entries /etc/sssd/conf.d && add_domain_state_reason "SSSD snippets found: /etc/sssd/conf.d"
-  [[ -f /etc/krb5.keytab ]] && add_domain_state_reason "Kerberos keytab found: /etc/krb5.keytab"
-  krb5_conf_looks_domain_managed && add_domain_state_reason "Kerberos configuration found: /etc/krb5.conf"
-  [[ -f /etc/sudoers.d/domain-admins ]] && add_domain_state_reason "Domain sudoers file found: /etc/sudoers.d/domain-admins"
-  [[ -f /etc/ssh/sshd_config.d/ssh_md.conf ]] && add_domain_state_reason "Domain SSH configuration found: /etc/ssh/sshd_config.d/ssh_md.conf"
-  [[ -f /etc/systemd/resolved.conf.d/MultiDirectory.conf ]] && add_domain_state_reason "MultiDirectory DNS configuration found: /etc/systemd/resolved.conf.d/MultiDirectory.conf"
-  [[ -f /etc/salt/minion.append ]] && add_domain_state_reason "Salt minion append file found: /etc/salt/minion.append"
-  [[ -f /etc/salt/minion_id ]] && add_domain_state_reason "Salt minion id found: /etc/salt/minion_id"
-  [[ -f "$SALT_PKG_MODULE_DST" ]] && add_domain_state_reason "Salt pkg module override found: ${SALT_PKG_MODULE_DST}"
+  if sssd_conf_has_domain_block; then
+    if [[ "$managed" -eq 1 ]]; then
+      add_domain_state_reason "Managed SSSD domain configuration found: /etc/sssd/sssd.conf"
+    else
+      unmanaged_sssd=1
+      add_domain_state_reason "Unmanaged SSSD domain configuration found: /etc/sssd/sssd.conf"
+    fi
+  fi
 
-  if [[ "${#DETECTED_DOMAIN_REASONS[@]}" -gt 0 ]]; then
-    DETECTED_DOMAIN_STATE="configured"
+  if directory_has_entries /etc/sssd/conf.d; then
+    partial=1
+    add_domain_state_reason "SSSD snippets found: /etc/sssd/conf.d"
+  fi
+
+  if [[ -f /etc/krb5.keytab ]]; then
+    partial=1
+    add_domain_state_reason "Kerberos keytab found: /etc/krb5.keytab"
+  fi
+
+  krb5_conf_looks_domain_managed && add_domain_state_reason "Kerberos configuration found: /etc/krb5.conf"
+
+  if [[ -f /etc/sudoers.d/domain-admins ]]; then
+    partial=1
+    add_domain_state_reason "Domain sudoers file found: /etc/sudoers.d/domain-admins"
+  fi
+
+  if [[ -f /etc/systemd/resolved.conf.d/MultiDirectory.conf ]]; then
+    partial=1
+    add_domain_state_reason "MultiDirectory DNS configuration found: /etc/systemd/resolved.conf.d/MultiDirectory.conf"
+  fi
+
+  if [[ -f /etc/ssh/sshd_config.d/ssh_md.conf ]]; then
+    partial=1
+    add_domain_state_reason "Domain SSH configuration found: /etc/ssh/sshd_config.d/ssh_md.conf"
+  fi
+
+  if [[ -f /etc/salt/minion.append ]]; then
+    partial=1
+    add_domain_state_reason "Salt minion append file found: /etc/salt/minion.append"
+  fi
+
+  [[ -f /etc/salt/minion_id ]] && add_domain_state_reason "Salt minion id found: /etc/salt/minion_id"
+
+  if [[ -f "$SALT_PKG_MODULE_DST" ]]; then
+    partial=1
+    add_domain_state_reason "Salt pkg module override found: ${SALT_PKG_MODULE_DST}"
+  fi
+
+  if [[ "$managed" -eq 1 ]]; then
+    DETECTED_DOMAIN_STATE="managed_join"
+  elif [[ "$partial" -eq 1 ]]; then
+    DETECTED_DOMAIN_STATE="partial_join"
+  elif [[ "$unmanaged_sssd" -eq 1 ]]; then
+    DETECTED_DOMAIN_STATE="unmanaged_sssd"
   fi
 
   return 0
 }
 
-confirm_clean_rejoin_cleanup() {
+detect_domain_config_state() {
+  detect_domain_state
+}
+
+confirm_safe_leave() {
   local choice
 
   cat <<EOF
 
 Domain-related configuration was found.
-This will remove MultiDirectory domain configuration and restore previous system files.
+This will perform a safe MultiDirectory leave.
+PAM, NSS, SSH, hostname and hosts files will be kept unless a change passes safety checks.
 
-1) Continue cleanup
+1) Continue safe leave
 2) Cancel and return to main menu
 EOF
 
@@ -605,47 +671,6 @@ safe_remove_path() {
   return 1
 }
 
-backup_exists_for_path() {
-  local path="$1"
-  local safe
-
-  safe="$(printf '%s' "$path" | sed 's#/#__#g')"
-  [[ -e "${MD_BACKUP_DIR}/${safe}" || -L "${MD_BACKUP_DIR}/${safe}" ]]
-}
-
-restore_backup_for_path() {
-  local path="$1"
-  local safe backup
-
-  safe="$(printf '%s' "$path" | sed 's#/#__#g')"
-  backup="${MD_BACKUP_DIR}/${safe}"
-
-  if [[ ! -e "$backup" && ! -L "$backup" ]]; then
-    warn "No backup found for: ${path}"
-    cleanup_log "Backup not found: ${path}"
-    return 0
-  fi
-
-  if [[ "$DRY_RUN" -eq 1 ]]; then
-    info "Dry-run: restore ${path} from ${backup}"
-    cleanup_log "Dry-run restore: ${path}"
-    return 0
-  fi
-
-  rm -rf -- "$path"
-  mkdir -p "$(dirname "$path")"
-
-  if cp -a "$backup" "$path"; then
-    info "Restored: ${path}"
-    cleanup_log "Restored: ${path}"
-    return 0
-  fi
-
-  error "Failed to restore: ${path}"
-  cleanup_log "Failed to restore: ${path}"
-  return 1
-}
-
 stop_domain_services_for_cleanup() {
   local service
 
@@ -670,83 +695,28 @@ stop_domain_services_for_cleanup() {
   done
 }
 
-remove_managed_files_from_manifest() {
-  local path
-
-  if [[ ! -f "$MD_MANIFEST" ]]; then
-    warn "Manifest not found, skipping manifest cleanup: ${MD_MANIFEST}"
-    cleanup_log "Manifest not found: ${MD_MANIFEST}"
-    return 0
-  fi
-
-  while IFS= read -r path; do
-    [[ -n "$path" ]] || continue
-    [[ "$path" == "$MD_MANIFEST" ]] && continue
-    safe_remove_path "$path" || return 1
-  done < "$MD_MANIFEST"
-}
-
-restore_original_configs() {
+cleanup_domain_runtime_state() {
   local path failed=0
-  local restore_paths=(
-    /etc/krb5.conf
-    /etc/nsswitch.conf
-    /etc/hostname
-    /etc/hosts
-    /etc/pam.d/common-auth
-    /etc/pam.d/common-account
-    /etc/pam.d/common-session
-    /etc/pam.d/common-password
-    /etc/pam.d/system-auth
-    /etc/pam.d/su
-    /etc/pam.d/sshd
-    /etc/pam.d/gdm-password
-    /etc/pam.d/login
-    /etc/pam.d/common-login
-    /etc/sssd/conf.d
-    /etc/salt/minion
-  )
-
-  for path in "${restore_paths[@]}"; do
-    restore_backup_for_path "$path" || failed=1
-  done
-
-  return "$failed"
-}
-
-remove_domain_generated_files() {
-  local path failed=0
-  local generated_paths=(
-    /etc/sssd/sssd.conf
+  local domain_paths=(
     /etc/krb5.keytab
     /etc/sudoers.d/domain-admins
-    /etc/ssh/sshd_config.d/ssh_md.conf
     /etc/systemd/resolved.conf.d/MultiDirectory.conf
     /etc/salt/minion.append
-    /etc/salt/minion_id
     "$MD_JOIN_ENV"
     "${MD_STATE_DIR}/rollback-in-progress"
     "$MD_MANIFEST"
     "$SALT_PKG_MODULE_DST"
   )
 
-  remove_managed_files_from_manifest || failed=1
-
-  for path in "${generated_paths[@]}"; do
-    if backup_exists_for_path "$path"; then
-      restore_backup_for_path "$path" || failed=1
-    else
-      safe_remove_path "$path" || failed=1
-    fi
+  for path in "${domain_paths[@]}"; do
+    safe_remove_path "$path" || failed=1
   done
 
   return "$failed"
 }
 
-clear_sssd_cache() {
+cleanup_sssd_cache() {
   local cache_dir
-
-  stop_domain_services_for_cleanup
 
   for cache_dir in /var/lib/sss/db /var/lib/sss/mc; do
     [[ -d "$cache_dir" ]] || {
@@ -763,6 +733,159 @@ clear_sssd_cache() {
     rm -rf -- "${cache_dir:?}/"* 2>/dev/null || true
     cleanup_log "Cleared SSSD cache: ${cache_dir}"
   done
+}
+
+validate_pam_safety() {
+  local failed=0
+
+  PAM_SAFETY_OK=0
+
+  if [[ -f /etc/pam.d/common-auth ]] && ! grep -Eq '^[^#]*pam_unix\.so' /etc/pam.d/common-auth 2>/dev/null; then
+    error "PAM safety check failed: /etc/pam.d/common-auth lacks pam_unix.so"
+    cleanup_log "PAM validation failed: common-auth lacks pam_unix.so"
+    failed=1
+  fi
+
+  if [[ -f /etc/pam.d/common-account ]] && ! grep -Eq '^[^#]*(pam_unix\.so|pam_localuser\.so|pam_permit\.so)' /etc/pam.d/common-account 2>/dev/null; then
+    error "PAM safety check failed: /etc/pam.d/common-account lacks a local account path"
+    cleanup_log "PAM validation failed: common-account lacks local account path"
+    failed=1
+  fi
+
+  if [[ -f /etc/pam.d/common-session ]] && ! grep -Eq '^[^#]*(pam_unix\.so|pam_systemd\.so|pam_permit\.so)' /etc/pam.d/common-session 2>/dev/null; then
+    error "PAM safety check failed: /etc/pam.d/common-session has no recognizable local session path"
+    cleanup_log "PAM validation failed: common-session lacks local session path"
+    failed=1
+  fi
+
+  if [[ -f /etc/pam.d/common-password ]] && ! grep -Eq '^[^#]*pam_unix\.so' /etc/pam.d/common-password 2>/dev/null; then
+    error "PAM safety check failed: /etc/pam.d/common-password lacks pam_unix.so"
+    cleanup_log "PAM validation failed: common-password lacks pam_unix.so"
+    failed=1
+  fi
+
+  if [[ -f /etc/pam.d/system-auth ]] && ! grep -Eq '^[^#]*pam_unix\.so' /etc/pam.d/system-auth 2>/dev/null; then
+    error "PAM safety check failed: /etc/pam.d/system-auth lacks pam_unix.so"
+    cleanup_log "PAM validation failed: system-auth lacks pam_unix.so"
+    failed=1
+  fi
+
+  if [[ "$failed" -eq 0 ]]; then
+    PAM_SAFETY_OK=1
+    cleanup_log "PAM validation result: safe"
+    return 0
+  fi
+
+  cleanup_log "PAM validation result: unsafe"
+  return 1
+}
+
+timestamped_backup_path() {
+  local path="$1"
+  printf '%s.disabled.%s' "$path" "$(date '+%Y%m%d%H%M%S')"
+}
+
+cleanup_sssd_domain_state() {
+  local backup
+
+  if [[ ! -f /etc/sssd/sssd.conf ]]; then
+    cleanup_log "SSSD cleanup result: /etc/sssd/sssd.conf absent"
+    return 0
+  fi
+
+  if ! sssd_conf_has_domain_block; then
+    cleanup_log "SSSD cleanup result: existing config kept, no MultiDirectory domain block detected"
+    return 0
+  fi
+
+  if [[ "$DETECTED_DOMAIN_STATE" == "unmanaged_sssd" ]]; then
+    warn "Unmanaged SSSD domain config was found; keeping /etc/sssd/sssd.conf unchanged"
+    cleanup_log "SSSD cleanup result: unmanaged config kept"
+    return 0
+  fi
+
+  if [[ "$PAM_SAFETY_OK" -ne 1 ]]; then
+    warn "Keeping /etc/sssd/sssd.conf because PAM safety validation failed"
+    cleanup_log "SSSD cleanup result: config kept because PAM is unsafe without SSSD"
+    return 0
+  fi
+
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    info "Dry-run: move /etc/sssd/sssd.conf to timestamped backup"
+    cleanup_log "Dry-run SSSD cleanup: would move /etc/sssd/sssd.conf"
+    return 0
+  fi
+
+  backup="$(timestamped_backup_path /etc/sssd/sssd.conf)"
+  if mv /etc/sssd/sssd.conf "$backup"; then
+    cleanup_log "SSSD cleanup result: moved /etc/sssd/sssd.conf to ${backup}"
+    return 0
+  fi
+
+  error "Failed to move /etc/sssd/sssd.conf to backup"
+  cleanup_log "SSSD cleanup result: failed to move /etc/sssd/sssd.conf"
+  return 1
+}
+
+validate_ssh_safety() {
+  if ! have_cmd sshd; then
+    cleanup_log "SSH validation result: sshd not found, skipped"
+    return 0
+  fi
+
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    info "Dry-run: sshd -t"
+    cleanup_log "Dry-run SSH validation: sshd -t"
+    return 0
+  fi
+
+  if sshd -t; then
+    cleanup_log "SSH validation result: safe"
+    return 0
+  fi
+
+  error "SSH safety check failed: sshd -t reported an invalid configuration"
+  cleanup_log "SSH validation result: failed"
+  return 1
+}
+
+cleanup_ssh_domain_state() {
+  local ssh_md=/etc/ssh/sshd_config.d/ssh_md.conf
+  local backup
+
+  [[ -e "$ssh_md" || -L "$ssh_md" ]] || {
+    cleanup_log "SSH cleanup result: domain SSH snippet absent"
+    return 0
+  }
+
+  validate_ssh_safety || {
+    warn "Keeping domain SSH snippet because current SSH configuration is invalid"
+    cleanup_log "SSH cleanup result: kept before-change invalid config"
+    return 0
+  }
+
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    info "Dry-run: remove ${ssh_md} after sshd validation"
+    cleanup_log "Dry-run SSH cleanup: remove ${ssh_md}"
+    return 0
+  fi
+
+  backup="$(timestamped_backup_path "$ssh_md")"
+  if ! mv "$ssh_md" "$backup"; then
+    error "Failed to move ${ssh_md} to backup"
+    cleanup_log "SSH cleanup result: failed to move ${ssh_md}"
+    return 1
+  fi
+
+  if validate_ssh_safety; then
+    cleanup_log "SSH cleanup result: moved ${ssh_md} to ${backup}"
+    return 0
+  fi
+
+  mv "$backup" "$ssh_md" 2>/dev/null || true
+  error "SSH config failed after removing domain snippet; restored ${ssh_md}"
+  cleanup_log "SSH cleanup result: restored ${ssh_md} after validation failure"
+  return 1
 }
 
 cleanup_empty_domain_dirs() {
@@ -796,40 +919,49 @@ reload_services_after_cleanup() {
 
   systemctl daemon-reload 2>/dev/null || true
   systemctl restart systemd-resolved.service 2>/dev/null || true
-  systemctl restart ssh.service 2>/dev/null || true
-  systemctl restart sshd.service 2>/dev/null || true
+  if validate_ssh_safety; then
+    systemctl reload ssh.service 2>/dev/null || systemctl restart ssh.service 2>/dev/null || true
+    systemctl reload sshd.service 2>/dev/null || systemctl restart sshd.service 2>/dev/null || true
+  else
+    warn "SSH reload skipped because sshd validation failed"
+  fi
   cleanup_log "Reloaded affected services after cleanup"
 }
 
-clean_domain_configuration() {
+cleanup_optional_remote_computer_object() {
+  cleanup_log "Remote LDAP cleanup result: optional cleanup skipped by safe rejoin leave"
+  return 0
+}
+
+safe_leave_domain() {
   local failed=0
 
   need_root_for_cleanup || return 1
-  cleanup_log "Clean rejoin cleanup started"
+  cleanup_log "Safe leave started"
+  cleanup_log "Detected state: ${DETECTED_DOMAIN_STATE}"
+  cleanup_log "Files intentionally kept: /etc/pam.d/common-auth /etc/pam.d/common-account /etc/pam.d/common-session /etc/pam.d/common-password /etc/nsswitch.conf /etc/hosts /etc/hostname /etc/ssh/sshd_config"
 
-  if [[ -f "$MD_JOIN_ENV" ]]; then
-    warn "Managed join state found, remote LDAP cleanup is skipped by clean rejoin workflow"
-    cleanup_log "Remote LDAP cleanup skipped; local cleanup will continue"
-  else
-    cleanup_log "No managed join state found; remote LDAP cleanup skipped"
-  fi
+  validate_pam_safety || true
+  validate_ssh_safety || true
+  cleanup_optional_remote_computer_object
 
   stop_domain_services_for_cleanup
-  restore_original_configs || failed=1
-  remove_domain_generated_files || failed=1
-  clear_sssd_cache
+  cleanup_domain_runtime_state || failed=1
+  cleanup_sssd_domain_state || failed=1
+  cleanup_ssh_domain_state || failed=1
+  cleanup_sssd_cache
   cleanup_empty_domain_dirs
   reload_services_after_cleanup
 
   if [[ "$failed" -ne 0 ]]; then
-    error "Domain cleanup completed with errors"
-    cleanup_log "Clean rejoin cleanup completed with errors"
+    error "Safe domain leave completed with errors"
+    cleanup_log "Final leave result: completed with errors"
     return 1
   fi
 
-  info "MultiDirectory domain configuration cleanup completed"
+  info "Safe MultiDirectory domain leave completed"
   warn "System reboot is recommended"
-  cleanup_log "Clean rejoin cleanup completed successfully"
+  cleanup_log "Final leave result: success"
   return 0
 }
 
@@ -841,28 +973,29 @@ rejoin_domain() {
     return 1
   fi
 
-  detect_domain_config_state
+  detect_domain_state
   rejoin_log "Detected domain config state: ${DETECTED_DOMAIN_STATE}"
+  cleanup_log "Detected state: ${DETECTED_DOMAIN_STATE}"
 
-  if [[ "$DETECTED_DOMAIN_STATE" == "configured" ]]; then
+  if [[ "$DETECTED_DOMAIN_STATE" != "not_joined" ]]; then
     warn "Domain-related configuration was found:"
     printf '  - %s\n' "${DETECTED_DOMAIN_REASONS[@]}"
     rejoin_log "Detected config indicators: ${DETECTED_DOMAIN_REASONS[*]}"
 
-    if ! confirm_clean_rejoin_cleanup; then
-      warn "Rejoin cleanup cancelled by user"
-      rejoin_log "Rejoin cleanup cancelled by user"
+    if ! confirm_safe_leave; then
+      warn "Safe leave cancelled by user"
+      rejoin_log "Safe leave cancelled by user"
       return 0
     fi
 
-    if ! clean_domain_configuration; then
-      error "Local domain cleanup failed"
-      rejoin_log "Local cleanup failed"
+    if ! safe_leave_domain; then
+      error "Safe domain leave failed"
+      rejoin_log "Safe leave failed"
       return 1
     fi
 
     info "Return to main menu and run Configure domain join when ready"
-    rejoin_log "Returning to main menu after cleanup"
+    rejoin_log "Returning to main menu after safe leave"
     return 0
   fi
 
