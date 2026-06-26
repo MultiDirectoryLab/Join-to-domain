@@ -19,6 +19,10 @@ PAM_D_SRC="${FILES_DIR}/pam.d"
 SUDOERS_D_SRC="${FILES_DIR}/sudoers.d"
 RESOLVED_CONF_D_SRC="${FILES_DIR}/resolved.conf.d"
 SALT_SRC="${FILES_DIR}/salt"
+SALT_MODULES_SRC="${FILES_DIR}/_modules"
+SALT_MINION_EXTMODS_MODULES_DIR="/var/cache/salt/minion/extmods/modules"
+SALT_PKG_MODULE_SRC="${SALT_MODULES_SRC}/pkg.py"
+SALT_PKG_MODULE_DST="${SALT_MINION_EXTMODS_MODULES_DIR}/pkg.py"
 
 MD_ETC_DIR="/etc/MultiDirectory"
 MD_STATE_DIR="${MD_ETC_DIR}/state"
@@ -256,6 +260,14 @@ md_backup_once() {
   fi
 }
 
+md_backup_exists() {
+  local path="$1"
+  local safe
+
+  safe="$(echo "$path" | sed 's#/#__#g')"
+  [[ -e "${MD_BACKUP_DIR}/${safe}" || -L "${MD_BACKUP_DIR}/${safe}" ]]
+}
+
 restore_one() {
   local path="$1"
   local safe
@@ -326,6 +338,12 @@ validate_files_structure() {
 
   if [[ "${WITH_SALT:-0}" -eq 1 ]]; then
     need_dir "$SALT_SRC"
+
+    if [[ -f "$SALT_PKG_MODULE_SRC" ]]; then
+      need_file "$SALT_PKG_MODULE_SRC"
+    else
+      warn "Custom Salt module not found, pkg.py install will be skipped: ${SALT_PKG_MODULE_SRC}"
+    fi
   fi
 }
 
@@ -1176,6 +1194,8 @@ install_static_configs() {
       copy_dir_files "$SALT_SRC" /etc/salt 0644
       apply_placeholders_in_dir /etc/salt
     fi
+
+    install_salt_custom_modules
   else
     log "Community edition: Salt config files are skipped"
   fi
@@ -1257,6 +1277,35 @@ api_delete_salt_minion_key() {
     -H "Cookie: id=${cookie}" \
     -H 'accept: application/json' \
     -o /dev/null || true
+}
+
+install_salt_custom_modules() {
+  [[ "${WITH_SALT:-0}" -eq 1 ]] || return 0
+
+  if [[ ! -f "$SALT_PKG_MODULE_SRC" ]]; then
+    warn "Custom Salt pkg module not found, skipping: ${SALT_PKG_MODULE_SRC}"
+    return 0
+  fi
+
+  require_salt_minion_ready
+
+  log "Installing custom Salt module: ${SALT_PKG_MODULE_DST}"
+
+  mkdir -p "$SALT_MINION_EXTMODS_MODULES_DIR"
+  md_backup_once "$SALT_PKG_MODULE_DST"
+
+  install -m 0644 -o root -g root "$SALT_PKG_MODULE_SRC" "$SALT_PKG_MODULE_DST"
+  md_track "$SALT_PKG_MODULE_DST"
+
+  if have_cmd salt-call; then
+    salt-call --local saltutil.refresh_modules >/dev/null 2>&1 \
+      && log "Salt custom modules refreshed" \
+      || warn "saltutil.refresh_modules failed; module will be loaded after salt-minion restart"
+  else
+    warn "salt-call not found, Salt custom modules refresh skipped"
+  fi
+
+  log "Custom Salt pkg module installed"
 }
 
 prepare_salt_minion_identity() {
@@ -1393,7 +1442,6 @@ configure_salt() {
   log "Checking DNS resolution: SALT_MASTER=${SALT_MASTER}"
   getent hosts "${SALT_MASTER}" >/dev/null || die "DNS resolution failed for ${SALT_MASTER}"
 
-  log "Getting Salt master_finger"
   gpo_token="$(
     curl -k -sS -X GET "https://${API_HOST}/api/salt/master/key" \
       -H "Cookie: id=${access_token}" \
@@ -1574,6 +1622,8 @@ restore_backups() {
 
   restore_one /etc/salt/minion
   restore_one /etc/salt/minion_id
+  restore_one /etc/salt/pki/minion
+  restore_one "$SALT_PKG_MODULE_DST"
 }
 
 cleanup_domain_state() {
@@ -1583,8 +1633,14 @@ cleanup_domain_state() {
     rm -rf /var/lib/sss/db/* /var/lib/sss/mc/* 2>/dev/null || true
   fi
 
-  rm -rf /etc/salt/pki/minion/* 2>/dev/null || true
+  if md_backup_exists /etc/salt/pki/minion; then
+    log "Keeping restored Salt minion key backup"
+  else
+    rm -rf /etc/salt/pki/minion/* 2>/dev/null || true
+  fi
 
+  find /var/cache/salt/minion/extmods/modules -mindepth 0 -maxdepth 0 -type d -empty -delete 2>/dev/null || true
+  find /var/cache/salt/minion/extmods -mindepth 0 -maxdepth 0 -type d -empty -delete 2>/dev/null || true
   find /etc/systemd/resolved.conf.d -mindepth 0 -maxdepth 0 -type d -empty -delete 2>/dev/null || true
 }
 
