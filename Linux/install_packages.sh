@@ -32,6 +32,7 @@ DEB_REQUIRED_PACKAGES=(
   jq
   file
   sudo
+  ldap-utils
   krb5-user
   sssd
   sssd-tools
@@ -49,6 +50,7 @@ RPM_REQUIRED_PACKAGES=(
   jq
   file
   sudo
+  openldap-clients
   krb5-workstation
   sssd
   sssd-tools
@@ -64,6 +66,7 @@ RPM_APT_REQUIRED_PACKAGES=(
   jq
   file
   sudo
+  openldap-clients
   krb5-workstation
   sssd
   sssd-tools
@@ -709,6 +712,9 @@ is_removable_domain_package() {
 
   case "$pkg" in
     sssd|sssd-tools|sssd-client|sssd-dbus|libnss-sss|libpam-sss|oddjob|oddjob-mkhomedir)
+      return 0
+      ;;
+    ldap-utils|openldap-clients)
       return 0
       ;;
     krb5-user|krb5-workstation)

@@ -347,18 +347,10 @@ validate_files_structure() {
   fi
 }
 
-escape_sed() {
-  printf '%s' "$1" | sed -e 's/[\/&]/\\&/g'
-}
-
 apply_placeholders_to_file() {
   local file="$1"
 
   [[ -f "$file" ]] || return 0
-
-  local esc_password esc_sssd_password
-  esc_password="$(escape_sed "${PASSWORD:-}")"
-  esc_sssd_password="$(escape_sed "${SSSD_PASSWORD:-}")"
 
   sed -i \
     -e "s/__DOMAIN__/${DOMAIN}/g" \
@@ -369,10 +361,6 @@ apply_placeholders_to_file() {
     -e "s#__LDAP_SEARCH_BASE__#${LDAP_SEARCH_BASE}#g" \
     -e "s#__LDAP_USER_BASE__#${LDAP_USER_BASE}#g" \
     -e "s#__LDAP_GROUP_BASE__#${LDAP_GROUP_BASE}#g" \
-    -e "s#__BIND_DN__#${BIND_DN}#g" \
-    -e "s/__PASSWORD__/${esc_password}/g" \
-    -e "s#__SSSD_BIND_DN__#${SSSD_BIND_DN}#g" \
-    -e "s/__SSSD_PASSWORD__/${esc_sssd_password}/g" \
     -e "s/__HOSTNAME__/${HOSTNAME}/g" \
     -e "s/__FQDN__/${FQDN}/g" \
     -e "s#__LDAP_COMPUTER_OU__#${LDAP_COMPUTER_OU}#g" \
@@ -950,53 +938,6 @@ discover_and_validate_domain() {
   fi
 }
 
-discover_admin_dn() {
-  log "Getting administrator DN"
-
-  USER_FILTER="(sAMAccountName=${LOGIN})"
-  binddn_resp="$(api_search "${access_token}" "${LDAP_BASE_DN}" 2 "${USER_FILTER}" "[\"distinguishedName\"]")"
-  BIND_DN="$(printf '%s' "$binddn_resp" | jq -r '.search_result[0].object_name // empty')"
-
-  if [[ -z "${BIND_DN}" ]]; then
-    warn "Administrator DN was not received via API"
-    read_tty BIND_DN "Enter administrator DN:"
-  fi
-
-  [[ -n "${BIND_DN}" ]] || die "Administrator DN is empty"
-
-  log "Administrator DN: ${BIND_DN}"
-}
-
-discover_sssd_bind_dn() {
-  log "Getting SSSD service user DN"
-
-  SSSD_FILTER="(sAMAccountName=${SSSD_LOGIN})"
-  sssd_dn_resp="$(api_search "${access_token}" "${LDAP_BASE_DN}" 2 "${SSSD_FILTER}" "[\"distinguishedName\"]")"
-  SSSD_BIND_DN="$(printf '%s' "$sssd_dn_resp" | jq -r '.search_result[0].object_name // empty')"
-
-  if [[ -z "${SSSD_BIND_DN}" ]]; then
-    warn "SSSD service user DN was not received via API"
-    read_tty SSSD_BIND_DN "Enter SSSD service user DN:"
-  fi
-
-  [[ -n "${SSSD_BIND_DN}" ]] || die "SSSD_BIND_DN is empty"
-
-  log "SSSD service user DN: ${SSSD_BIND_DN}"
-}
-
-validate_sssd_credentials() {
-  local sssd_token
-
-  discover_sssd_bind_dn
-
-  log "Validating SSSD service account via API auth"
-
-  sssd_token="$(api_auth_cookie "${SSSD_LOGIN}" "${SSSD_PASSWORD}")"
-  [[ -n "${sssd_token}" ]] || die "SSSD service account API authentication failed"
-
-  log "SSSD service account credentials are valid"
-}
-
 validate_sudoers() {
   if have_cmd visudo; then
     visudo -cf /etc/sudoers || die "sudoers validation failed"
@@ -1013,11 +954,15 @@ validate_sssd_config() {
   fi
 }
 
-validate_no_plaintext_sssd_password() {
-  [[ -n "${SSSD_PASSWORD:-}" ]] || return 0
+validate_no_password_based_sssd_auth() {
+  local forbidden='ldap_default_bind_dn|ldap_default_authtok|ldap_default_authtok_type|__SSSD_|__BIND_DN__|__PASSWORD__'
 
-  if grep -F -- "${SSSD_PASSWORD}" /etc/sssd/sssd.conf 2>/dev/null; then
-    die "Plaintext SSSD password is still present in /etc/sssd/sssd.conf"
+  [[ -f /etc/sssd/sssd.conf ]] || return 0
+
+  if grep -En "$forbidden" /etc/sssd/sssd.conf >/tmp/md-sssd-password-auth.matches 2>/dev/null; then
+    warn "Forbidden password-based SSSD settings found:"
+    cat /tmp/md-sssd-password-auth.matches || true
+    die "SSSD must use Kerberos GSSAPI with /etc/krb5.keytab only"
   fi
 }
 
@@ -1111,17 +1056,6 @@ build_sssd_conf() {
 
   log "Built single SSSD config: /etc/sssd/sssd.conf"
   log "SSSD conf.d kept empty: /etc/sssd/conf.d"
-}
-
-obfuscate_sssd_password() {
-  log "Encrypting SSSD password via sss_obfuscate"
-  log "SSSD config file: /etc/sssd/sssd.conf"
-  warn "Enter the SSSD service account password again when sss_obfuscate asks for it"
-
-  sss_obfuscate -d "${DOMAIN}" -f /etc/sssd/sssd.conf || die "sss_obfuscate failed"
-
-  validate_no_plaintext_sssd_password
-  validate_sssd_config
 }
 
 install_pam_config() {
@@ -1265,6 +1199,24 @@ validate_keytab() {
   fi
 
   die "Kerberos keytab authentication failed"
+}
+
+validate_ldap_gssapi_auth() {
+  log "Checking LDAP GSSAPI authentication"
+
+  if ! kinit -k "host/${FQDN}@${REALM}"; then
+    die "Kerberos GSSAPI initialization failed: host/${FQDN}@${REALM}"
+  fi
+
+  ldapwhoami -Y GSSAPI -H "${URI}" >/dev/null \
+    || {
+      kdestroy || true
+      die "LDAP GSSAPI authentication failed"
+    }
+
+  log "LDAP GSSAPI authentication succeeded"
+
+  kdestroy || true
 }
 
 api_delete_salt_minion_key() {
@@ -1733,6 +1685,7 @@ preflight() {
   need_cmd hostname
   need_cmd klist
   need_cmd kinit
+  need_cmd ldapwhoami
   need_cmd sort
 
   normalize_files_eol
@@ -1783,18 +1736,7 @@ join_domain() {
   done
   discover_and_validate_domain
 
-  tty_echo ""
-  warn "Specify service user for SSSD"
-  read_tty SSSD_LOGIN "Enter LDAP service user login for SSSD, for example sssd_bind:"
-  read_secret_tty SSSD_PASSWORD "Enter LDAP service user password for SSSD:"
-
-  [[ -n "${SSSD_LOGIN}" && -n "${SSSD_PASSWORD}" ]] \
-    || die "SSSD login and SSSD password must be filled"
-
   prompt_change_hostname
-
-  discover_admin_dn
-  validate_sssd_credentials
 
   log "DOMAIN=${DOMAIN}"
   log "REALM=${REALM}"
@@ -1805,7 +1747,8 @@ join_domain() {
   log "WITH_SALT=${WITH_SALT}"
 
   install_static_configs
-  obfuscate_sssd_password
+  validate_no_password_based_sssd_auth
+  validate_sssd_config
 
   create_computer_object_if_needed
 
@@ -1813,9 +1756,9 @@ join_domain() {
   api_ktadd_download "${access_token}" "host/${HOSTNAME}" "host/${FQDN}"
 
   validate_keytab
+  validate_ldap_gssapi_auth
 
   unset PASSWORD
-  unset SSSD_PASSWORD
 
   configure_salt
 

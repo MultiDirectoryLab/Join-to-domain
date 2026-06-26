@@ -220,6 +220,9 @@ package_binaries() {
   case "$1" in
     ca-certificates|libnss-sss|libpam-sss|libpam-modules|sssd-client|oddjob-mkhomedir)
       ;;
+    ldap-utils|openldap-clients)
+      printf '%s\n' ldapwhoami
+      ;;
     curl)
       printf '%s\n' curl
       ;;
@@ -237,9 +240,6 @@ package_binaries() {
       ;;
     sssd)
       printf '%s\n' sssd
-      ;;
-    sssd-tools)
-      printf '%s\n' sss_obfuscate
       ;;
     oddjob)
       printf '%s\n' oddjobd
