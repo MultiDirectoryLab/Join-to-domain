@@ -277,6 +277,31 @@ enable_computer_account() {
 
 }
 
+enable_computer_account_if_disabled() {
+  local object_dn="$1"
+  local current_uac="$2"
+  local enabled_uac
+
+  if [[ ! "$current_uac" =~ ^[0-9]+$ ]]; then
+    warn "Cannot determine userAccountControl for ${object_dn}; computer account enable skipped"
+    return 0
+  fi
+
+  if (( (current_uac & 2) == 0 )); then
+    log "Computer account already enabled: ${object_dn}"
+    return 0
+  fi
+
+  enabled_uac=$((current_uac & ~2))
+  [[ "$enabled_uac" -gt 0 ]] || enabled_uac=4096
+
+  warn "Computer account is disabled, enabling: ${object_dn}"
+  api_update_many_replace_uac "${access_token}" "${object_dn}" "${enabled_uac}" \
+    || die "Failed to enable computer account: ${object_dn}"
+
+  log "Computer account enabled: ${object_dn}"
+}
+
 disable_computer_account_on_leave() {
   local object_dn expected_dn lookup_rc
 
@@ -328,4 +353,3 @@ disable_computer_account_on_leave() {
     warn "Computer account was not disabled on server side; local leave will continue"
   fi
 }
-

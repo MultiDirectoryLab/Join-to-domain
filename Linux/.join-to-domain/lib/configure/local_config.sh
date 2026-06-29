@@ -122,20 +122,28 @@ install_static_configs() {
 }
 
 create_computer_object_if_needed() {
-  local computer_dn exists_dn add_resp add_http add_body
+  local computer_dn exists_dn exists_uac search_resp add_resp add_http add_body
 
   computer_dn="cn=${HOSTNAME},${LDAP_COMPUTER_OU}"
 
   log "Checking whether computer cn=${HOSTNAME} exists"
 
+  search_resp="$(
+    api_search "${access_token}" "${LDAP_COMPUTER_OU}" 2 "(&(objectClass=computer)(cn=${HOSTNAME}))" "[\"cn\",\"userAccountControl\"]"
+  )" || die "Failed to check whether computer object exists in LDAP"
+
   exists_dn="$(
-    api_search "${access_token}" "${LDAP_COMPUTER_OU}" 2 "(&(objectClass=computer)(cn=${HOSTNAME}))" "[\"cn\",\"userAccountControl\"]" \
-      | jq -r '.search_result[0].object_name // empty'
+    printf '%s' "$search_resp" \
+      | jq -r '.search_result[0].object_name // empty' 2>/dev/null || true
+  )"
+  exists_uac="$(
+    printf '%s' "$search_resp" \
+      | jq -r '.search_result[0].partial_attributes[]? | select(.type=="userAccountControl") | .vals[0] // empty' 2>/dev/null || true
   )"
 
   if [[ -n "${exists_dn}" ]]; then
     warn "Computer already exists in LDAP: ${exists_dn}. Creating will be skipped."
-    enable_computer_account "${exists_dn}"
+    enable_computer_account_if_disabled "${exists_dn}" "${exists_uac}"
     return 0
   fi
 
@@ -251,4 +259,3 @@ EOF
   rm -f "$ldap_client_conf"
   kdestroy || true
 }
-

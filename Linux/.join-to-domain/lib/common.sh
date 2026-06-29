@@ -9,6 +9,8 @@ CONFIGURE_SCRIPT="${INTERNAL_DIR}/configure.sh"
 LOG_FILE="/var/log/join-to-domain.log"
 REJOIN_LOG_FILE="/var/log/multidirectory-rejoin.log"
 MD_CLEANUP_LOG_FILE="/var/log/multidirectory-join.log"
+API_CONNECT_TIMEOUT=10
+API_MAX_TIME=30
 MD_ETC_DIR="/etc/MultiDirectory"
 MD_STATE_DIR="${MD_ETC_DIR}/state"
 MD_BACKUP_DIR="${MD_STATE_DIR}/backups"
@@ -263,4 +265,3 @@ detect_package_manager() {
   debug "Detected package database: ${PACKAGE_DB}"
   return 0
 }
-

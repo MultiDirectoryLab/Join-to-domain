@@ -181,6 +181,7 @@ leave_domain() {
 
   validate_leave_credentials
   log "Starting optional remote LDAP cleanup"
+  delete_salt_minion_key_on_leave
   disable_computer_account_on_leave
   log "Remote LDAP cleanup step completed"
 
@@ -255,4 +256,3 @@ preflight() {
 
   normalize_files_eol
 }
-

@@ -1,15 +1,77 @@
 api_delete_salt_minion_key() {
   local cookie="$1"
   local minion_id="$2"
+  local resp http_code body
 
   [[ -n "$minion_id" ]] || return 0
 
-  curl -k -sS -X DELETE "https://${API_HOST}/api/salt/minion/${minion_id}" \
-    --connect-timeout "${API_CONNECT_TIMEOUT}" \
-    --max-time "${API_MAX_TIME}" \
-    -H "Cookie: id=${cookie}" \
-    -H 'accept: application/json' \
-    -o /dev/null || true
+  resp="$(
+    curl -k -sS -w "\n%{http_code}" \
+      --connect-timeout "${API_CONNECT_TIMEOUT}" \
+      --max-time "${API_MAX_TIME}" \
+      -X DELETE "https://${API_HOST}/api/salt/minion/${minion_id}" \
+      -H "Cookie: id=${cookie}" \
+      -H 'accept: application/json' 2>&1
+  )" || {
+    warn "Failed to request Salt key deletion for ${minion_id}; continuing"
+    return 0
+  }
+
+  http_code="$(echo "$resp" | tail -n1)"
+  body="$(echo "$resp" | sed '$d')"
+
+  if [[ "$http_code" =~ ^2[0-9][0-9]$ || "$http_code" == "404" ]]; then
+    log "Salt key deleted or was not present: ${minion_id}"
+    return 0
+  fi
+
+  warn "Salt key deletion returned HTTP ${http_code}: ${body}"
+  warn "Continuing without blocking the current operation"
+  return 0
+}
+
+delete_salt_minion_key_on_leave() {
+  local guid lookup_resp
+
+  [[ "${WITH_SALT:-0}" -eq 1 ]] || {
+    log "Community edition: Salt key cleanup skipped"
+    return 0
+  }
+
+  [[ -n "${access_token:-}" ]] || {
+    warn "API access token is missing, Salt key cleanup skipped"
+    return 0
+  }
+
+  guid="${SALT_MINION_ID:-}"
+
+  if [[ -z "$guid" ]]; then
+    [[ -n "${LDAP_COMPUTER_OU:-}" && -n "${HOSTNAME:-}" ]] || {
+      warn "Computer LDAP path is unknown, Salt key cleanup skipped"
+      return 0
+    }
+
+    log "Getting Salt minion id from computer objectGUID"
+    lookup_resp="$(
+      api_search "${access_token}" "${LDAP_COMPUTER_OU}" 2 "(&(objectClass=*)(cn=${HOSTNAME}))" "[\"objectGUID\"]"
+    )" || {
+      warn "Failed to get computer objectGUID, Salt key cleanup skipped"
+      return 0
+    }
+
+    guid="$(
+      printf '%s' "$lookup_resp" \
+        | jq -r '.search_result[0].partial_attributes[]? | select(.type=="objectGUID") | .vals[0] // empty' 2>/dev/null || true
+    )"
+  fi
+
+  if [[ -z "$guid" ]]; then
+    warn "Computer objectGUID not found, Salt key cleanup skipped"
+    return 0
+  fi
+
+  warn "Deleting Salt key on master for minion id: ${guid}"
+  api_delete_salt_minion_key "${access_token}" "${guid}"
 }
 
 install_salt_custom_modules() {
@@ -196,11 +258,9 @@ configure_salt() {
   )"
 
   [[ -n "${guid}" ]] || die "Failed to get objectGUID"
+  SALT_MINION_ID="$guid"
 
   prepare_salt_minion_identity "$guid" "$gpo_token"
-
-  warn "Deleting possible old Salt key for this minion id before fresh registration"
-  api_delete_salt_minion_key "${access_token}" "${guid}"
 
   restart_salt_minion_and_wait 8
   accept_salt_minion_key "$guid"
@@ -218,10 +278,10 @@ LDAP_COMPUTER_OU=${LDAP_COMPUTER_OU}
 EDITION=${EDITION}
 WITH_SALT=${WITH_SALT}
 SALT_MASTER=${SALT_MASTER:-}
+SALT_MINION_ID=${SALT_MINION_ID:-}
 MD_DNS_SERVER=${MD_DNS_SERVER:-}
 EOF
 
   chmod 600 "${MD_JOIN_ENV}"
   md_track "${MD_JOIN_ENV}"
 }
-

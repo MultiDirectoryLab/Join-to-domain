@@ -6,7 +6,7 @@ INTERNAL_DIR="${SCRIPT_DIR}/.join-to-domain"
 MAIN_MODULE="${INTERNAL_DIR}/lib/main.sh"
 
 if [[ ! -f "$MAIN_MODULE" ]]; then
-  printf '[ERROR] Required internal component not found\n' >&2
+  printf '[ERROR] Required internal component not found: %s\n' "$MAIN_MODULE" >&2
   exit 1
 fi
 

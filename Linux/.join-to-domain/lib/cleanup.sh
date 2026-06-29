@@ -293,8 +293,327 @@ reload_services_after_cleanup() {
   cleanup_log "Reloaded affected services after cleanup"
 }
 
-cleanup_optional_remote_computer_object() {
-  cleanup_log "Remote LDAP cleanup result: optional cleanup skipped by safe rejoin leave"
+cleanup_read_tty() {
+  local var="$1"
+  local prompt="$2"
+
+  printf '%s ' "$prompt"
+  IFS= read -r "$var"
+}
+
+cleanup_read_secret_tty() {
+  local var="$1"
+  local prompt="$2"
+
+  printf '%s ' "$prompt"
+  IFS= read -rs "$var"
+  printf '\n'
+}
+
+cleanup_api_auth_cookie() {
+  local api_host="$1"
+  local user="$2"
+  local pass="$3"
+
+  curl -k -sS -X POST "https://${api_host}/api/auth/" \
+    --connect-timeout "${API_CONNECT_TIMEOUT}" \
+    --max-time "${API_MAX_TIME}" \
+    -H "accept: application/json" \
+    -H "Content-Type: application/x-www-form-urlencoded" \
+    --data-urlencode "username=${user}" \
+    --data-urlencode "password=${pass}" \
+    -D - -o /dev/null \
+    | awk -F'id=|;' 'BEGIN{IGNORECASE=1} /set-cookie:[[:space:]]*id=/{print $2; exit}' \
+    | tr -d '\r\n'
+}
+
+cleanup_api_search() {
+  local api_host="$1"
+  local cookie="$2"
+  local base_object="$3"
+  local scope="$4"
+  local filter="$5"
+  local attrs_json="$6"
+
+  curl -k -sS -X POST "https://${api_host}/api/entry/search" \
+    --connect-timeout "${API_CONNECT_TIMEOUT}" \
+    --max-time "${API_MAX_TIME}" \
+    -H "accept: application/json" \
+    -H "Cookie: id=${cookie}" \
+    -H "Content-Type: application/json" \
+    -d "{
+      \"base_object\": \"${base_object}\",
+      \"scope\": ${scope},
+      \"deref_aliases\": 0,
+      \"size_limit\": 5,
+      \"time_limit\": 0,
+      \"types_only\": false,
+      \"filter\": \"${filter}\",
+      \"attributes\": ${attrs_json}
+    }"
+}
+
+cleanup_dn_to_domain() {
+  awk -F',' '
+    {
+      out="";
+      for (i=1; i<=NF; i++) {
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", $i);
+        if ($i ~ /^dc=/ || $i ~ /^DC=/) {
+          sub(/^[dD][cC]=/, "", $i);
+          out = (out == "" ? $i : out "." $i);
+        }
+      }
+      print tolower(out);
+    }
+  '
+}
+
+cleanup_api_rootdse_domain() {
+  local api_host="$1"
+  local cookie="$2"
+  local resp dom nc
+
+  resp="$(cleanup_api_search "$api_host" "$cookie" "" 0 "(objectClass=*)" "[\"dnsDomainName\",\"dnsForestName\",\"dnsHostName\",\"defaultNamingContext\"]")"
+
+  dom="$(printf '%s' "$resp" | jq -r '(.search_result[0].partial_attributes[]? | select(.type=="dnsDomainName") | .vals[0]) // empty')"
+  [[ -n "$dom" ]] || dom="$(printf '%s' "$resp" | jq -r '(.search_result[0].partial_attributes[]? | select(.type=="dnsForestName") | .vals[0]) // empty')"
+
+  if [[ -z "$dom" ]]; then
+    nc="$(printf '%s' "$resp" | jq -r '(.search_result[0].partial_attributes[]? | select(.type=="defaultNamingContext") | .vals[0]) // empty')"
+    [[ -n "$nc" ]] && dom="$(printf '%s' "$nc" | cleanup_dn_to_domain)"
+  fi
+
+  printf '%s' "$dom"
+}
+
+cleanup_validate_remote_credentials() {
+  local saved_domain saved_api_host login password token detected_domain
+
+  [[ -f "$MD_JOIN_ENV" ]] || {
+    error "Join state file not found: ${MD_JOIN_ENV}"
+    return 1
+  }
+
+  # shellcheck disable=SC1090
+  . "$MD_JOIN_ENV"
+
+  saved_domain="${DOMAIN:-}"
+  saved_api_host="${API_HOST:-}"
+
+  [[ -n "$saved_domain" ]] || {
+    error "DOMAIN is missing in ${MD_JOIN_ENV}"
+    return 1
+  }
+  [[ -n "$saved_api_host" ]] || {
+    error "API_HOST is missing in ${MD_JOIN_ENV}"
+    return 1
+  }
+
+  cleanup_read_tty login "Enter domain administrator login:"
+  cleanup_read_secret_tty password "Enter domain administrator password:"
+
+  [[ -n "$login" && -n "$password" ]] || {
+    unset password
+    error "Login and password must be filled"
+    return 1
+  }
+
+  info "Checking DNS resolution: ${saved_api_host}"
+  getent hosts "${saved_api_host}" >/dev/null || {
+    unset password
+    error "DNS resolution failed: ${saved_api_host}"
+    return 1
+  }
+
+  info "Authenticating domain administrator"
+  token="$(cleanup_api_auth_cookie "$saved_api_host" "$login" "$password")"
+  unset password
+
+  [[ -n "$token" ]] || {
+    error "Failed to authenticate domain administrator"
+    return 1
+  }
+
+  info "Detecting domain via RootDSE"
+  detected_domain="$(cleanup_api_rootdse_domain "$saved_api_host" "$token" | tr '[:upper:]' '[:lower:]')"
+  saved_domain="$(printf '%s' "$saved_domain" | tr '[:upper:]' '[:lower:]')"
+
+  [[ -n "$detected_domain" ]] || {
+    error "Failed to detect domain via RootDSE"
+    return 1
+  }
+
+  if [[ "$detected_domain" != "$saved_domain" ]]; then
+    error "Domain mismatch. Saved domain is ${saved_domain}, but authenticated domain is ${detected_domain}"
+    return 1
+  fi
+
+  API_HOST="$saved_api_host"
+  access_token="$token"
+
+  info "Leave credentials validated"
+}
+
+cleanup_delete_salt_minion_key() {
+  local minion_id="$1"
+  local resp http_code body
+
+  [[ -n "$minion_id" ]] || return 0
+
+  resp="$(
+    curl -k -sS -w "\n%{http_code}" \
+      --connect-timeout "${API_CONNECT_TIMEOUT}" \
+      --max-time "${API_MAX_TIME}" \
+      -X DELETE "https://${API_HOST}/api/salt/minion/${minion_id}" \
+      -H "Cookie: id=${access_token}" \
+      -H 'accept: application/json' 2>&1
+  )" || {
+    warn "Failed to request Salt key deletion for ${minion_id}; continuing"
+    cleanup_log "Salt key deletion request failed: ${minion_id}"
+    return 0
+  }
+
+  http_code="$(echo "$resp" | tail -n1)"
+  body="$(echo "$resp" | sed '$d')"
+
+  if [[ "$http_code" =~ ^2[0-9][0-9]$ || "$http_code" == "404" ]]; then
+    info "Salt key deleted or was not present: ${minion_id}"
+    cleanup_log "Salt key deleted or absent: ${minion_id}"
+    return 0
+  fi
+
+  warn "Salt key deletion returned HTTP ${http_code}: ${body}"
+  cleanup_log "Salt key deletion returned HTTP ${http_code}: ${body}"
+  return 0
+}
+
+cleanup_delete_salt_key_on_leave() {
+  local minion_id lookup_resp
+
+  [[ "${WITH_SALT:-0}" -eq 1 ]] || {
+    cleanup_log "Salt key cleanup skipped: Community edition or WITH_SALT is not enabled"
+    return 0
+  }
+
+  minion_id="${SALT_MINION_ID:-}"
+
+  if [[ -z "$minion_id" && -f /etc/salt/minion_id ]]; then
+    minion_id="$(tr -d '\r\n' < /etc/salt/minion_id 2>/dev/null || true)"
+  fi
+
+  if [[ -z "$minion_id" && -n "${LDAP_COMPUTER_OU:-}" && -n "${HOSTNAME:-}" ]]; then
+    info "Getting Salt minion id from computer objectGUID"
+    lookup_resp="$(
+      cleanup_api_search "$API_HOST" "$access_token" "$LDAP_COMPUTER_OU" 2 "(&(objectClass=*)(cn=${HOSTNAME}))" "[\"objectGUID\"]"
+    )" || {
+      warn "Failed to get computer objectGUID, Salt key cleanup skipped"
+      return 0
+    }
+
+    minion_id="$(
+      printf '%s' "$lookup_resp" \
+        | jq -r '.search_result[0].partial_attributes[]? | select(.type=="objectGUID") | .vals[0] // empty' 2>/dev/null || true
+    )"
+  fi
+
+  if [[ -z "$minion_id" ]]; then
+    warn "Salt minion id is unknown, Salt key cleanup skipped"
+    cleanup_log "Salt key cleanup skipped: minion id unknown"
+    return 0
+  fi
+
+  warn "Deleting Salt key on master for minion id: ${minion_id}"
+  cleanup_delete_salt_minion_key "$minion_id"
+}
+
+cleanup_disable_computer_account() {
+  local expected_dn lookup_resp object_dn payload resp http_code body
+
+  [[ -n "${LDAP_COMPUTER_OU:-}" && -n "${HOSTNAME:-}" ]] || {
+    warn "Computer LDAP path is unknown, computer account disable skipped"
+    cleanup_log "Computer account disable skipped: missing LDAP_COMPUTER_OU or HOSTNAME"
+    return 0
+  }
+
+  expected_dn="cn=${HOSTNAME},${LDAP_COMPUTER_OU}"
+
+  lookup_resp="$(
+    cleanup_api_search "$API_HOST" "$access_token" "$LDAP_COMPUTER_OU" 2 "(&(objectClass=computer)(cn=${HOSTNAME}))" "[\"cn\",\"userAccountControl\"]"
+  )" || {
+    warn "Failed to check computer object, skipping remote disable: ${expected_dn}"
+    cleanup_log "Computer account lookup failed: ${expected_dn}"
+    return 0
+  }
+
+  object_dn="$(printf '%s' "$lookup_resp" | jq -r '.search_result[0].object_name // empty' 2>/dev/null || true)"
+
+  if [[ -z "$object_dn" ]]; then
+    warn "Computer object not found in LDAP: ${expected_dn}"
+    warn "Skipping remote computer disable"
+    cleanup_log "Computer object not found: ${expected_dn}"
+    return 0
+  fi
+
+  warn "Disabling computer account: ${object_dn}"
+  payload="$(jq -n \
+    --arg object "$object_dn" \
+    '[
+      {
+        object: $object,
+        changes: [
+          {
+            operation: 2,
+            modification: {
+              type: "userAccountControl",
+              vals: ["4098"]
+            }
+          }
+        ]
+      }
+    ]'
+  )"
+
+  resp="$(
+    curl -k -sS -w "\n%{http_code}" \
+      --connect-timeout "${API_CONNECT_TIMEOUT}" \
+      --max-time "${API_MAX_TIME}" \
+      -X PATCH "https://${API_HOST}/api/entry/update_many" \
+      -H 'accept: application/json' \
+      -H 'Content-Type: application/json' \
+      -H "Cookie: id=${access_token}" \
+      -d "${payload}" 2>&1
+  )" || true
+
+  http_code="$(echo "$resp" | tail -n1)"
+  body="$(echo "$resp" | sed '$d')"
+
+  if [[ "$http_code" =~ ^2[0-9][0-9]$ ]]; then
+    info "Computer account disabled: ${object_dn}"
+    cleanup_log "Computer account disabled: ${object_dn}"
+    return 0
+  fi
+
+  warn "Computer account was not disabled on server side. HTTP ${http_code}: ${body}"
+  cleanup_log "Computer account disable failed. HTTP ${http_code}: ${body}"
+  return 0
+}
+
+cleanup_remote_domain_objects() {
+  local cmd
+
+  for cmd in curl jq getent awk tr; do
+    if ! have_cmd "$cmd"; then
+      error "Command not found: ${cmd}"
+      return 1
+    fi
+  done
+
+  info "Starting remote cleanup for safe leave"
+  cleanup_validate_remote_credentials || return 1
+  cleanup_delete_salt_key_on_leave
+  cleanup_disable_computer_account
+  info "Remote cleanup step completed"
   return 0
 }
 
@@ -308,7 +627,7 @@ safe_leave_domain() {
 
   validate_pam_safety || true
   validate_ssh_safety || true
-  cleanup_optional_remote_computer_object
+  cleanup_remote_domain_objects || return 1
 
   stop_domain_services_for_cleanup
   cleanup_domain_runtime_state || failed=1
@@ -329,4 +648,3 @@ safe_leave_domain() {
   cleanup_log "Final leave result: success"
   return 0
 }
-
