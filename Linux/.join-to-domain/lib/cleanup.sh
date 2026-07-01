@@ -309,7 +309,7 @@ cleanup_read_secret_tty() {
 
   printf -v "$var" '%s' ""
   printf '%s ' "$prompt"
-  IFS= read -rs "$var"
+  IFS= read -rs "${var?}"
   printf '\n'
 }
 
@@ -351,6 +351,12 @@ cleanup_join_state_value() {
   done < "$MD_JOIN_ENV"
 
   return 1
+}
+
+cleanup_valid_domain_name() {
+  local value="$1"
+
+  [[ "$value" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$ ]]
 }
 
 cleanup_api_auth_cookie() {
@@ -435,10 +441,7 @@ cleanup_validate_remote_credentials() {
 
   CLEANUP_REMOTE_READY=0
 
-  [[ -f "$MD_JOIN_ENV" ]] || {
-    warn "Join state file not found: ${MD_JOIN_ENV}; remote cleanup skipped"
-    return 0
-  }
+  [[ -f "$MD_JOIN_ENV" ]] || warn "Join state file not found: ${MD_JOIN_ENV}; asking for remote cleanup details"
 
   saved_domain="$(cleanup_join_state_value DOMAIN 2>/dev/null || true)"
   saved_api_host="$(cleanup_join_state_value API_HOST 2>/dev/null || true)"
@@ -447,14 +450,19 @@ cleanup_validate_remote_credentials() {
   SALT_MINION_ID="$(cleanup_join_state_value SALT_MINION_ID 2>/dev/null || true)"
   WITH_SALT="$(cleanup_join_state_value WITH_SALT 2>/dev/null || true)"
 
-  [[ -n "$saved_domain" ]] || {
-    warn "DOMAIN is missing in ${MD_JOIN_ENV}; remote cleanup skipped"
-    return 0
-  }
-  [[ -n "$saved_api_host" ]] || {
-    warn "API_HOST is missing in ${MD_JOIN_ENV}; remote cleanup skipped"
-    return 0
-  }
+  [[ -n "$saved_domain" ]] || warn "DOMAIN is missing in ${MD_JOIN_ENV}; it will be detected after authentication"
+
+  while [[ -z "$saved_api_host" ]]; do
+    cleanup_read_tty saved_api_host "Enter MULTIDIRECTORY server address (FQDN):"
+    if [[ -z "$saved_api_host" ]]; then
+      warn "API host must be filled."
+      continue
+    fi
+    if ! cleanup_valid_domain_name "$saved_api_host"; then
+      warn "Invalid API host. Enter a FQDN."
+      saved_api_host=""
+    fi
+  done
 
   cleanup_read_tty login "Enter domain administrator login:"
   cleanup_read_secret_tty password "Enter domain administrator password:"
@@ -490,7 +498,9 @@ cleanup_validate_remote_credentials() {
     return 1
   }
 
-  if [[ "$detected_domain" != "$saved_domain" ]]; then
+  if [[ -z "$saved_domain" ]]; then
+    saved_domain="$detected_domain"
+  elif [[ "$detected_domain" != "$saved_domain" ]]; then
     error "Domain mismatch. Saved domain is ${saved_domain}, but authenticated domain is ${detected_domain}"
     return 1
   fi

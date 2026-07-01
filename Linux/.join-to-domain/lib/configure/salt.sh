@@ -74,6 +74,14 @@ delete_salt_minion_key_on_leave() {
   api_delete_salt_minion_key "${access_token}" "${guid}"
 }
 
+refresh_api_token_for_salt() {
+  [[ -n "${LOGIN:-}" && -n "${PASSWORD:-}" ]] || return 0
+
+  log "Refreshing API session before Salt key operations"
+  access_token="$(api_auth_cookie "${LOGIN}" "${PASSWORD}")"
+  [[ -n "${access_token}" ]] || die "Failed to refresh API session before Salt key operations"
+}
+
 install_salt_custom_modules() {
   [[ "${WITH_SALT:-0}" -eq 1 ]] || return 0
 
@@ -106,6 +114,7 @@ install_salt_custom_modules() {
 prepare_salt_minion_identity() {
   local guid="$1"
   local gpo_token="$2"
+  local existing_minion_id=""
 
   require_salt_minion_ready
 
@@ -123,8 +132,12 @@ prepare_salt_minion_identity() {
     log "Salt processes stopped"
   fi
 
-  rm -rf /etc/salt/pki/minion 2>/dev/null || true
-  rm -f /etc/salt/minion_id 2>/dev/null || true
+  if [[ -f /etc/salt/minion_id ]]; then
+    existing_minion_id="$(tr -d '\r\n' < /etc/salt/minion_id 2>/dev/null || true)"
+    if [[ -n "$existing_minion_id" && "$existing_minion_id" != "$guid" ]]; then
+      warn "Updating Salt minion id from ${existing_minion_id} to ${guid}; keeping the existing minion key pair"
+    fi
+  fi
 
   mkdir -p /etc/salt
 
@@ -192,10 +205,9 @@ accept_salt_minion_key() {
     fi
 
     if [[ "$http_code" -eq 400 ]] && echo "$body" | grep -qi "Minion Already Exists"; then
-      warn "Minion already exists on master. Deleting old key and publishing a fresh key."
+      warn "Minion already exists on master. Deleting the master-side key and republishing the current local key."
 
       systemctl stop salt-minion.service 2>/dev/null || true
-      rm -rf /etc/salt/pki/minion 2>/dev/null || true
       api_delete_salt_minion_key "${access_token}" "${guid}"
 
       restart_salt_minion_and_wait 8
@@ -236,6 +248,7 @@ configure_salt() {
   SALT_MASTER="salt.${DOMAIN}"
 
   require_salt_minion_ready
+  refresh_api_token_for_salt
 
   log "Checking DNS resolution: SALT_MASTER=${SALT_MASTER}"
   getent hosts "${SALT_MASTER}" >/dev/null || die "DNS resolution failed for ${SALT_MASTER}"

@@ -88,9 +88,9 @@ join_domain() {
   validate_keytab
   validate_ldap_gssapi_auth
 
-  unset PASSWORD
-
   configure_salt
+
+  unset PASSWORD
 
   save_join_env
   start_services
