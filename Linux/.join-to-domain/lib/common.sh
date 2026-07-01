@@ -171,7 +171,48 @@ pause() {
   local _
 
   printf '\nPress Enter to return to the main menu... '
-  IFS= read -r _ || true
+  read_clean_input _ || true
+}
+
+validate_utf8_input() {
+  local value="$1"
+
+  if have_cmd iconv; then
+    printf '%s' "$value" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1
+    return $?
+  fi
+
+  return 0
+}
+
+sanitize_input() {
+  local value="$1"
+
+  value="${value//$'\r'/}"
+  value="$(
+    printf '%s' "$value" |
+      LC_ALL=C tr -d '\000-\010\013\014\016-\037\177' |
+      sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//'
+  )"
+
+  printf '%s' "$value"
+}
+
+read_clean_input() {
+  local var="$1"
+  local raw cleaned
+
+  printf -v "$var" '%s' ""
+
+  IFS= read -r raw || raw=""
+  cleaned="$(sanitize_input "$raw")"
+
+  if ! validate_utf8_input "$cleaned"; then
+    printf -v "$var" '%s' ""
+    return 1
+  fi
+
+  printf -v "$var" '%s' "$cleaned"
 }
 
 need_root_for_install() {

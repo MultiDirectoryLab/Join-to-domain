@@ -265,23 +265,3 @@ configure_salt() {
   restart_salt_minion_and_wait 8
   accept_salt_minion_key "$guid"
 }
-
-save_join_env() {
-  cat > "${MD_JOIN_ENV}" <<EOF
-API_HOST=${API_HOST}
-DOMAIN=${DOMAIN}
-REALM=${REALM}
-HOSTNAME=${HOSTNAME}
-FQDN=${FQDN}
-LDAP_BASE_DN=${LDAP_BASE_DN}
-LDAP_COMPUTER_OU=${LDAP_COMPUTER_OU}
-EDITION=${EDITION}
-WITH_SALT=${WITH_SALT}
-SALT_MASTER=${SALT_MASTER:-}
-SALT_MINION_ID=${SALT_MINION_ID:-}
-MD_DNS_SERVER=${MD_DNS_SERVER:-}
-EOF
-
-  chmod 600 "${MD_JOIN_ENV}"
-  md_track "${MD_JOIN_ENV}"
-}

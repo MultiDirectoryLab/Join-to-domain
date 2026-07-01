@@ -98,7 +98,7 @@ main_menu() {
   while true; do
     show_menu
     printf 'Select an option: '
-    IFS= read -r choice || choice=""
+    read_clean_input choice || choice=""
 
     case "$choice" in
       1)
@@ -126,4 +126,3 @@ main_menu() {
     esac
   done
 }
-

@@ -40,6 +40,9 @@ downloads/
 eggs/
 .eggs/
 lib/
+!Linux/.join-to-domain/lib/
+!Linux/.join-to-domain/lib/configure/
+!Linux/.join-to-domain/lib/configure/state.sh
 lib64/
 parts/
 sdist/

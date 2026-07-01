@@ -1,6 +1,7 @@
 join_domain() {
   preflight
   md_init_state
+  load_join_state
 
   trap on_join_error ERR
 
@@ -21,9 +22,18 @@ join_domain() {
     fi
   else
     while true; do
-      read_tty API_HOST "Enter MULTIDIRECTORY server address (FQDN), for example webadmin.domain.ru:"
+      if [[ -n "${SAVED_API_HOST:-}" ]]; then
+        read_tty API_HOST "Enter MULTIDIRECTORY server address (FQDN) [${SAVED_API_HOST}]:"
+        API_HOST="${API_HOST:-$SAVED_API_HOST}"
+      else
+        read_tty API_HOST "Enter MULTIDIRECTORY server address (FQDN), for example webadmin.domain.ru:"
+      fi
       if [[ -z "${API_HOST}" ]]; then
         warn "API host must be filled."
+        continue
+      fi
+      if ! valid_join_domain "${API_HOST}"; then
+        warn "Invalid API host. Enter a FQDN, for example webadmin.domain.ru."
         continue
       fi
       if getent hosts "${API_HOST}" >/dev/null; then

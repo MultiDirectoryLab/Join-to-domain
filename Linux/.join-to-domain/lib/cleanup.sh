@@ -298,16 +298,59 @@ cleanup_read_tty() {
   local prompt="$2"
 
   printf '%s ' "$prompt"
-  IFS= read -r "$var"
+  read_clean_input "$var" || {
+    warn "Input contains invalid characters. Please enter the value again."
+  }
 }
 
 cleanup_read_secret_tty() {
   local var="$1"
   local prompt="$2"
 
+  printf -v "$var" '%s' ""
   printf '%s ' "$prompt"
   IFS= read -rs "$var"
   printf '\n'
+}
+
+cleanup_join_state_value() {
+  local key="$1"
+  local line value
+
+  [[ -f "$MD_JOIN_ENV" ]] || return 1
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line//$'\r'/}"
+    line="$(sanitize_input "$line")"
+
+    [[ -n "$line" ]] || continue
+    [[ "$line" == \#* ]] && continue
+
+    if [[ "$line" == export[[:space:]]* ]]; then
+      line="${line#export}"
+      line="$(sanitize_input "$line")"
+    fi
+
+    [[ "$line" == *=* ]] || continue
+    [[ "${line%%=*}" == "$key" ]] || continue
+
+    value="${line#*=}"
+    value="$(sanitize_input "$value")"
+
+    if [[ "$value" == \"*\" && "$value" == *\" && "${#value}" -ge 2 ]]; then
+      value="${value:1:${#value}-2}"
+      value="${value//\\\"/\"}"
+      value="${value//\\\\/\\}"
+    elif [[ "$value" == \'*\' && "${#value}" -ge 2 ]]; then
+      value="${value:1:${#value}-2}"
+    fi
+
+    validate_utf8_input "$value" || return 1
+    printf '%s\n' "$value"
+    return 0
+  done < "$MD_JOIN_ENV"
+
+  return 1
 }
 
 cleanup_api_auth_cookie() {
@@ -390,24 +433,27 @@ cleanup_api_rootdse_domain() {
 cleanup_validate_remote_credentials() {
   local saved_domain saved_api_host login password token detected_domain
 
+  CLEANUP_REMOTE_READY=0
+
   [[ -f "$MD_JOIN_ENV" ]] || {
-    error "Join state file not found: ${MD_JOIN_ENV}"
-    return 1
+    warn "Join state file not found: ${MD_JOIN_ENV}; remote cleanup skipped"
+    return 0
   }
 
-  # shellcheck disable=SC1090
-  . "$MD_JOIN_ENV"
-
-  saved_domain="${DOMAIN:-}"
-  saved_api_host="${API_HOST:-}"
+  saved_domain="$(cleanup_join_state_value DOMAIN 2>/dev/null || true)"
+  saved_api_host="$(cleanup_join_state_value API_HOST 2>/dev/null || true)"
+  LDAP_COMPUTER_OU="$(cleanup_join_state_value LDAP_COMPUTER_OU 2>/dev/null || true)"
+  HOSTNAME="$(cleanup_join_state_value HOSTNAME 2>/dev/null || true)"
+  SALT_MINION_ID="$(cleanup_join_state_value SALT_MINION_ID 2>/dev/null || true)"
+  WITH_SALT="$(cleanup_join_state_value WITH_SALT 2>/dev/null || true)"
 
   [[ -n "$saved_domain" ]] || {
-    error "DOMAIN is missing in ${MD_JOIN_ENV}"
-    return 1
+    warn "DOMAIN is missing in ${MD_JOIN_ENV}; remote cleanup skipped"
+    return 0
   }
   [[ -n "$saved_api_host" ]] || {
-    error "API_HOST is missing in ${MD_JOIN_ENV}"
-    return 1
+    warn "API_HOST is missing in ${MD_JOIN_ENV}; remote cleanup skipped"
+    return 0
   }
 
   cleanup_read_tty login "Enter domain administrator login:"
@@ -451,6 +497,7 @@ cleanup_validate_remote_credentials() {
 
   API_HOST="$saved_api_host"
   access_token="$token"
+  CLEANUP_REMOTE_READY=1
 
   info "Leave credentials validated"
 }
@@ -611,6 +658,10 @@ cleanup_remote_domain_objects() {
 
   info "Starting remote cleanup for safe leave"
   cleanup_validate_remote_credentials || return 1
+  [[ "${CLEANUP_REMOTE_READY:-0}" -eq 1 ]] || {
+    warn "Remote cleanup skipped"
+    return 0
+  }
   cleanup_delete_salt_key_on_leave
   cleanup_disable_computer_account
   info "Remote cleanup step completed"

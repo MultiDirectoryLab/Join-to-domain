@@ -34,9 +34,13 @@ apply_hostname() {
 }
 
 prompt_change_hostname() {
-  local current choice new_name
+  local current default_name choice new_name
 
   current="$(hostname -s | tr '[:upper:]' '[:lower:]')"
+  default_name="$current"
+  if [[ -n "${SAVED_HOSTNAME:-}" ]]; then
+    default_name="$SAVED_HOSTNAME"
+  fi
 
   if env_has_key HOSTNAME; then
     new_name="$(echo "${HOSTNAME:-}" | tr '[:upper:]' '[:lower:]')"
@@ -59,7 +63,7 @@ prompt_change_hostname() {
   fi
 
   tty_echo "${YELLOW}Change PC name?${NC}"
-  tty_echo "1. No (${current})"
+  tty_echo "1. No (${default_name})"
   tty_echo "2. Yes"
 
   while true; do
@@ -68,8 +72,12 @@ prompt_change_hostname() {
 
     case "$choice" in
       1)
-        HOSTNAME="$current"
-        FQDN="${HOSTNAME}.${DOMAIN}"
+        if [[ "$default_name" == "$current" ]]; then
+          HOSTNAME="$current"
+          FQDN="${HOSTNAME}.${DOMAIN}"
+        else
+          apply_hostname "$default_name"
+        fi
         return 0
         ;;
       2)
@@ -93,10 +101,17 @@ prompt_change_hostname() {
 }
 
 prompt_edition() {
-  local choice
+  local choice default_choice default_label
 
   if use_env_edition_if_available; then
     return 0
+  fi
+
+  default_choice=1
+  default_label="Enterprise"
+  if [[ "${SAVED_EDITION:-}" == "community" ]]; then
+    default_choice=2
+    default_label="Community"
   fi
 
   tty_echo "${YELLOW}Select MultiDirectory edition:${NC}"
@@ -104,8 +119,8 @@ prompt_edition() {
   tty_echo "2. Community"
 
   while true; do
-    read_tty choice "Select (1/2) [1]:"
-    choice="${choice:-1}"
+    read_tty choice "Select (1/2) [${default_choice} - ${default_label}]:"
+    choice="${choice:-$default_choice}"
 
     case "$choice" in
       1)
@@ -129,6 +144,11 @@ prompt_edition() {
 
 load_or_prompt_edition() {
   if use_env_edition_if_available; then
+    return 0
+  fi
+
+  if [[ -n "${SAVED_EDITION:-}" ]]; then
+    prompt_edition
     return 0
   fi
 
@@ -188,11 +208,11 @@ EOF
   fi
 
   if [[ -n "$resolv_target" ]]; then
-    md_backup_once /etc/resolv.conf
-    rm -f /etc/resolv.conf
-    ln -s "$resolv_target" /etc/resolv.conf
-    md_track /etc/resolv.conf
-    log "resolv.conf linked to ${resolv_target}"
+    if [[ -L /etc/resolv.conf ]]; then
+      log "resolv.conf is a symlink; direct replacement skipped"
+    else
+      warn "/etc/resolv.conf is not a symlink; systemd-resolved was configured without replacing the file"
+    fi
   else
     warn "systemd-resolved resolv.conf target not found; /etc/resolv.conf symlink was not changed"
   fi
@@ -203,6 +223,7 @@ EOF
 
 configure_dns_networkmanager() {
   local ns="$1"
+  local nm_dns="$1"
   local iface conn
 
   have_cmd nmcli || return 1
@@ -214,37 +235,36 @@ configure_dns_networkmanager() {
   conn="$(nmcli -t -f NAME,DEVICE connection show --active 2>/dev/null | awk -F: -v dev="$iface" '$2 == dev {print $1; exit}')"
   [[ -n "$conn" ]] || return 1
 
-  nmcli connection modify "$conn"     ipv4.dns "$ns"     ipv4.ignore-auto-dns yes || return 1
+  nmcli connection modify "$conn" ipv4.dns "$nm_dns" ipv4.ignore-auto-dns yes || return 1
 
   nmcli connection up "$conn" >/dev/null 2>&1 || true
 
+  log "NetworkManager DNS value: ${nm_dns}"
   log "Persistent DNS configured via NetworkManager connection '${conn}': ${ns}"
   return 0
 }
 
 configure_dns_static_resolv_conf() {
   local ns="$1"
-  local tmp
   local server
+
+  if [[ -L /etc/resolv.conf ]]; then
+    warn "/etc/resolv.conf is a symlink; direct append skipped to avoid breaking managed resolver configuration"
+    return 1
+  fi
 
   md_backup_once /etc/resolv.conf
 
-  if [[ -L /etc/resolv.conf ]]; then
-    rm -f /etc/resolv.conf
-  fi
-
-  tmp="$(mktemp)"
-  : > "$tmp"
+  touch /etc/resolv.conf
   for server in $ns; do
-    echo "nameserver ${server}" >> "$tmp"
+    if grep -Eq "^[[:space:]]*nameserver[[:space:]]+${server}([[:space:]]|$)" /etc/resolv.conf 2>/dev/null; then
+      log "nameserver already present in resolv.conf: ${server}"
+      continue
+    fi
+
+    printf 'nameserver %s\n' "$server" >> /etc/resolv.conf
+    log "Added nameserver to resolv.conf: ${server}"
   done
-
-  if [[ -f /etc/resolv.conf ]]; then
-    grep -vE '^nameserver[[:space:]]+' /etc/resolv.conf >> "$tmp" 2>/dev/null || true
-  fi
-
-  cp "$tmp" /etc/resolv.conf
-  rm -f "$tmp"
 
   chmod 0644 /etc/resolv.conf
   md_track /etc/resolv.conf
@@ -266,17 +286,44 @@ md_set_resolv_first() {
   configure_dns_static_resolv_conf "$ns"
 }
 
+valid_ipv4_address() {
+  local ip="$1"
+  local IFS=.
+  local octets octet
+
+  [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+  read -r -a octets <<< "$ip"
+  [[ "${#octets[@]}" -eq 4 ]] || return 1
+
+  for octet in "${octets[@]}"; do
+    [[ "$octet" =~ ^[0-9]+$ ]] || return 1
+    (( 10#$octet >= 0 && 10#$octet <= 255 )) || return 1
+  done
+
+  return 0
+}
+
 normalize_dns_servers() {
   local raw="$1"
-  local normalized="" item
+  local cleaned
+  local -a parts
+  local item normalized=""
 
-  raw="${raw//,/ }"
+  cleaned="$(sanitize_input "$raw")"
+  validate_utf8_input "$cleaned" || return 1
 
-  for item in $raw; do
-    [[ -n "$item" ]] || continue
-    if [[ "$item" =~ [[:space:]] ]]; then
-      return 1
-    fi
+  [[ -n "$cleaned" ]] || return 1
+  [[ "$cleaned" != *,*,* ]] || return 1
+  [[ "$cleaned" != *, ]] || return 1
+  [[ "$cleaned" != ,* ]] || return 1
+
+  IFS=',' read -r -a parts <<< "$cleaned"
+  [[ "${#parts[@]}" -ge 1 && "${#parts[@]}" -le 2 ]] || return 1
+
+  for item in "${parts[@]}"; do
+    item="$(sanitize_input "$item")"
+    [[ -n "$item" ]] || return 1
+    valid_ipv4_address "$item" || return 1
     normalized="${normalized}${normalized:+ }${item}"
   done
 
@@ -284,8 +331,15 @@ normalize_dns_servers() {
   printf '%s\n' "$normalized"
 }
 
+dns_servers_csv() {
+  local ns="$1"
+
+  printf '%s\n' "${ns// /,}"
+}
+
 prompt_configure_dns() {
-  local choice dns_input dns_servers
+  local choice dns_input dns_servers default_dns default_choice
+  local default_dns_csv
 
   if env_has_key MD_DNS_SERVER; then
     dns_input="${MD_DNS_SERVER:-}"
@@ -300,9 +354,10 @@ prompt_configure_dns() {
         ;;
       *)
         if ! dns_servers="$(normalize_dns_servers "$dns_input")"; then
-          die "Invalid MD_DNS_SERVER in environment"
+          die "Invalid MD_DNS_SERVER in environment. Example: 8.8.8.8,1.1.1.1"
         fi
 
+        log "DNS input validated: $(dns_servers_csv "$dns_servers")"
         log "Using DNS servers from environment: ${dns_servers}"
         MD_DNS_SERVER="$dns_servers"
         md_set_resolv_first "$dns_servers" || die "Failed to set DNS from environment"
@@ -311,18 +366,37 @@ prompt_configure_dns() {
     esac
   fi
 
+  default_dns="${SAVED_DNS_SERVERS:-}"
+  default_dns_csv=""
+  default_choice=1
+  if [[ -n "$default_dns" ]]; then
+    default_dns_csv="$(dns_servers_csv "$default_dns")"
+  fi
+
   tty_echo "${YELLOW}Set MultiDirectory DNS servers?${NC}"
-  tty_echo "1. Yes"
+  if [[ -n "$default_dns_csv" ]]; then
+    tty_echo "1. Yes (${default_dns_csv})"
+  else
+    tty_echo "1. Yes"
+  fi
   tty_echo "2. No"
 
   while true; do
-    read_tty choice "Select (1/2) [1]:"
-    choice="${choice:-1}"
+    read_tty choice "Select (1/2) [${default_choice}]:"
+    choice="${choice:-$default_choice}"
     case "$choice" in
       1)
         while true; do
-          read_tty dns_input "Enter DNS server IPs, separated by comma:"
+          dns_input=""
+          dns_servers=""
+          if [[ -n "$default_dns_csv" ]]; then
+            read_tty dns_input "Enter DNS server IPs, separated by comma [${default_dns_csv}]:"
+            dns_input="${dns_input:-$default_dns_csv}"
+          else
+            read_tty dns_input "Enter DNS server IPs, separated by comma [example: 8.8.8.8 or 8.8.8.8,1.1.1.1]:"
+          fi
           if dns_servers="$(normalize_dns_servers "$dns_input")"; then
+            log "DNS input validated: $(dns_servers_csv "$dns_servers")"
             MD_DNS_SERVER="$dns_servers"
             if md_set_resolv_first "$dns_servers"; then
               return 0
@@ -330,7 +404,7 @@ prompt_configure_dns() {
               warn "Failed to set DNS. Please check the IP addresses and network."
             fi
           else
-            warn "Invalid DNS server address list."
+            warn "Invalid DNS input. Example: 8.8.8.8,1.1.1.1"
           fi
         done
         ;;

@@ -131,7 +131,7 @@ EOF
 
   while true; do
     printf 'Select an option: '
-    IFS= read -r choice || choice=""
+    read_clean_input choice || choice=""
 
     case "$choice" in
       1)
@@ -146,4 +146,3 @@ EOF
     esac
   done
 }
-

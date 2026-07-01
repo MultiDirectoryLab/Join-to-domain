@@ -1,19 +1,30 @@
 load_join_env() {
-  [[ -f "$MD_JOIN_ENV" ]] || die "Join state file not found: ${MD_JOIN_ENV}"
+  load_join_state
 
-  # shellcheck disable=SC1090
-  . "$MD_JOIN_ENV"
+  DOMAIN="${SAVED_DOMAIN:-}"
+  REALM="${SAVED_REALM:-}"
+  LDAP_BASE_DN="${SAVED_LDAP_BASE_DN:-}"
+  LDAP_COMPUTER_OU="${SAVED_LDAP_COMPUTER_OU:-}"
+  HOSTNAME="${SAVED_HOSTNAME:-}"
+  FQDN="${SAVED_FQDN:-}"
+  API_HOST="${SAVED_API_HOST:-}"
+  WITH_SALT="${SAVED_WITH_SALT:-0}"
+  EDITION="${SAVED_EDITION:-community}"
+  SALT_MASTER="${SAVED_SALT_MASTER:-}"
+  SALT_MINION_ID="${SAVED_SALT_MINION_ID:-}"
+  COMPUTER_DN="${SAVED_COMPUTER_DN:-}"
 
-  [[ -n "${DOMAIN:-}" ]] || die "DOMAIN is missing in ${MD_JOIN_ENV}"
-  [[ -n "${API_HOST:-}" ]] || die "API_HOST is missing in ${MD_JOIN_ENV}"
+  if [[ -n "${SAVED_DOMAIN:-}" ]]; then
+    log "Saved domain: ${SAVED_DOMAIN}"
+  else
+    warn "Saved domain is unavailable; it will be detected after authentication"
+  fi
 
-  SAVED_DOMAIN="$DOMAIN"
-  SAVED_API_HOST="$API_HOST"
-
-  SAVED_DOMAIN="$(echo "$SAVED_DOMAIN" | tr '[:upper:]' '[:lower:]')"
-
-  log "Saved domain: ${SAVED_DOMAIN}"
-  log "Saved API host: ${SAVED_API_HOST}"
+  if [[ -n "${SAVED_API_HOST:-}" ]]; then
+    log "Saved API host: ${SAVED_API_HOST}"
+  else
+    warn "Saved API host is unavailable; asking interactively"
+  fi
 }
 
 validate_leave_credentials() {
@@ -21,12 +32,22 @@ validate_leave_credentials() {
 
   load_join_env
 
+  while [[ -z "${API_HOST:-}" ]]; do
+    read_tty API_HOST "Enter MULTIDIRECTORY server address (FQDN):"
+    if [[ -z "${API_HOST}" ]]; then
+      warn "API host must be filled."
+      continue
+    fi
+    if ! valid_join_domain "${API_HOST}"; then
+      warn "Invalid API host. Enter a FQDN."
+      API_HOST=""
+    fi
+  done
+
   read_tty leave_login "Enter domain administrator login:"
   read_secret_tty leave_password "Enter domain administrator password:"
 
   [[ -n "$leave_login" && -n "$leave_password" ]] || die "Login and password must be filled"
-
-  API_HOST="$SAVED_API_HOST"
 
   log "Checking DNS resolution: ${API_HOST}"
   getent hosts "${API_HOST}" >/dev/null || die "DNS resolution failed: ${API_HOST}"
@@ -40,6 +61,11 @@ validate_leave_credentials() {
   [[ -n "$detected_domain" ]] || die "Failed to detect domain via RootDSE"
 
   detected_domain="$(echo "$detected_domain" | tr '[:upper:]' '[:lower:]')"
+
+  if [[ -z "${SAVED_DOMAIN:-}" ]]; then
+    SAVED_DOMAIN="$detected_domain"
+    DOMAIN="$detected_domain"
+  fi
 
   log "Saved domain: ${SAVED_DOMAIN}"
   log "Authenticated domain: ${detected_domain}"

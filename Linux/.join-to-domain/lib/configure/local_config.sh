@@ -125,6 +125,7 @@ create_computer_object_if_needed() {
   local computer_dn exists_dn exists_uac search_resp add_resp add_http add_body
 
   computer_dn="cn=${HOSTNAME},${LDAP_COMPUTER_OU}"
+  COMPUTER_DN="$computer_dn"
 
   log "Checking whether computer cn=${HOSTNAME} exists"
 
@@ -143,6 +144,7 @@ create_computer_object_if_needed() {
 
   if [[ -n "${exists_dn}" ]]; then
     warn "Computer already exists in LDAP: ${exists_dn}. Creating will be skipped."
+    COMPUTER_DN="$exists_dn"
     enable_computer_account_if_disabled "${exists_dn}" "${exists_uac}"
     return 0
   fi
