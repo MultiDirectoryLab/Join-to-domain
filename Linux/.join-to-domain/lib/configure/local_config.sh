@@ -9,8 +9,12 @@ build_sssd_conf() {
 
   if [[ -d /etc/sssd/conf.d ]]; then
     md_backup_once /etc/sssd/conf.d
-    rm -rf /etc/sssd/conf.d
-    log "Removed old SSSD snippets from /etc/sssd/conf.d"
+    if is_astra_se; then
+      log "Astra SE detected: preserving existing SSSD snippets in /etc/sssd/conf.d"
+    else
+      rm -rf /etc/sssd/conf.d
+      log "Removed old SSSD snippets from /etc/sssd/conf.d"
+    fi
   fi
 
   mkdir -p /etc/sssd/conf.d
@@ -41,7 +45,107 @@ build_sssd_conf() {
   disable_sssd_socket_activation_if_needed
 
   log "Built single SSSD config: /etc/sssd/sssd.conf"
-  log "SSSD conf.d kept empty: /etc/sssd/conf.d"
+  if is_astra_se; then
+    log "Astra SE detected: SSSD conf.d preserved: /etc/sssd/conf.d"
+  else
+    log "SSSD conf.d kept empty: /etc/sssd/conf.d"
+  fi
+}
+
+pam_has_module() {
+  local file="$1"
+  local module="$2"
+
+  [[ -f "$file" ]] || return 1
+  grep -Eq "^[[:space:]]*[^#].*[[:space:]]${module}([[:space:]]|$)" "$file" 2>/dev/null
+}
+
+pam_insert_before_first_module() {
+  local file="$1"
+  local anchor_module="$2"
+  local line="$3"
+  local tmp
+
+  [[ -f "$file" ]] || die "PAM file not found: ${file}"
+
+  tmp="$(mktemp)"
+  awk -v anchor="${anchor_module}" -v insert_line="${line}" '
+    BEGIN { inserted=0 }
+    inserted == 0 && $0 !~ /^[[:space:]]*#/ && $0 ~ ("[[:space:]]" anchor "([[:space:]]|$)") {
+      print insert_line
+      inserted=1
+    }
+    { print }
+    END {
+      if (inserted == 0) {
+        print insert_line
+      }
+    }
+  ' "$file" > "$tmp" || {
+    rm -f "$tmp"
+    die "Failed to patch PAM file: ${file}"
+  }
+
+  cat "$tmp" > "$file"
+  rm -f "$tmp"
+}
+
+pam_append_if_missing() {
+  local file="$1"
+  local module="$2"
+  local line="$3"
+
+  pam_has_module "$file" "$module" && return 0
+
+  md_backup_once "$file"
+  pam_insert_before_first_module "$file" pam_deny.so "$line"
+  md_track "$file"
+  log "Patched PAM file: ${file} (${module})"
+}
+
+patch_pam_before_if_missing() {
+  local file="$1"
+  local module="$2"
+  local anchor_module="$3"
+  local line="$4"
+
+  pam_has_module "$file" "$module" && return 0
+
+  md_backup_once "$file"
+  pam_insert_before_first_module "$file" "$anchor_module" "$line"
+  md_track "$file"
+  log "Patched PAM file: ${file} (${module})"
+}
+
+install_astra_se_pam_config() {
+  log "Astra SE detected: preserving PARSEC-aware PAM stack"
+
+  patch_pam_before_if_missing /etc/pam.d/common-auth pam_sss.so pam_unix.so \
+    "auth sufficient                        pam_sss.so try_first_pass"
+  patch_pam_before_if_missing /etc/pam.d/common-account pam_sss.so pam_unix.so \
+    "account sufficient                      pam_sss.so"
+  pam_append_if_missing /etc/pam.d/common-password pam_sss.so \
+    "password [success=1 default=ignore]     pam_sss.so use_authtok"
+
+  if ! pam_has_module /etc/pam.d/common-session pam_sss.so; then
+    md_backup_once /etc/pam.d/common-session
+    printf '%s\n' "session optional                        pam_sss.so" >> /etc/pam.d/common-session
+    md_track /etc/pam.d/common-session
+    log "Patched PAM file: /etc/pam.d/common-session (pam_sss.so)"
+  fi
+
+  if ! pam_has_module /etc/pam.d/common-session pam_mkhomedir.so; then
+    md_backup_once /etc/pam.d/common-session
+    printf '%s\n' "session optional                        pam_mkhomedir.so skel=/etc/skel umask=0022" >> /etc/pam.d/common-session
+    md_track /etc/pam.d/common-session
+    log "Patched PAM file: /etc/pam.d/common-session (pam_mkhomedir.so)"
+  fi
+
+  if ! pam_has_module /etc/pam.d/common-session pam_kiosk2.so; then
+    die "Astra SE PAM safety check failed: /etc/pam.d/common-session lacks pam_kiosk2.so"
+  fi
+
+  log "Astra SE PAM stack preserved"
 }
 
 install_pam_config() {
@@ -68,6 +172,11 @@ install_pam_config() {
     return 0
   fi
 
+  if is_astra_se; then
+    install_astra_se_pam_config
+    return 0
+  fi
+
   if is_deb_based; then
     if [[ -d "$PAM_D_SRC" ]]; then
       [[ -f "${PAM_D_SRC}/common-auth" ]] && install_local_file "${PAM_D_SRC}/common-auth" /etc/pam.d/common-auth 0644
@@ -80,13 +189,69 @@ install_pam_config() {
   fi
 }
 
+patch_nsswitch_database() {
+  local db="$1"
+  local service="$2"
+  local file=/etc/nsswitch.conf
+  local tmp
+
+  [[ -f "$file" ]] || die "NSS configuration not found: ${file}"
+
+  tmp="$(mktemp)"
+  awk -v db="${db}" -v service="${service}" '
+    BEGIN { changed=0 }
+    $0 ~ "^[[:space:]]*" db ":" {
+      if ($0 !~ ("(^|[[:space:]])" service "([[:space:]]|$)")) {
+        print $0 " " service
+      } else {
+        print
+      }
+      changed=1
+      next
+    }
+    { print }
+    END {
+      if (changed == 0) {
+        printf "%s: files %s\n", db, service
+      }
+    }
+  ' "$file" > "$tmp" || {
+    rm -f "$tmp"
+    die "Failed to patch ${file}"
+  }
+
+  cat "$tmp" > "$file"
+  rm -f "$tmp"
+}
+
+install_nsswitch_config() {
+  if ! is_astra_se; then
+    install_local_file "$NSSWITCH_SRC" /etc/nsswitch.conf 0644
+    return 0
+  fi
+
+  log "Astra SE detected: patching /etc/nsswitch.conf without replacing it"
+  md_backup_once /etc/nsswitch.conf
+
+  patch_nsswitch_database passwd sss
+  patch_nsswitch_database group sss
+  patch_nsswitch_database shadow sss
+  patch_nsswitch_database sudoers sss
+  patch_nsswitch_database netgroup sss
+  patch_nsswitch_database automount sss
+
+  chmod 0644 /etc/nsswitch.conf
+  md_track /etc/nsswitch.conf
+  log "Patched NSS configuration: /etc/nsswitch.conf"
+}
+
 install_static_configs() {
   log "Installing config files"
 
   install_local_file "$KRB5_SRC" /etc/krb5.conf 0644
   apply_placeholders_to_file /etc/krb5.conf
 
-  install_local_file "$NSSWITCH_SRC" /etc/nsswitch.conf 0644
+  install_nsswitch_config
 
   mkdir -p /etc/ssh/sshd_config.d
   install_local_file "$SSH_MD_SRC" /etc/ssh/sshd_config.d/ssh_md.conf 0644
