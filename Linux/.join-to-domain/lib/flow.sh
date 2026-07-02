@@ -79,6 +79,60 @@ run_configure_flow() {
   handle_missing_dependencies
 }
 
+reboot_system() {
+  local choice reboot_cmd rc
+
+  cleanup_log "[INFO] User selected system reboot from main menu."
+
+  printf '\nAre you sure you want to reboot this system?\n\n'
+  printf '1) Yes\n'
+  printf '2) No\n'
+  printf 'Select an option: '
+  read_clean_input choice || choice=""
+
+  case "$choice" in
+    1)
+      if [[ "$DRY_RUN" -eq 1 ]]; then
+        info "Dry-run: reboot system"
+        return 0
+      fi
+
+      info "Rebooting system..."
+
+      if reboot_cmd="$(find_executable systemctl)"; then
+        "$reboot_cmd" reboot
+        rc=$?
+      else
+        rc=1
+      fi
+
+      if [[ "$rc" -ne 0 ]] && reboot_cmd="$(find_executable reboot)"; then
+        "$reboot_cmd"
+        rc=$?
+      fi
+
+      if [[ "$rc" -eq 0 ]]; then
+        sleep 1
+        exit 0
+      fi
+
+      error "Failed to reboot the system."
+      return 1
+      ;;
+    2)
+      return 0
+      ;;
+    "")
+      warn "Empty input. Returning to main menu."
+      return 0
+      ;;
+    *)
+      warn "Invalid option. Returning to main menu."
+      return 0
+      ;;
+  esac
+}
+
 show_menu() {
   cat <<EOF
 
@@ -88,7 +142,8 @@ show_menu() {
 1) Install required packages
 2) Configure domain join
 3) Rejoin domain
-4) Exit
+4) Reboot system
+5) Exit
 EOF
 }
 
@@ -113,7 +168,10 @@ main_menu() {
         rejoin_domain
         pause
         ;;
-      4|q|Q|exit|quit)
+      4)
+        reboot_system
+        ;;
+      5|q|Q|exit|quit)
         info "Exiting"
         exit 0
         ;;
@@ -121,7 +179,7 @@ main_menu() {
         warn "Empty input. Please select a menu item."
         ;;
       *)
-        warn "Invalid option. Please select 1, 2, 3 or 4."
+        warn "Invalid option. Please select 1, 2, 3, 4 or 5."
         ;;
     esac
   done
