@@ -22,11 +22,6 @@ validate_salt_host_resolution() {
 
 validate_initial_hosts_resolution() {
   validate_api_host_resolution
-
-  if [[ "${WITH_SALT:-0}" -eq 1 ]]; then
-    SALT_MASTER="salt.${API_HOST}"
-    validate_salt_host_resolution
-  fi
 }
 
 validate_admin_credentials() {
@@ -145,4 +140,3 @@ disable_sssd_socket_activation_if_needed() {
     log "Disabled and masked conflicting SSSD socket activation units: ${disabled_count}"
   fi
 }
-

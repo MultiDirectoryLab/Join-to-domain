@@ -82,9 +82,9 @@ run_configure_flow() {
 reboot_system() {
   local choice reboot_cmd rc
 
-  cleanup_log "[INFO] User selected system reboot from main menu."
+  cleanup_log "[INFO] User selected PC reboot from main menu."
 
-  printf '\nAre you sure you want to reboot this system?\n\n'
+  printf '\nAre you sure you want to reboot this PC?\n\n'
   printf '1) Yes\n'
   printf '2) No\n'
   printf 'Select an option: '
@@ -93,11 +93,11 @@ reboot_system() {
   case "$choice" in
     1)
       if [[ "$DRY_RUN" -eq 1 ]]; then
-        info "Dry-run: reboot system"
+        info "Dry-run: reboot PC"
         return 0
       fi
 
-      info "Rebooting system..."
+      info "Rebooting PC..."
 
       if reboot_cmd="$(find_executable systemctl)"; then
         "$reboot_cmd" reboot
@@ -142,7 +142,7 @@ show_menu() {
 1) Install required packages
 2) Configure domain join
 3) Rejoin domain
-4) Reboot system
+4) Reboot PC
 5) Exit
 EOF
 }

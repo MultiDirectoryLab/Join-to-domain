@@ -61,6 +61,8 @@ package_binaries() {
     openssh-server)
       printf '%s\n' sshd
       ;;
+    libparsec-db-sssd3|libparsec-mac-db-sssd3|libparsec-mic-db-sssd3|libparsec-aud-db-sssd3|libparsec-cap-db-sssd3|sssd-dbus)
+      ;;
     *)
       printf '%s\n' "$1"
       ;;
@@ -250,4 +252,3 @@ check_dependencies() {
   log "ERROR" "Missing commands: ${MISSING_BINARIES[*]}"
   return 1
 }
-

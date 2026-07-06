@@ -303,6 +303,8 @@ valid_ipv4_address() {
   return 0
 }
 
+MAX_DNS_SERVERS=3
+
 normalize_dns_servers() {
   local raw="$1"
   local cleaned
@@ -313,12 +315,11 @@ normalize_dns_servers() {
   validate_utf8_input "$cleaned" || return 1
 
   [[ -n "$cleaned" ]] || return 1
-  [[ "$cleaned" != *,*,* ]] || return 1
   [[ "$cleaned" != *, ]] || return 1
   [[ "$cleaned" != ,* ]] || return 1
 
   IFS=',' read -r -a parts <<< "$cleaned"
-  [[ "${#parts[@]}" -ge 1 && "${#parts[@]}" -le 2 ]] || return 1
+  [[ "${#parts[@]}" -ge 1 && "${#parts[@]}" -le "$MAX_DNS_SERVERS" ]] || return 1
 
   for item in "${parts[@]}"; do
     item="$(sanitize_input "$item")"
@@ -354,7 +355,7 @@ prompt_configure_dns() {
         ;;
       *)
         if ! dns_servers="$(normalize_dns_servers "$dns_input")"; then
-          die "Invalid MD_DNS_SERVER in environment. Example: 8.8.8.8,1.1.1.1"
+          die "Invalid MD_DNS_SERVER in environment. Example: 8.8.8.8,1.1.1.1 or 192.168.69.51,8.8.8.8,1.1.1.1"
         fi
 
         log "DNS input validated: $(dns_servers_csv "$dns_servers")"
@@ -393,7 +394,7 @@ prompt_configure_dns() {
             read_tty dns_input "Enter DNS server IPs, separated by comma [${default_dns_csv}]:"
             dns_input="${dns_input:-$default_dns_csv}"
           else
-            read_tty dns_input "Enter DNS server IPs, separated by comma [example: 8.8.8.8 or 8.8.8.8,1.1.1.1]:"
+            read_tty dns_input "Enter DNS server IPs, separated by comma [example: 8.8.8.8 or 192.168.69.51,8.8.8.8,1.1.1.1]:"
           fi
           if dns_servers="$(normalize_dns_servers "$dns_input")"; then
             log "DNS input validated: $(dns_servers_csv "$dns_servers")"
@@ -404,7 +405,7 @@ prompt_configure_dns() {
               warn "Failed to set DNS. Please check the IP addresses and network."
             fi
           else
-            warn "Invalid DNS input. Example: 8.8.8.8,1.1.1.1"
+            warn "Invalid DNS input. Example: 8.8.8.8,1.1.1.1 or 192.168.69.51,8.8.8.8,1.1.1.1"
           fi
         done
         ;;

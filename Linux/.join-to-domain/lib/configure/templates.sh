@@ -19,7 +19,10 @@ validate_files_structure() {
   need_file "$NSSWITCH_SRC"
   need_file "$SSH_MD_SRC"
   need_dir "$SSSD_CONF_D_SRC"
-  validate_non_empty_conf_dir "$SSSD_CONF_D_SRC"
+  need_file "$DEFAULT_SSSD_SRC"
+  if is_astra_se; then
+    need_file "$ASTRA_PARSEC_SSSD_SRC"
+  fi
   need_dir "$PAM_D_SRC"
 
   if [[ "${WITH_SALT:-0}" -eq 1 ]]; then

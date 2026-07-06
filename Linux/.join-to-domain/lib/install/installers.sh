@@ -1,9 +1,22 @@
 install_deb_packages() {
+  local packages=("${DEB_REQUIRED_PACKAGES[@]}")
+
   log "Detected DEB-based system: ${OS_NAME}"
 
   apt-get update
 
-  apt-get install -y "${DEB_REQUIRED_PACKAGES[@]}"
+  if is_astra_se; then
+    packages+=(
+      libparsec-db-sssd3
+      libparsec-mac-db-sssd3
+      libparsec-mic-db-sssd3
+      libparsec-aud-db-sssd3
+      libparsec-cap-db-sssd3
+      sssd-dbus
+    )
+  fi
+
+  apt-get install -y "${packages[@]}"
 
   install_local_deb_packages
 }
@@ -33,6 +46,18 @@ list_required_packages() {
   detect_package_manager
 
   if is_deb_based; then
+    if is_astra_se; then
+      printf '%s\n' \
+        "${DEB_REQUIRED_PACKAGES[@]}" \
+        libparsec-db-sssd3 \
+        libparsec-mac-db-sssd3 \
+        libparsec-mic-db-sssd3 \
+        libparsec-aud-db-sssd3 \
+        libparsec-cap-db-sssd3 \
+        sssd-dbus
+      return 0
+    fi
+
     printf '%s\n' "${DEB_REQUIRED_PACKAGES[@]}"
   elif is_rpm_based; then
     if [[ "${PM}" == "apt-get" ]]; then
@@ -44,4 +69,3 @@ list_required_packages() {
     die "Unsupported OS: ${OS_NAME}"
   fi
 }
-

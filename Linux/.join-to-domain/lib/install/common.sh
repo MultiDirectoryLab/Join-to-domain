@@ -214,6 +214,15 @@ load_os_release() {
   OS_ID="${ID:-}"
   OS_LIKE="${ID_LIKE:-}"
   OS_NAME="${PRETTY_NAME:-${OS_ID}}"
+  OS_VARIANT_ID="${VARIANT_ID:-}"
+}
+
+is_astra_linux() {
+  [[ "${OS_ID}" == "astra" ]]
+}
+
+is_astra_se() {
+  is_astra_linux && [[ "${OS_VARIANT_ID}" == "se" ]]
 }
 
 is_deb_based() {

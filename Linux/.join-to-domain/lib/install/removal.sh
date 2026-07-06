@@ -5,6 +5,9 @@ is_removable_domain_package() {
     sssd|sssd-tools|sssd-client|sssd-dbus|libnss-sss|libpam-sss|oddjob|oddjob-mkhomedir)
       return 0
       ;;
+    libparsec-db-sssd3|libparsec-mac-db-sssd3|libparsec-mic-db-sssd3|libparsec-aud-db-sssd3|libparsec-cap-db-sssd3)
+      return 0
+      ;;
     ldap-utils|openldap-clients)
       return 0
       ;;
@@ -119,4 +122,3 @@ remove_packages_rpm() {
     die "No supported package manager found"
   fi
 }
-

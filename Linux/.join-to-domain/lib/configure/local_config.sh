@@ -1,6 +1,6 @@
 build_sssd_conf() {
   need_dir "$SSSD_CONF_D_SRC"
-  validate_non_empty_conf_dir "$SSSD_CONF_D_SRC"
+  need_file "$DEFAULT_SSSD_SRC"
 
   mkdir -p /etc/sssd
   chmod 700 /etc/sssd
@@ -21,19 +21,7 @@ build_sssd_conf() {
   chown root:root /etc/sssd/conf.d
   chmod 700 /etc/sssd/conf.d
 
-  : > /etc/sssd/sssd.conf
-
-  shopt -s nullglob
-  local files=("${SSSD_CONF_D_SRC}"/*.conf)
-  shopt -u nullglob
-
-  local src
-  for src in "${files[@]}"; do
-    echo "# Source template: $(basename "$src")" >> /etc/sssd/sssd.conf
-    cat "$src" >> /etc/sssd/sssd.conf
-    echo >> /etc/sssd/sssd.conf
-  done
-
+  cp "$DEFAULT_SSSD_SRC" /etc/sssd/sssd.conf
   apply_placeholders_to_file /etc/sssd/sssd.conf
 
   chown root:root /etc/sssd/sssd.conf
@@ -44,7 +32,7 @@ build_sssd_conf() {
 
   disable_sssd_socket_activation_if_needed
 
-  log "Built single SSSD config: /etc/sssd/sssd.conf"
+  log "Built SSSD config from template: ${DEFAULT_SSSD_SRC}"
   if is_astra_se; then
     log "Astra SE detected: SSSD conf.d preserved: /etc/sssd/conf.d"
   else
@@ -189,6 +177,18 @@ install_pam_config() {
   fi
 }
 
+install_accountsservice_cache_helper() {
+  [[ -f "$ACCOUNTSERVICE_HELPER_SRC" ]] || return 0
+
+  install_local_file "$ACCOUNTSERVICE_HELPER_SRC" "$ACCOUNTSERVICE_HELPER_DST" 0755
+}
+
+install_profile_config() {
+  [[ -d "$PROFILE_D_SRC" ]] || return 0
+
+  copy_dir_files "$PROFILE_D_SRC" /etc/profile.d 0644
+}
+
 patch_nsswitch_database() {
   local db="$1"
   local service="$2"
@@ -224,6 +224,42 @@ patch_nsswitch_database() {
   rm -f "$tmp"
 }
 
+remove_nsswitch_database_service() {
+  local db="$1"
+  local service="$2"
+  local file=/etc/nsswitch.conf
+  local tmp
+
+  [[ -f "$file" ]] || die "NSS configuration not found: ${file}"
+
+  tmp="$(mktemp)"
+  awk -v db="${db}" -v service="${service}" '
+    $0 ~ "^[[:space:]]*" db ":" {
+      out = $1
+      kept = 0
+      for (i = 2; i <= NF; i++) {
+        if ($i == service) {
+          continue
+        }
+        out = out " " $i
+        kept = 1
+      }
+      if (kept == 0) {
+        out = out " files"
+      }
+      print out
+      next
+    }
+    { print }
+  ' "$file" > "$tmp" || {
+    rm -f "$tmp"
+    die "Failed to patch ${file}"
+  }
+
+  cat "$tmp" > "$file"
+  rm -f "$tmp"
+}
+
 install_nsswitch_config() {
   if ! is_astra_se; then
     install_local_file "$NSSWITCH_SRC" /etc/nsswitch.conf 0644
@@ -236,7 +272,7 @@ install_nsswitch_config() {
   patch_nsswitch_database passwd sss
   patch_nsswitch_database group sss
   patch_nsswitch_database shadow sss
-  patch_nsswitch_database sudoers sss
+  remove_nsswitch_database_service sudoers sss
   patch_nsswitch_database netgroup sss
   patch_nsswitch_database automount sss
 
@@ -257,6 +293,8 @@ install_static_configs() {
   install_local_file "$SSH_MD_SRC" /etc/ssh/sshd_config.d/ssh_md.conf 0644
 
   build_sssd_conf
+  install_accountsservice_cache_helper
+  install_profile_config
   install_pam_config
 
   if [[ -d "$SUDOERS_D_SRC" ]]; then
@@ -280,7 +318,7 @@ install_static_configs() {
       apply_placeholders_in_dir /etc/salt
     fi
 
-    install_salt_custom_modules
+    # install_salt_custom_modules
   else
     log "Community edition: Salt config files are skipped"
   fi
@@ -425,4 +463,181 @@ EOF
 
   rm -f "$ldap_client_conf"
   kdestroy || true
+}
+
+astra_parsec_sssd_package_list() {
+  printf '%s\n' \
+    libparsec-db-sssd3 \
+    libparsec-mac-db-sssd3 \
+    libparsec-mic-db-sssd3 \
+    libparsec-aud-db-sssd3 \
+    libparsec-cap-db-sssd3 \
+    sssd-dbus
+}
+
+astra_parsec_sssd_packages_installed() {
+  local package
+
+  while IFS= read -r package; do
+    [[ -n "$package" ]] || continue
+    dpkg-query -W -f='${Status}' "$package" 2>/dev/null | grep -q "install ok installed" || return 1
+  done < <(astra_parsec_sssd_package_list)
+}
+
+install_astra_parsec_sssd_packages() {
+  local package missing=()
+
+  while IFS= read -r package; do
+    [[ -n "$package" ]] || continue
+    if ! dpkg-query -W -f='${Status}' "$package" 2>/dev/null | grep -q "install ok installed"; then
+      missing+=("$package")
+    fi
+  done < <(astra_parsec_sssd_package_list)
+
+  if (( ${#missing[@]} == 0 )); then
+    log "Astra SE PARSEC/SSSD packages are installed"
+    return 0
+  fi
+
+  log "Installing Astra SE PARSEC/SSSD packages: ${missing[*]}"
+  apt-get update || die "Failed to update package index before installing Astra SE PARSEC/SSSD packages"
+  apt-get install -y "${missing[@]}" || die "Failed to install Astra SE PARSEC/SSSD packages"
+
+  astra_parsec_sssd_packages_installed || die "Astra SE PARSEC/SSSD packages are still missing after installation"
+}
+
+backup_timestamped_file() {
+  local path="$1"
+  local backup=""
+
+  if [[ -f "$path" ]]; then
+    backup="${path}.bak.$(date +%F_%H-%M-%S)"
+    cp "$path" "$backup"
+    log "Backup created: ${backup}"
+  fi
+
+  printf '%s' "$backup"
+}
+
+write_astra_parsec_sssd_conf() {
+  need_file "$ASTRA_PARSEC_SSSD_SRC"
+  mkdir -p /etc/sssd
+  chmod 700 /etc/sssd
+
+  cp "$ASTRA_PARSEC_SSSD_SRC" /etc/sssd/sssd.conf
+  apply_placeholders_to_file /etc/sssd/sssd.conf
+  chown root:root /etc/sssd/sssd.conf
+  chmod 600 /etc/sssd/sssd.conf
+  md_track /etc/sssd/sssd.conf
+
+  log "Astra SE SSSD configuration written: /etc/sssd/sssd.conf"
+}
+
+set_parsec_mswitch_db() {
+  local db="$1"
+  local source="$2"
+  local file=/etc/parsec/mswitch.conf
+  local tmp
+
+  tmp="$(mktemp)"
+  awk -v db="${db}" -v source="${source}" '
+    BEGIN { changed=0 }
+    $0 ~ "^[[:space:]]*" db ":" {
+      if (changed == 0) {
+        printf "%s: %s\n", db, source
+      }
+      changed=1
+      next
+    }
+    { print }
+    END {
+      if (changed == 0) {
+        printf "%s: %s\n", db, source
+      }
+    }
+  ' "$file" > "$tmp" || {
+    rm -f "$tmp"
+    die "Failed to patch ${file}"
+  }
+
+  cat "$tmp" > "$file"
+  rm -f "$tmp"
+}
+
+configure_astra_parsec_mswitch() {
+  local file=/etc/parsec/mswitch.conf
+
+  [[ -f "$file" ]] || die "Astra PARSEC switch configuration not found: ${file}"
+
+  backup_timestamped_file "$file" >/dev/null
+
+  set_parsec_mswitch_db mac sssd
+  set_parsec_mswitch_db audit sssd
+  set_parsec_mswitch_db mic sssd
+
+  md_track "$file"
+  log "Astra SE PARSEC mswitch configured: ${file}"
+}
+
+restart_astra_parsec_sssd_or_rollback() {
+  local sssd_backup="$1"
+
+  sss_cache -E 2>/dev/null || true
+
+  if systemctl restart sssd; then
+    log "SSSD restarted"
+    return 0
+  fi
+
+  warn "SSSD restart failed after Astra SE PARSEC configuration"
+
+  if [[ -n "$sssd_backup" && -f "$sssd_backup" ]]; then
+    cp "$sssd_backup" /etc/sssd/sssd.conf
+    chmod 600 /etc/sssd/sssd.conf
+    systemctl restart sssd 2>/dev/null || true
+    die "SSSD failed to start. Restored /etc/sssd/sssd.conf from ${sssd_backup}"
+  fi
+
+  rm -f /etc/sssd/sssd.conf
+  die "SSSD failed to start. Removed generated /etc/sssd/sssd.conf because no backup existed."
+}
+
+validate_astra_parsec_sssd_config_or_rollback() {
+  local sssd_backup="$1"
+
+  validate_no_password_based_sssd_auth
+
+  if have_cmd sssctl; then
+    if sssctl config-check; then
+      return 0
+    fi
+
+    if [[ -n "$sssd_backup" && -f "$sssd_backup" ]]; then
+      cp "$sssd_backup" /etc/sssd/sssd.conf
+      chmod 600 /etc/sssd/sssd.conf
+      die "Generated Astra SE SSSD configuration is invalid. Restored /etc/sssd/sssd.conf from ${sssd_backup}"
+    fi
+
+    rm -f /etc/sssd/sssd.conf
+    die "Generated Astra SE SSSD configuration is invalid. Removed generated /etc/sssd/sssd.conf because no backup existed."
+  fi
+
+  warn "sssctl not found, SSSD config validation skipped"
+}
+
+configure_astra_se_parsec_sssd() {
+  local sssd_backup
+
+  is_astra_se || return 0
+
+  log "Astra Linux SE detected: configuring PARSEC through SSSD"
+
+  install_astra_parsec_sssd_packages
+
+  sssd_backup="$(backup_timestamped_file /etc/sssd/sssd.conf)"
+  write_astra_parsec_sssd_conf
+  validate_astra_parsec_sssd_config_or_rollback "$sssd_backup"
+
+  configure_astra_parsec_mswitch
+  restart_astra_parsec_sssd_or_rollback "$sssd_backup"
 }

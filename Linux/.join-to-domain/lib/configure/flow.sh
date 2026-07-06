@@ -13,10 +13,6 @@ join_domain() {
     [[ -n "${API_HOST:-}" ]] || die "API_HOST is empty in environment"
     if getent hosts "${API_HOST}" >/dev/null; then
       log "DNS resolution OK: ${API_HOST}"
-      SALT_MASTER="salt.${API_HOST}"
-      if [[ "${WITH_SALT}" -eq 1 ]] && ! getent hosts "${SALT_MASTER}" >/dev/null; then
-        warn "Salt master ${SALT_MASTER} does not resolve, but continuing."
-      fi
     else
       die "DNS resolution failed for API_HOST from environment: ${API_HOST}"
     fi
@@ -38,10 +34,6 @@ join_domain() {
       fi
       if getent hosts "${API_HOST}" >/dev/null; then
         log "DNS resolution OK: ${API_HOST}"
-        SALT_MASTER="salt.${API_HOST}"
-        if [[ "${WITH_SALT}" -eq 1 ]] && ! getent hosts "${SALT_MASTER}" >/dev/null; then
-          warn "Salt master ${SALT_MASTER} does not resolve, but continuing."
-        fi
         break
       else
         warn "DNS resolution failed for ${API_HOST}. Please check the address."
@@ -87,6 +79,7 @@ join_domain() {
 
   validate_keytab
   validate_ldap_gssapi_auth
+  configure_astra_se_parsec_sssd
 
   configure_salt
 

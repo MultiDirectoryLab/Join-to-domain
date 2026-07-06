@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+set -u
+
+user="${PAM_USER:-}"
+accounts_dir="/var/lib/AccountsService/users"
+
+[[ -n "$user" ]] || exit 0
+[[ "$user" != */* && "$user" != "." && "$user" != ".." ]] || exit 0
+
+case "$user" in
+  root|daemon|bin|sys|sync|games|man|lp|mail|news|uucp|proxy|www-data|backup|list|irc|_apt|nobody|messagebus|sssd|gdm|lightdm|systemd-*)
+    exit 0
+    ;;
+esac
+
+entry="$(getent passwd "$user" 2>/dev/null || true)"
+[[ -n "$entry" ]] || exit 0
+
+IFS=: read -r name _ uid _ _ home shell <<< "$entry"
+
+[[ "$name" == "$user" ]] || exit 0
+[[ "$uid" =~ ^[0-9]+$ ]] || exit 0
+(( uid >= 1000 )) || exit 0
+[[ -n "$home" && "$home" != "/" ]] || exit 0
+[[ -n "$shell" && "$shell" != "/usr/sbin/nologin" && "$shell" != "/bin/false" ]] || exit 0
+
+mkdir -p "$accounts_dir" || exit 0
+
+tmp="$(mktemp "${accounts_dir}/.md-user.XXXXXX")" || exit 0
+{
+  printf '[User]\n'
+  printf 'SystemAccount=false\n'
+} > "$tmp" || {
+  rm -f "$tmp"
+  exit 0
+}
+
+chmod 0600 "$tmp" 2>/dev/null || true
+chown root:root "$tmp" 2>/dev/null || true
+mv -f -- "$tmp" "${accounts_dir}/${name}"
+
+exit 0

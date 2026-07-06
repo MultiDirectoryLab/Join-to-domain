@@ -24,7 +24,7 @@ krb5_conf_looks_domain_managed() {
 
 sssd_conf_has_domain_block() {
   [[ -f /etc/sssd/sssd.conf ]] || return 1
-  grep -Eq '^\[domain/[^]]+\]|MultiDirectory|Source template: .*domain' /etc/sssd/sssd.conf 2>/dev/null
+  grep -Eq '^\[domain/[^]]+\]|MultiDirectory' /etc/sssd/sssd.conf 2>/dev/null
 }
 
 detect_domain_state() {
