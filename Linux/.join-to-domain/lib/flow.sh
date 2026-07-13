@@ -21,6 +21,27 @@ configure_domain() {
   return $?
 }
 
+leave_domain_from_menu() {
+  log "INFO" "Domain leave requested"
+
+  if ! need_script "$CONFIGURE_SCRIPT"; then
+    return 1
+  fi
+
+  if [[ "${EUID:-$(id -u)}" -ne 0 && "$DRY_RUN" -eq 0 ]]; then
+    error "Domain leave requires root. Run: sudo $0"
+    return 1
+  fi
+
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    info "Dry-run: leave domain"
+    return 0
+  fi
+
+  info "Running domain leave"
+  MD_CALLED_FROM_INSTALL_PACKAGES=1 bash "$CONFIGURE_SCRIPT" leave < /dev/tty
+}
+
 rejoin_domain() {
   rejoin_log "Rejoin requested"
 
@@ -84,10 +105,10 @@ reboot_system() {
 
   cleanup_log "[INFO] User selected PC reboot from main menu."
 
-  printf '\nAre you sure you want to reboot this PC?\n\n'
-  printf '1) Yes\n'
-  printf '2) No\n'
-  printf 'Select an option: '
+  printf '\n%s\n\n' "$(tr_text prompt.reboot)"
+  printf '1) %s\n' "$(tr_text answer.yes)"
+  printf '2) %s\n' "$(tr_text answer.no)"
+  printf '%s: ' "$(tr_text prompt.select)"
   read_clean_input choice || choice=""
 
   case "$choice" in
@@ -97,7 +118,7 @@ reboot_system() {
         return 0
       fi
 
-      info "Rebooting PC..."
+      info "$(tr_text status.rebooting)"
 
       if reboot_cmd="$(find_executable systemctl)"; then
         "$reboot_cmd" reboot
@@ -116,18 +137,18 @@ reboot_system() {
         exit 0
       fi
 
-      error "Failed to reboot the system."
+      error "$(tr_text error.reboot)"
       return 1
       ;;
     2)
       return 0
       ;;
     "")
-      warn "Empty input. Returning to main menu."
+      warn "$(tr_text status.return_menu)"
       return 0
       ;;
     *)
-      warn "Invalid option. Returning to main menu."
+      warn "$(tr_text status.return_menu)"
       return 0
       ;;
   esac
@@ -137,13 +158,14 @@ show_menu() {
   cat <<EOF
 
 ========================================
- Join to Domain
+ $(tr_text menu.title)
 ========================================
-1) Install required packages
-2) Configure domain join
-3) Rejoin domain
-4) Reboot PC
-5) Exit
+1) $(tr_text menu.install)
+2) $(tr_text menu.join)
+3) $(tr_text menu.rejoin)
+4) $(tr_text menu.leave)
+5) $(tr_text menu.reboot)
+6) $(tr_text menu.exit)
 EOF
 }
 
@@ -152,7 +174,7 @@ main_menu() {
 
   while true; do
     show_menu
-    printf 'Select an option: '
+    printf '%s: ' "$(tr_text prompt.select)"
     read_clean_input choice || choice=""
 
     case "$choice" in
@@ -169,17 +191,21 @@ main_menu() {
         pause
         ;;
       4)
+        leave_domain_from_menu
+        pause
+        ;;
+      5)
         reboot_system
         ;;
-      5|q|Q|exit|quit)
-        info "Exiting"
+      6|q|Q|exit|quit)
+        info "$(tr_text status.exiting)"
         exit 0
         ;;
       "")
-        warn "Empty input. Please select a menu item."
+        warn "$(tr_text error.empty_menu)"
         ;;
       *)
-        warn "Invalid option. Please select 1, 2, 3, 4 or 5."
+        warn "$(tr_text error.invalid_menu)"
         ;;
     esac
   done

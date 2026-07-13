@@ -29,6 +29,7 @@ LOG_FILE="/var/log/multidirectory-install-packages.log"
 
 DEB_REQUIRED_PACKAGES=(
   ca-certificates
+  openssl
   curl
   jq
   file
@@ -47,6 +48,7 @@ DEB_REQUIRED_PACKAGES=(
 
 RPM_REQUIRED_PACKAGES=(
   ca-certificates
+  openssl
   curl
   jq
   file
@@ -63,6 +65,7 @@ RPM_REQUIRED_PACKAGES=(
 
 RPM_APT_REQUIRED_PACKAGES=(
   ca-certificates
+  openssl
   curl
   jq
   file

@@ -16,6 +16,7 @@ source_join_module() {
 }
 
 source_join_module common || { return 1 2>/dev/null || exit 1; }
+source_join_module i18n || { return 1 2>/dev/null || exit 1; }
 source_join_module dependencies || { return 1 2>/dev/null || exit 1; }
 source_join_module domain_state || { return 1 2>/dev/null || exit 1; }
 source_join_module cleanup || { return 1 2>/dev/null || exit 1; }
@@ -25,5 +26,6 @@ main() {
   load_env_file
   parse_args "$@"
   setup_logging
+  select_ui_language
   main_menu
 }

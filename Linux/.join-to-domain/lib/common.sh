@@ -17,6 +17,8 @@ MD_BACKUP_DIR="${MD_STATE_DIR}/backups"
 MD_MANIFEST="${MD_STATE_DIR}/manifest"
 MD_JOIN_ENV="/etc/MultiDirectory/state/join.env"
 SALT_PKG_MODULE_DST="/var/cache/salt/minion/extmods/modules/pkg.py"
+MD_GPUPDATE_DST="/usr/local/libexec/multidirectory/md-gpupdate"
+MD_GPUPDATE_LINK="/usr/local/bin/md-gpupdate"
 DEBUG=0
 DRY_RUN=0
 LOG_ENABLED=0
@@ -170,7 +172,7 @@ parse_args() {
 pause() {
   local _
 
-  printf '\nPress Enter to return to the main menu... '
+  printf '\n%s ' "$(tr_text prompt.press_enter)"
   read_clean_input _ || true
 }
 
@@ -201,6 +203,10 @@ sanitize_input() {
 read_clean_input() {
   local var="$1"
   local raw cleaned
+
+  if [[ -t 0 && -r /dev/tty ]]; then
+    stty echo < /dev/tty 2>/dev/null || true
+  fi
 
   printf -v "$var" '%s' ""
 

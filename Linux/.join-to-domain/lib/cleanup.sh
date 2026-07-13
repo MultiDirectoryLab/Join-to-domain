@@ -67,6 +67,8 @@ cleanup_domain_runtime_state() {
     "${MD_STATE_DIR}/rollback-in-progress"
     "$MD_MANIFEST"
     "$SALT_PKG_MODULE_DST"
+    "$MD_GPUPDATE_LINK"
+    "$MD_GPUPDATE_DST"
   )
 
   for path in "${domain_paths[@]}"; do

@@ -224,52 +224,74 @@ EOF
 configure_dns_networkmanager() {
   local ns="$1"
   local nm_dns="$1"
-  local iface conn
+  local iface conn_uuid
 
   have_cmd nmcli || return 1
-  systemctl is-active --quiet NetworkManager.service 2>/dev/null || return 1
+  LC_ALL=C nmcli -t -f RUNNING general 2>/dev/null | grep -qx 'running' || return 1
 
   iface="$(detect_default_iface)"
   [[ -n "$iface" ]] || return 1
 
-  conn="$(nmcli -t -f NAME,DEVICE connection show --active 2>/dev/null | awk -F: -v dev="$iface" '$2 == dev {print $1; exit}')"
-  [[ -n "$conn" ]] || return 1
+  conn_uuid="$(
+    LC_ALL=C nmcli -t -f UUID,DEVICE connection show --active 2>/dev/null \
+      | awk -F: -v dev="$iface" '$2 == dev {print $1; exit}'
+  )"
+  [[ -n "$conn_uuid" ]] || return 1
 
-  nmcli connection modify "$conn" ipv4.dns "$nm_dns" ipv4.ignore-auto-dns yes || return 1
+  LC_ALL=C nmcli connection modify uuid "$conn_uuid" \
+    ipv4.dns "$nm_dns" \
+    ipv4.ignore-auto-dns yes \
+    || return 1
 
-  nmcli connection up "$conn" >/dev/null 2>&1 || true
+  LC_ALL=C nmcli connection up uuid "$conn_uuid" >/dev/null 2>&1 || return 1
 
   log "NetworkManager DNS value: ${nm_dns}"
-  log "Persistent DNS configured via NetworkManager connection '${conn}': ${ns}"
+  log "Persistent DNS configured via NetworkManager connection UUID ${conn_uuid}: ${ns}"
   return 0
 }
 
 configure_dns_static_resolv_conf() {
   local ns="$1"
-  local server
+  local tmp_file
 
   if [[ -L /etc/resolv.conf ]]; then
-    warn "/etc/resolv.conf is a symlink; direct append skipped to avoid breaking managed resolver configuration"
+    warn "/etc/resolv.conf is a symlink; direct update skipped to avoid breaking managed resolver configuration"
     return 1
   fi
 
   md_backup_once /etc/resolv.conf
 
   touch /etc/resolv.conf
-  for server in $ns; do
-    if grep -Eq "^[[:space:]]*nameserver[[:space:]]+${server}([[:space:]]|$)" /etc/resolv.conf 2>/dev/null; then
-      log "nameserver already present in resolv.conf: ${server}"
-      continue
-    fi
+  tmp_file="$(mktemp /etc/resolv.conf.multidirectory.XXXXXX)"
 
-    printf 'nameserver %s\n' "$server" >> /etc/resolv.conf
-    log "Added nameserver to resolv.conf: ${server}"
-  done
+  if ! awk -v md_servers="$ns" '
+    BEGIN {
+      count = split(md_servers, servers, /[[:space:]]+/)
+      for (i = 1; i <= count; i++) {
+        if (servers[i] != "") {
+          md[servers[i]] = 1
+          print "nameserver " servers[i]
+        }
+      }
+    }
+    /^[[:space:]]*nameserver[[:space:]]+/ {
+      if ($2 in md) next
+    }
+    { print }
+  ' /etc/resolv.conf >"$tmp_file"; then
+    rm -f "$tmp_file"
+    return 1
+  fi
 
-  chmod 0644 /etc/resolv.conf
+  chmod 0644 "$tmp_file"
+  if ! mv -f "$tmp_file" /etc/resolv.conf; then
+    rm -f "$tmp_file"
+    return 1
+  fi
+
   md_track /etc/resolv.conf
 
-  log "Persistent DNS configured via static /etc/resolv.conf: ${ns}"
+  log "MultiDirectory DNS placed first in static /etc/resolv.conf: ${ns}"
 }
 
 md_set_resolv_first() {

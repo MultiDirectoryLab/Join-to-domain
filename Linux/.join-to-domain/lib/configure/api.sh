@@ -2,7 +2,7 @@ api_auth_cookie() {
   local user="$1"
   local pass="$2"
 
-  curl -k -sS -X POST "https://${API_HOST}/api/auth/" \
+  curl -sS -X POST "https://${API_HOST}/api/auth/" \
     --connect-timeout "${API_CONNECT_TIMEOUT}" \
     --max-time "${API_MAX_TIME}" \
     -H "accept: application/json" \
@@ -21,7 +21,7 @@ api_search() {
   local filter="$4"
   local attrs_json="$5"
 
-  curl -k -sS -X POST "https://${API_HOST}/api/entry/search" \
+  curl -sS -X POST "https://${API_HOST}/api/entry/search" \
     --connect-timeout "${API_CONNECT_TIMEOUT}" \
     --max-time "${API_MAX_TIME}" \
     -H "accept: application/json" \
@@ -96,7 +96,7 @@ api_principal_add() {
   local primary="${spn%%/*}"
   local instance="${spn#*/}"
 
-  curl -k -sS -X POST "https://${API_HOST}/api/kerberos/principal/add" \
+  curl -sS -X POST "https://${API_HOST}/api/kerberos/principal/add" \
     --connect-timeout "${API_CONNECT_TIMEOUT}" \
     --max-time "${API_MAX_TIME}" \
     -H "accept: application/json" \
@@ -151,7 +151,7 @@ api_ktadd_download() {
   log "Keytab principals: $*"
 
   http_code="$(
-    curl -k -sS \
+    curl -sS \
       --connect-timeout "${API_CONNECT_TIMEOUT}" \
       --max-time "${API_MAX_TIME}" \
       -D /tmp/md-ktadd.hdr \
@@ -229,7 +229,7 @@ api_update_many_replace_uac() {
   )"
 
   resp="$(
-    curl -k -sS -w "\n%{http_code}" \
+    curl -sS -w "\n%{http_code}" \
       --connect-timeout "${API_CONNECT_TIMEOUT}" \
       --max-time "${API_MAX_TIME}" \
       -X PATCH "https://${API_HOST}/api/entry/update_many" \

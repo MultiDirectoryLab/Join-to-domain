@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+export PYTHONWARNINGS="${PYTHONWARNINGS:-ignore}"
+exec salt-call \
+  --state-output=changes \
+  --state-verbose=False \
+  state.highstate "$@"

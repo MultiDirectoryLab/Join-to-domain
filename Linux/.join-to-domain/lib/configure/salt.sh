@@ -6,7 +6,7 @@ api_delete_salt_minion_key() {
   [[ -n "$minion_id" ]] || return 0
 
   resp="$(
-    curl -k -sS -w "\n%{http_code}" \
+    curl -sS -w "\n%{http_code}" \
       --connect-timeout "${API_CONNECT_TIMEOUT}" \
       --max-time "${API_MAX_TIME}" \
       -X DELETE "https://${API_HOST}/api/salt/minion/${minion_id}" \
@@ -111,6 +111,22 @@ install_salt_custom_modules() {
   log "Custom Salt pkg module installed"
 }
 
+install_md_gpupdate() {
+  [[ "${WITH_SALT:-0}" -eq 1 ]] || return 0
+
+  need_file "$MD_GPUPDATE_SRC"
+  md_backup_once "$MD_GPUPDATE_DST"
+  md_backup_once "$MD_GPUPDATE_LINK"
+
+  mkdir -p "$(dirname "$MD_GPUPDATE_DST")" "$(dirname "$MD_GPUPDATE_LINK")"
+  install -m 0755 -o root -g root "$MD_GPUPDATE_SRC" "$MD_GPUPDATE_DST"
+  ln -sfn "$MD_GPUPDATE_DST" "$MD_GPUPDATE_LINK"
+
+  md_track "$MD_GPUPDATE_DST"
+  md_track "$MD_GPUPDATE_LINK"
+  log "Installed md-gpupdate symlink: ${MD_GPUPDATE_LINK} -> ${MD_GPUPDATE_DST}"
+}
+
 prepare_salt_minion_identity() {
   local guid="$1"
   local gpo_token="$2"
@@ -185,7 +201,7 @@ accept_salt_minion_key() {
     log "Attempt ${attempt}/${retries}: accepting Salt minion key"
 
     resp="$(
-      curl -k -sS -w "\n%{http_code}" \
+      curl -sS -w "\n%{http_code}" \
         --connect-timeout "${API_CONNECT_TIMEOUT}" \
         --max-time "${API_MAX_TIME}" \
         -X POST "https://${API_HOST}/api/salt/minion" \
@@ -248,13 +264,14 @@ configure_salt() {
   SALT_MASTER="salt.${DOMAIN}"
 
   require_salt_minion_ready
+  install_md_gpupdate
   refresh_api_token_for_salt
 
   log "Checking DNS resolution: SALT_MASTER=${SALT_MASTER}"
   getent hosts "${SALT_MASTER}" >/dev/null || die "DNS resolution failed for ${SALT_MASTER}"
 
   gpo_token="$(
-    curl -k -sS -X GET "https://${API_HOST}/api/salt/master/key" \
+    curl -sS -X GET "https://${API_HOST}/api/salt/master/key" \
       --connect-timeout "${API_CONNECT_TIMEOUT}" \
       --max-time "${API_MAX_TIME}" \
       -H "Cookie: id=${access_token}" \

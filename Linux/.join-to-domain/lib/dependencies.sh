@@ -31,6 +31,9 @@ package_binaries() {
   case "$1" in
     ca-certificates|libnss-sss|libpam-sss|libpam-modules|sssd-client|oddjob-mkhomedir)
       ;;
+    openssl)
+      printf '%s\n' openssl
+      ;;
     ldap-utils|openldap-clients)
       printf '%s\n' ldapwhoami
       ;;

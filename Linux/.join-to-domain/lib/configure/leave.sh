@@ -52,6 +52,8 @@ validate_leave_credentials() {
   log "Checking DNS resolution: ${API_HOST}"
   getent hosts "${API_HOST}" >/dev/null || die "DNS resolution failed: ${API_HOST}"
 
+  install_md_server_certificate
+
   log "Authenticating domain administrator"
   leave_token="$(api_auth_cookie "$leave_login" "$leave_password")"
   [[ -n "$leave_token" ]] || die "Failed to authenticate domain administrator"
@@ -163,6 +165,8 @@ restore_backups() {
   restore_one /etc/salt/minion_id
   restore_one /etc/salt/pki/minion
   restore_one "$SALT_PKG_MODULE_DST"
+  restore_one "$MD_GPUPDATE_LINK"
+  restore_one "$MD_GPUPDATE_DST"
 }
 
 cleanup_domain_state() {

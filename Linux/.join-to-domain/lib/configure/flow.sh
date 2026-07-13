@@ -41,6 +41,8 @@ join_domain() {
     done
   fi
 
+  install_md_server_certificate
+
   while true; do
     read_tty LOGIN "Enter administrator login, for example admin:"
     read_secret_tty PASSWORD "Enter administrator password:"

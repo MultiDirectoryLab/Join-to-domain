@@ -121,16 +121,16 @@ confirm_safe_leave() {
 
   cat <<EOF
 
-Domain-related configuration was found.
-This will perform a safe MultiDirectory leave.
-PAM, NSS, SSH, hostname and hosts files will be kept unless a change passes safety checks.
+$(tr_text leave.title)
+$(tr_text leave.description)
+$(tr_text leave.keep)
 
-1) Continue safe leave
-2) Cancel and return to main menu
+1) $(tr_text leave.continue)
+2) $(tr_text leave.cancel)
 EOF
 
   while true; do
-    printf 'Select an option: '
+    printf '%s: ' "$(tr_text prompt.select)"
     read_clean_input choice || choice=""
 
     case "$choice" in
@@ -141,7 +141,7 @@ EOF
         return 1
         ;;
       *)
-        warn "Invalid option. Please select 1 or 2."
+        warn "$(tr_text error.invalid_12)"
         ;;
     esac
   done

@@ -27,6 +27,7 @@ validate_files_structure() {
 
   if [[ "${WITH_SALT:-0}" -eq 1 ]]; then
     need_dir "$SALT_SRC"
+    need_file "$MD_GPUPDATE_SRC"
 
     if [[ -f "$SALT_PKG_MODULE_SRC" ]]; then
       need_file "$SALT_PKG_MODULE_SRC"
