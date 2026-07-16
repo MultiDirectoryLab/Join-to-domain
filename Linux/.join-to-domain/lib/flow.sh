@@ -42,6 +42,27 @@ leave_domain_from_menu() {
   MD_CALLED_FROM_INSTALL_PACKAGES=1 bash "$CONFIGURE_SCRIPT" leave < /dev/tty
 }
 
+renew_certificate_from_menu() {
+  log "INFO" "TLS certificate renewal requested"
+
+  if ! need_script "$CONFIGURE_SCRIPT"; then
+    return 1
+  fi
+
+  if [[ "${EUID:-$(id -u)}" -ne 0 && "$DRY_RUN" -eq 0 ]]; then
+    error "Certificate renewal requires root. Run: sudo $0"
+    return 1
+  fi
+
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    info "Dry-run: renew MultiDirectory TLS certificate"
+    return 0
+  fi
+
+  info "Renewing MultiDirectory TLS certificate"
+  MD_CALLED_FROM_INSTALL_PACKAGES=1 bash "$CONFIGURE_SCRIPT" renew-certificate < /dev/tty
+}
+
 rejoin_domain() {
   rejoin_log "Rejoin requested"
 
@@ -164,8 +185,9 @@ show_menu() {
 2) $(tr_text menu.join)
 3) $(tr_text menu.rejoin)
 4) $(tr_text menu.leave)
-5) $(tr_text menu.reboot)
-6) $(tr_text menu.exit)
+5) $(tr_text menu.renew_certificate)
+6) $(tr_text menu.reboot)
+7) $(tr_text menu.exit)
 EOF
 }
 
@@ -195,9 +217,13 @@ main_menu() {
         pause
         ;;
       5)
+        renew_certificate_from_menu
+        pause
+        ;;
+      6)
         reboot_system
         ;;
-      6|q|Q|exit|quit)
+      7|q|Q|exit|quit)
         info "$(tr_text status.exiting)"
         exit 0
         ;;

@@ -117,6 +117,9 @@ main() {
     leave)
       leave_domain
       ;;
+    renew-certificate)
+      renew_md_server_certificate
+      ;;
     *)
       usage
       ;;

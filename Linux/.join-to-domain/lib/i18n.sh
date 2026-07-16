@@ -10,6 +10,7 @@ tr_text() {
     ru:menu.join) printf 'Настроить присоединение к домену' ;;
     ru:menu.rejoin) printf 'Повторно присоединить к домену' ;;
     ru:menu.leave) printf 'Выйти из домена' ;;
+    ru:menu.renew_certificate) printf 'Обновить сертификат' ;;
     ru:menu.reboot) printf 'Перезагрузить компьютер' ;;
     ru:menu.exit) printf 'Выход' ;;
     ru:prompt.select) printf 'Выберите пункт' ;;
@@ -21,7 +22,7 @@ tr_text() {
     ru:status.rebooting) printf 'Перезагрузка компьютера...' ;;
     ru:error.reboot) printf 'Не удалось перезагрузить компьютер.' ;;
     ru:error.empty_menu) printf 'Пустой ввод. Выберите пункт меню.' ;;
-    ru:error.invalid_menu) printf 'Неверный пункт. Выберите 1, 2, 3, 4, 5 или 6.' ;;
+    ru:error.invalid_menu) printf 'Неверный пункт. Выберите 1, 2, 3, 4, 5, 6 или 7.' ;;
     ru:error.invalid_12) printf 'Неверный пункт. Выберите 1 или 2.' ;;
     ru:status.return_menu) printf 'Возврат в главное меню.' ;;
     ru:leave.title) printf 'Обнаружена конфигурация домена.' ;;
@@ -37,6 +38,7 @@ tr_text() {
     *:menu.join) printf 'Configure domain join' ;;
     *:menu.rejoin) printf 'Rejoin domain' ;;
     *:menu.leave) printf 'Leave domain' ;;
+    *:menu.renew_certificate) printf 'Renew certificate' ;;
     *:menu.reboot) printf 'Reboot PC' ;;
     *:menu.exit) printf 'Exit' ;;
     *:prompt.select) printf 'Select an option' ;;
@@ -48,7 +50,7 @@ tr_text() {
     *:status.rebooting) printf 'Rebooting PC...' ;;
     *:error.reboot) printf 'Failed to reboot the system.' ;;
     *:error.empty_menu) printf 'Empty input. Please select a menu item.' ;;
-    *:error.invalid_menu) printf 'Invalid option. Please select 1, 2, 3, 4, 5 or 6.' ;;
+    *:error.invalid_menu) printf 'Invalid option. Please select 1, 2, 3, 4, 5, 6 or 7.' ;;
     *:error.invalid_12) printf 'Invalid option. Please select 1 or 2.' ;;
     *:status.return_menu) printf 'Returning to main menu.' ;;
     *:leave.title) printf 'Domain-related configuration was found.' ;;

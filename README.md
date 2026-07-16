@@ -14,8 +14,10 @@ Menu options:
 1. Install required packages
 2. Configure domain join
 3. Rejoin domain
-4. Reboot system
-5. Exit
+4. Leave domain
+5. Renew certificate
+6. Reboot system
+7. Exit
 
 Optional flags:
 

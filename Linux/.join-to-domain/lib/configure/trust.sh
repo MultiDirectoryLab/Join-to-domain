@@ -40,3 +40,29 @@ install_md_server_certificate() (
 
   log "MultiDirectory TLS certificate installed: ${trust_file}"
 )
+
+renew_md_server_certificate() {
+  load_join_state
+  API_HOST="${SAVED_API_HOST:-}"
+
+  while [[ -z "${API_HOST}" ]]; do
+    read_tty API_HOST "Enter MULTIDIRECTORY server address (FQDN):"
+    API_HOST="$(sanitize_input "${API_HOST}")"
+
+    if [[ -z "${API_HOST}" ]]; then
+      warn "Server address cannot be empty"
+      continue
+    fi
+
+    if ! valid_join_domain "${API_HOST}"; then
+      warn "Invalid server address: ${API_HOST}"
+      API_HOST=""
+    fi
+  done
+
+  log "Checking DNS resolution: ${API_HOST}"
+  getent hosts "${API_HOST}" >/dev/null || die "DNS resolution failed: ${API_HOST}"
+
+  install_md_server_certificate
+  log "MultiDirectory TLS certificate renewed successfully"
+}
