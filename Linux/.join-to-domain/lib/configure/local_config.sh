@@ -484,6 +484,40 @@ astra_parsec_sssd_packages_installed() {
   done < <(astra_parsec_sssd_package_list)
 }
 
+astra_parsec_core_installed() {
+  dpkg-query -W -f='${Status}' libparsec-base3 2>/dev/null | grep -q "install ok installed"
+}
+
+diagnose_missing_astra_parsec_mswitch() {
+  local file=/etc/parsec/mswitch.conf
+
+  warn "PARSEC configuration file '${file}' was not found."
+  warn "No supported alternative PARSEC switch configuration is documented for this Astra Linux release."
+
+  if astra_parsec_core_installed; then
+    warn "PARSEC core package 'libparsec-base3' is installed, but its switch configuration is absent."
+    warn "Restore '${file}' using the Astra Linux package or supported domain-client configuration for this release."
+  else
+    warn "PARSEC core component is unavailable: package 'libparsec-base3' is not installed."
+    warn "Install the Astra Linux SE PARSEC components for this release before enabling PARSEC/SSSD integration."
+  fi
+
+  warn "Skipping PARSEC-specific SSSD integration; standard SSSD domain integration will continue."
+}
+
+astra_parsec_mswitch_available() {
+  local file=/etc/parsec/mswitch.conf
+
+  if [[ ! -e "$file" ]]; then
+    diagnose_missing_astra_parsec_mswitch
+    return 1
+  fi
+
+  [[ -f "$file" ]] || die "Unsupported PARSEC configuration: ${file} is not a regular file"
+  [[ -r "$file" ]] || die "PARSEC configuration is not readable: ${file}"
+  [[ -w "$file" ]] || die "PARSEC configuration is not writable: ${file}"
+}
+
 install_astra_parsec_sssd_packages() {
   local package missing=()
 
@@ -567,7 +601,7 @@ set_parsec_mswitch_db() {
 configure_astra_parsec_mswitch() {
   local file=/etc/parsec/mswitch.conf
 
-  [[ -f "$file" ]] || die "Astra PARSEC switch configuration not found: ${file}"
+  [[ -f "$file" ]] || die "PARSEC switch configuration disappeared during configuration: ${file}"
 
   backup_timestamped_file "$file" >/dev/null
 
@@ -630,7 +664,11 @@ configure_astra_se_parsec_sssd() {
 
   is_astra_se || return 0
 
-  log "Astra Linux SE detected: configuring PARSEC through SSSD"
+  log "Astra Linux SE detected: checking PARSEC/SSSD integration"
+
+  if ! astra_parsec_mswitch_available; then
+    return 0
+  fi
 
   install_astra_parsec_sssd_packages
 
