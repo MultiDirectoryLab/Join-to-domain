@@ -4,6 +4,7 @@ set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 
 GREEN='\033[0;32m'
+BLUE='\033[0;34m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
 NC='\033[0m'
@@ -47,28 +48,35 @@ LOG_FILE="/var/log/multidirectory-join.log"
 API_CONNECT_TIMEOUT=10
 API_MAX_TIME=30
 
-log_raw() {
-  local msg="$1"
-
-  printf '%b\n' "$msg" > /dev/tty
-  printf '%b\n' "$msg" >> "$LOG_FILE" 2>/dev/null || true
+log() {
+  printf '[DETAIL] %s\n' "$*" >> "$LOG_FILE" 2>/dev/null || true
 }
 
-log() {
-  log_raw "${GREEN}[OK]${NC} $*"
+info() {
+  printf '%b\n' "${BLUE}[INFO]${NC} $*" > /dev/tty
+  printf '[INFO] %s\n' "$*" >> "$LOG_FILE" 2>/dev/null || true
+}
+
+ok() {
+  printf '%b\n' "${GREEN}[OK]${NC} $*" > /dev/tty
+  printf '[OK] %s\n' "$*" >> "$LOG_FILE" 2>/dev/null || true
 }
 
 warn() {
-  log_raw "${YELLOW}[WARN]${NC} $*"
+  printf '%b\n' "${YELLOW}[WARN]${NC} $*" > /dev/tty
+  printf '[WARN] %s\n' "$*" >> "$LOG_FILE" 2>/dev/null || true
 }
 
 die() {
-  log_raw "${RED}[ERR]${NC} $*"
+  printf '%b\n' "${RED}[ERROR]${NC} $*" > /dev/tty
+  printf '[ERROR] %s\n' "$*" >> "$LOG_FILE" 2>/dev/null || true
+  printf '%b\n' "${BLUE}[INFO]${NC} Full log: ${LOG_FILE}" > /dev/tty
+  printf '[INFO] Full log: %s\n' "$LOG_FILE" >> "$LOG_FILE" 2>/dev/null || true
   exit 1
 }
 
 tty_echo() {
-  log_raw "$*"
+  printf '%b\n' "$*" > /dev/tty
 }
 
 usage() {

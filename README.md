@@ -12,7 +12,7 @@ sudo ./join-to-domain.sh
 Menu options:
 
 1. Install required packages
-2. Configure domain join
+2. Join domain
 3. Rejoin domain
 4. Leave domain
 5. Renew certificate

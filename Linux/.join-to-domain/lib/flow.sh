@@ -92,12 +92,12 @@ rejoin_domain() {
       return 1
     fi
 
-    info "Return to main menu and run Configure domain join when ready"
+    status_info "Return to main menu and run Join domain when ready"
     rejoin_log "Returning to main menu after safe leave"
     return 0
   fi
 
-  info "No domain-related configuration detected. Starting normal join flow."
+  status_info "No domain-related configuration detected. Starting normal join flow."
   rejoin_log "No domain-related configuration detected; running configure flow"
   run_configure_flow
   local code=$?
