@@ -7,7 +7,7 @@ tr_text() {
     ru:language.en) printf 'English' ;;
     ru:menu.title) printf 'Присоединение к домену' ;;
     ru:menu.install) printf 'Установить необходимые пакеты' ;;
-    ru:menu.join) printf 'Настроить присоединение к домену' ;;
+    ru:menu.join) printf 'Присоединиться к домену' ;;
     ru:menu.rejoin) printf 'Повторно присоединить к домену' ;;
     ru:menu.leave) printf 'Выйти из домена' ;;
     ru:menu.renew_certificate) printf 'Обновить сертификат' ;;
@@ -35,7 +35,7 @@ tr_text() {
     *:language.en) printf 'English' ;;
     *:menu.title) printf 'Join to Domain' ;;
     *:menu.install) printf 'Install required packages' ;;
-    *:menu.join) printf 'Configure domain join' ;;
+    *:menu.join) printf 'Join domain' ;;
     *:menu.rejoin) printf 'Rejoin domain' ;;
     *:menu.leave) printf 'Leave domain' ;;
     *:menu.renew_certificate) printf 'Renew certificate' ;;

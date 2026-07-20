@@ -346,7 +346,7 @@ create_computer_object_if_needed() {
   )"
 
   if [[ -n "${exists_dn}" ]]; then
-    warn "Computer already exists in LDAP: ${exists_dn}. Creating will be skipped."
+    info "Computer already exists in LDAP, creation skipped"
     COMPUTER_DN="$exists_dn"
     enable_computer_account_if_disabled "${exists_dn}" "${exists_uac}"
     return 0
@@ -642,7 +642,8 @@ validate_astra_parsec_sssd_config_or_rollback() {
   validate_no_password_based_sssd_auth
 
   if have_cmd sssctl; then
-    if sssctl config-check; then
+    if sssctl config-check >> "$LOG_FILE" 2>&1; then
+      ok "SSSD configuration validated"
       return 0
     fi
 
@@ -664,6 +665,7 @@ configure_astra_se_parsec_sssd() {
 
   is_astra_se || return 0
 
+  info "Astra Linux SE detected: preserving existing SSSD snippets"
   log "Astra Linux SE detected: checking PARSEC/SSSD integration"
 
   if ! astra_parsec_mswitch_available; then

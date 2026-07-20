@@ -199,7 +199,7 @@ leave_domain() {
   setup_logging
   md_init_state
 
-  warn "Leaving MultiDirectory domain"
+  info "Leaving MultiDirectory domain"
 
   load_os_release
 
@@ -226,8 +226,8 @@ leave_domain() {
   restart_after_leave
 
   log "Local leave cleanup completed"
-  log "MultiDirectory leave completed"
-  warn "System reboot is recommended"
+  ok "MultiDirectory leave completed"
+  info "System reboot is recommended"
 }
 
 rollback_local_changes() {
@@ -252,7 +252,7 @@ rollback_local_changes() {
 
   set -e
 
-  warn "Rollback completed"
+  info "Rollback completed"
 }
 
 on_join_error() {

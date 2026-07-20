@@ -36,6 +36,7 @@ DETECTED_DOMAIN_REASONS=()
 PAM_SAFETY_OK=0
 
 GREEN='\033[0;32m'
+BLUE='\033[0;34m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
 NC='\033[0m'
@@ -68,6 +69,11 @@ cleanup_log() {
 info() {
   printf '%b\n' "${GREEN}[OK]${NC} $*"
   log "OK" "$*"
+}
+
+status_info() {
+  printf '%b\n' "${BLUE}[INFO]${NC} $*"
+  log "INFO" "$*"
 }
 
 warn() {

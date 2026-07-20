@@ -1,5 +1,6 @@
 join_domain() {
   preflight
+  info "Starting domain join"
   md_init_state
   load_join_state
 
@@ -42,6 +43,7 @@ join_domain() {
   fi
 
   install_md_server_certificate
+  ok "Connected to MultiDirectory server"
 
   while true; do
     read_tty LOGIN "Enter administrator login, for example admin:"
@@ -53,12 +55,14 @@ join_domain() {
     log "Authenticating domain administrator via API"
     if access_token="$(api_auth_cookie "${LOGIN}" "${PASSWORD}")" && [[ -n "${access_token}" ]]; then
       log "Domain administrator credentials are valid"
+      ok "Administrator authentication succeeded"
       break
     else
       warn "Authentication failed. Please check login and password."
     fi
   done
   discover_and_validate_domain
+  info "Domain detected: ${DOMAIN}"
 
   prompt_change_hostname
 
@@ -70,20 +74,34 @@ join_domain() {
   log "EDITION=${EDITION}"
   log "WITH_SALT=${WITH_SALT}"
 
+  info "Configuring system"
   install_static_configs
   validate_no_password_based_sssd_auth
   validate_sssd_config
+  ok "System configuration completed"
 
+  info "Configuring computer account"
   create_computer_object_if_needed
+  ok "Computer account ready"
 
+  info "Configuring Kerberos"
   log "Getting keytab"
   api_ktadd_download "${access_token}" "host/${HOSTNAME}" "host/${FQDN}"
 
   validate_keytab
+  ok "Kerberos authentication succeeded"
+  info "Checking LDAP GSSAPI authentication"
   validate_ldap_gssapi_auth
+  ok "LDAP GSSAPI authentication succeeded"
   configure_astra_se_parsec_sssd
 
+  if [[ "${WITH_SALT}" == "1" ]]; then
+    info "Configuring Salt minion"
+  fi
   configure_salt
+  if [[ "${WITH_SALT}" == "1" ]]; then
+    ok "Salt minion configured"
+  fi
 
   unset PASSWORD
 
@@ -92,8 +110,8 @@ join_domain() {
 
   trap - ERR
 
-  log "Configuration completed successfully"
-  warn "System reboot is recommended"
+  ok "Successfully joined domain: ${DOMAIN}"
+  info "System reboot is recommended"
 }
 
 require_install_packages_launcher() {

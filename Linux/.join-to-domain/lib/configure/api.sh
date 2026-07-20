@@ -295,7 +295,7 @@ enable_computer_account_if_disabled() {
   enabled_uac=$((current_uac & ~2))
   [[ "$enabled_uac" -gt 0 ]] || enabled_uac=4096
 
-  warn "Computer account is disabled, enabling: ${object_dn}"
+  info "Computer account is disabled, enabling it"
   api_update_many_replace_uac "${access_token}" "${object_dn}" "${enabled_uac}" \
     || die "Failed to enable computer account: ${object_dn}"
 
@@ -346,7 +346,7 @@ disable_computer_account_on_leave() {
       ;;
   esac
 
-  warn "Disabling computer account: ${object_dn}"
+  info "Disabling computer account"
   if api_update_many_replace_uac "${access_token}" "${object_dn}" "4098"; then
     log "Computer account disabled: ${object_dn}"
   else

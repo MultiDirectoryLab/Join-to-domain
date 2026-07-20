@@ -4,11 +4,13 @@ set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 
 GREEN='\033[0;32m'
+BLUE='\033[0;34m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
 NC='\033[0m'
 
 log()  { echo -e "${GREEN}[OK]${NC} $*"; }
+info() { echo -e "${BLUE}[INFO]${NC} $*"; }
 warn() { echo -e "${YELLOW}[WARN]${NC} $*"; }
 die()  { echo -e "${RED}[ERR]${NC} $*" >&2; exit 1; }
 
@@ -95,7 +97,8 @@ setup_logging() {
   touch "$LOG_FILE" 2>/dev/null || true
   chmod 600 "$LOG_FILE" 2>/dev/null || true
 
-  exec > >(tee -a "$LOG_FILE") 2>&1
+  # Keep colors in the interactive terminal, but persist plain text only.
+  exec > >(tee >(sed -u $'s/\033\\[[0-9;]*[mK]//g' >> "$LOG_FILE")) 2>&1
 
   log "Log file: ${LOG_FILE}"
   log "State directory: ${STATE_DIR}"

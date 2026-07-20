@@ -73,7 +73,8 @@ validate_sudoers() {
 
 validate_sssd_config() {
   if have_cmd sssctl; then
-    sssctl config-check || die "SSSD configuration is invalid"
+    sssctl config-check >> "$LOG_FILE" 2>&1 || die "SSSD configuration validation failed"
+    ok "SSSD configuration validated"
   else
     warn "sssctl not found, SSSD config validation skipped"
   fi
