@@ -1,11 +1,13 @@
 install_md_server_certificate() (
   local tmp_cert
+  local tmp_trusted
   local fingerprint
   local trust_file
 
   need_cmd openssl
   tmp_cert="$(mktemp)"
-  trap 'rm -f "${tmp_cert:-}"' EXIT
+  tmp_trusted="$(mktemp)"
+  trap 'rm -f "${tmp_cert:-}" "${tmp_trusted:-}"' EXIT
 
   log "Retrieving TLS certificate from ${API_HOST}:443"
   if ! openssl s_client \
@@ -28,7 +30,19 @@ install_md_server_certificate() (
     update-ca-certificates >/dev/null
   elif have_cmd update-ca-trust; then
     trust_file="/etc/pki/ca-trust/source/anchors/multidirectory-${API_HOST}.crt"
-    install -D -m 0644 "${tmp_cert}" "${trust_file}"
+
+    # RHEL's shared trust store may ignore a legacy self-signed server
+    # certificate that has no Basic Constraints extension.  Store it as an
+    # OpenSSL TRUSTED CERTIFICATE with an explicit TLS server trust purpose so
+    # update-ca-trust includes it in the generated CA bundle.
+    install -d -m 0755 "$(dirname -- "${trust_file}")"
+    openssl x509 \
+      -in "${tmp_cert}" \
+      -addtrust serverAuth \
+      -trustout \
+      -out "${tmp_trusted}" \
+      || die "Failed to mark the MultiDirectory certificate as trusted for TLS"
+    install -m 0644 "${tmp_trusted}" "${trust_file}"
     update-ca-trust extract >/dev/null
   else
     die "Unsupported system CA trust store"
