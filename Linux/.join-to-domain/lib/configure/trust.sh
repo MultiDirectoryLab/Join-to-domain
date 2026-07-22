@@ -1,4 +1,4 @@
-install_md_server_certificate() (
+install_md_server_certificate() {
   local tmp_cert
   local tmp_trusted
   local fingerprint
@@ -7,7 +7,7 @@ install_md_server_certificate() (
   need_cmd openssl
   tmp_cert="$(mktemp)"
   tmp_trusted="$(mktemp)"
-  trap 'rm -f "${tmp_cert:-}" "${tmp_trusted:-}"' EXIT
+  trap 'rm -f "${tmp_cert:-}" "${tmp_trusted:-}"; trap - RETURN' RETURN
 
   log "Retrieving TLS certificate from ${API_HOST}:443"
   if ! openssl s_client \
@@ -48,12 +48,19 @@ install_md_server_certificate() (
     die "Unsupported system CA trust store"
   fi
 
+  # Some RHEL-like distributions generate their system trust bundle in a
+  # location different from the CA file used by curl.  Keep every API request
+  # in this join process pinned to the certificate that was just verified and
+  # installed instead of relying on curl's compile-time CA bundle path.
+  CURL_CA_BUNDLE="${trust_file}"
+  export CURL_CA_BUNDLE
+
   curl -sS --connect-timeout "${API_CONNECT_TIMEOUT}" --max-time "${API_MAX_TIME}" \
     "https://${API_HOST}/" -o /dev/null \
     || die "TLS verification failed after installing the MultiDirectory certificate"
 
   log "MultiDirectory TLS certificate installed: ${trust_file}"
-)
+}
 
 renew_md_server_certificate() {
   load_join_state
