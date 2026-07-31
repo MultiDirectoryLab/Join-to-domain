@@ -127,6 +127,34 @@ install_md_gpupdate() {
   log "Installed md-gpupdate symlink: ${MD_GPUPDATE_LINK} -> ${MD_GPUPDATE_DST}"
 }
 
+configure_salt_pkg_provider() {
+  local provider
+  local provider_file="/etc/salt/minion.d/pkg_provider.conf"
+
+  if is_deb_based; then
+    provider="aptpkg"
+  elif have_cmd dnf || have_cmd yum; then
+    provider="yumpkg"
+  elif have_cmd apt-get; then
+    provider="aptpkg"
+  else
+    warn "Supported Salt pkg provider was not detected; skipping ${provider_file}"
+    return 0
+  fi
+
+  mkdir -p "$(dirname -- "$provider_file")"
+  md_backup_once "$provider_file"
+
+  {
+    printf 'providers:\n'
+    printf '  pkg: %s\n' "$provider"
+  } > "$provider_file"
+
+  chmod 0644 "$provider_file"
+  md_track "$provider_file"
+  log "Configured Salt pkg provider: ${provider}"
+}
+
 prepare_salt_minion_identity() {
   local guid="$1"
   local gpo_token="$2"
@@ -176,6 +204,8 @@ EOF
   echo "$guid" > /etc/salt/minion_id
   chmod 0644 /etc/salt/minion_id
   md_track /etc/salt/minion_id
+
+  configure_salt_pkg_provider
 
   systemctl daemon-reload || true
   systemctl enable salt-minion.service >/dev/null 2>&1 || true
