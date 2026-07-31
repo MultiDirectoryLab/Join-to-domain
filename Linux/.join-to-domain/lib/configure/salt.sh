@@ -152,6 +152,8 @@ prepare_salt_minion_identity() {
     existing_minion_id="$(tr -d '\r\n' < /etc/salt/minion_id 2>/dev/null || true)"
     if [[ -n "$existing_minion_id" && "$existing_minion_id" != "$guid" ]]; then
       warn "Updating Salt minion id from ${existing_minion_id} to ${guid}; keeping the existing minion key pair"
+      log "Deleting the previous Salt minion id before publishing the new one: ${existing_minion_id}"
+      api_delete_salt_minion_key "${access_token}" "${existing_minion_id}"
     fi
   fi
 
@@ -192,7 +194,7 @@ restart_salt_minion_and_wait() {
 
 accept_salt_minion_key() {
   local guid="$1"
-  local resp http_code body
+  local resp http_code body curl_rc
   local retries=12
   local delay=5
   local attempt=1
@@ -200,7 +202,7 @@ accept_salt_minion_key() {
   while [[ $attempt -le $retries ]]; do
     log "Attempt ${attempt}/${retries}: accepting Salt minion key"
 
-    resp="$(
+    if resp="$(
       curl -sS -w "\n%{http_code}" \
         --connect-timeout "${API_CONNECT_TIMEOUT}" \
         --max-time "${API_MAX_TIME}" \
@@ -209,7 +211,11 @@ accept_salt_minion_key() {
         -H "Cookie: id=${access_token}" \
         -H 'Content-Type: application/json' \
         -d "{\"id\": \"${guid}\"}" 2>&1
-    )" || true
+    )"; then
+      curl_rc=0
+    else
+      curl_rc=$?
+    fi
 
     http_code="$(echo "$resp" | tail -n1)"
     body="$(echo "$resp" | sed '$d')"
@@ -220,15 +226,10 @@ accept_salt_minion_key() {
       return 0
     fi
 
-    if [[ "$http_code" -eq 400 ]] && echo "$body" | grep -qi "Minion Already Exists"; then
-      warn "Minion already exists on master. Deleting the master-side key and republishing the current local key."
-
-      systemctl stop salt-minion.service 2>/dev/null || true
-      api_delete_salt_minion_key "${access_token}" "${guid}"
-
-      restart_salt_minion_and_wait 8
-      ((attempt++))
-      continue
+    if [[ "$http_code" == "400" ]] && echo "$body" | grep -qi "Minion Already Exists"; then
+      log "Salt minion key already exists on master; treating the accept operation as idempotent success"
+      restart_salt_minion_or_die
+      return 0
     fi
 
     if [[ "$http_code" -eq 400 ]] && echo "$body" | grep -qi "Unable to accept minion"; then
@@ -244,7 +245,11 @@ accept_salt_minion_key() {
       continue
     fi
 
-    warn "Salt API returned HTTP ${http_code}: ${body}"
+    if [[ "$curl_rc" -eq 28 ]]; then
+      warn "Salt API accept request timed out after ${API_MAX_TIME}s; the master may still complete it, retrying"
+    else
+      warn "Salt API returned HTTP ${http_code}: ${body}"
+    fi
     sleep "$delay"
     ((attempt++))
   done
