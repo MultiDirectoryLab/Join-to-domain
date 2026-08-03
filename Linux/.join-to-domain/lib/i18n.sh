@@ -62,6 +62,17 @@ tr_text() {
   esac
 }
 
+ui_text() {
+  local english="$1"
+  local russian="$2"
+
+  if [[ "${MD_UI_LANG:-en}" == "ru" ]]; then
+    printf '%s' "$russian"
+  else
+    printf '%s' "$english"
+  fi
+}
+
 select_ui_language() {
   local choice
 

@@ -5,8 +5,15 @@ configure_domain() {
     return 1
   fi
 
+  detect_domain_state
+  if [[ "$DETECTED_DOMAIN_STATE" != "not_joined" ]]; then
+    warn "$(ui_text "Domain-related configuration already exists. Use 'Rejoin domain'." "Доменная конфигурация уже существует. Используйте пункт «Повторно присоединить к домену».")"
+    printf '  - %s\n' "${DETECTED_DOMAIN_REASONS[@]}"
+    return 1
+  fi
+
   if [[ "${EUID:-$(id -u)}" -ne 0 && "$DRY_RUN" -eq 0 ]]; then
-    error "Domain configuration requires root. Run: sudo $0"
+    error "$(ui_text "Domain configuration requires root. Run: sudo $0" "Для настройки домена требуются права root. Запустите: sudo $0")"
     return 1
   fi
 
@@ -15,7 +22,7 @@ configure_domain() {
     return 0
   fi
 
-  info "Running domain configuration"
+  info "$(ui_text "Running domain configuration" "Запуск настройки домена")"
   MD_CALLED_FROM_INSTALL_PACKAGES=1 bash "$CONFIGURE_SCRIPT" join
 
   return $?
@@ -29,7 +36,7 @@ leave_domain_from_menu() {
   fi
 
   if [[ "${EUID:-$(id -u)}" -ne 0 && "$DRY_RUN" -eq 0 ]]; then
-    error "Domain leave requires root. Run: sudo $0"
+    error "$(ui_text "Domain leave requires root. Run: sudo $0" "Для выхода из домена требуются права root. Запустите: sudo $0")"
     return 1
   fi
 
@@ -38,7 +45,7 @@ leave_domain_from_menu() {
     return 0
   fi
 
-  info "Running domain leave"
+  info "$(ui_text "Running domain leave" "Запуск выхода из домена")"
   MD_CALLED_FROM_INSTALL_PACKAGES=1 bash "$CONFIGURE_SCRIPT" leave < /dev/tty
 }
 
@@ -50,7 +57,7 @@ renew_certificate_from_menu() {
   fi
 
   if [[ "${EUID:-$(id -u)}" -ne 0 && "$DRY_RUN" -eq 0 ]]; then
-    error "Certificate renewal requires root. Run: sudo $0"
+    error "$(ui_text "Certificate renewal requires root. Run: sudo $0" "Для обновления сертификата требуются права root. Запустите: sudo $0")"
     return 1
   fi
 
@@ -59,11 +66,13 @@ renew_certificate_from_menu() {
     return 0
   fi
 
-  info "Renewing MultiDirectory TLS certificate"
+  info "$(ui_text "Renewing MultiDirectory TLS certificate" "Обновление TLS-сертификата MultiDirectory")"
   MD_CALLED_FROM_INSTALL_PACKAGES=1 bash "$CONFIGURE_SCRIPT" renew-certificate < /dev/tty
 }
 
 rejoin_domain() {
+  local code
+
   rejoin_log "Rejoin requested"
 
   if ! need_script "$CONFIGURE_SCRIPT"; then
@@ -76,39 +85,42 @@ rejoin_domain() {
   cleanup_log "Detected state: ${DETECTED_DOMAIN_STATE}"
 
   if [[ "$DETECTED_DOMAIN_STATE" != "not_joined" ]]; then
-    warn "Domain-related configuration was found:"
+    warn "$(ui_text "Domain-related configuration was found:" "Обнаружена конфигурация домена:")"
     printf '  - %s\n' "${DETECTED_DOMAIN_REASONS[@]}"
     rejoin_log "Detected config indicators: ${DETECTED_DOMAIN_REASONS[*]}"
 
     if ! confirm_safe_leave; then
-      warn "Safe leave cancelled by user"
+      warn "$(ui_text "Safe leave cancelled by user" "Безопасный выход отменён пользователем")"
       rejoin_log "Safe leave cancelled by user"
       return 0
     fi
 
     if ! safe_leave_domain; then
-      error "Safe domain leave failed"
+      error "$(ui_text "Safe domain leave failed" "Не удалось выполнить безопасный выход из домена")"
       rejoin_log "Safe leave failed"
       return 1
     fi
 
-    status_info "Return to main menu and run Join domain when ready"
-    rejoin_log "Returning to main menu after safe leave"
-    return 0
+    status_info "$(ui_text "Safe leave completed. Starting domain join again." "Безопасный выход завершён. Запускается повторное присоединение к домену.")"
+    rejoin_log "Safe leave completed; starting configure flow"
+    run_configure_flow
+    code=$?
+    rejoin_log "Rejoin configure flow exit code: ${code}"
+    return "$code"
   fi
 
-  status_info "No domain-related configuration detected. Starting normal join flow."
+  status_info "$(ui_text "No domain-related configuration detected. Starting normal join flow." "Конфигурация домена не обнаружена. Запускается обычное присоединение.")"
   rejoin_log "No domain-related configuration detected; running configure flow"
   run_configure_flow
-  local code=$?
+  code=$?
   rejoin_log "run_configure_flow exit code: ${code}"
   return "$code"
 }
 
 handle_missing_dependencies() {
-  error "Dependency validation failed after installation."
-  warn "Run 'Install required packages' from the main menu and check the installer log if this repeats."
-  warn "Configuration will not install packages automatically."
+  error "$(ui_text "Dependency validation failed after installation." "Проверка зависимостей после установки завершилась ошибкой.")"
+  warn "$(ui_text "Run 'Install required packages' from the main menu and check the installer log if this repeats." "Запустите «Установить необходимые пакеты» из главного меню; если ошибка повторится, проверьте журнал установщика.")"
+  warn "$(ui_text "Configuration will not install packages automatically." "Конфигуратор не будет устанавливать пакеты автоматически.")"
   return 1
 }
 

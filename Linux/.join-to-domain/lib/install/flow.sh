@@ -8,17 +8,17 @@ prompt_run_configure() {
   fi
 
   [[ -f "$CONFIGURE_SCRIPT" ]] || {
-    warn "Required internal component not found"
+    warn "$(ui_text "Required internal component not found" "Не найден необходимый внутренний компонент")"
     return 0
   }
 
   tty_echo ""
-  tty_echo "${YELLOW}Run configuration now?${NC}"
-  tty_echo "1. Yes"
-  tty_echo "2. No"
+  tty_echo "${YELLOW}$(ui_text "Run configuration now?" "Запустить настройку сейчас?")${NC}"
+  tty_echo "1. $(ui_text "Yes" "Да")"
+  tty_echo "2. $(ui_text "No" "Нет")"
 
   while true; do
-    read_tty choice "Select (1/2) [1]:"
+    read_tty choice "$(ui_text "Select (1/2) [1]:" "Выберите (1/2) [1]:")"
     choice="${choice:-1}"
 
     case "$choice" in
@@ -28,12 +28,12 @@ prompt_run_configure() {
         return 0
         ;;
       2)
-        log "Configuration skipped"
-        log "You can run it later through: sudo ${PUBLIC_LAUNCHER}"
+        log "$(ui_text "Configuration skipped" "Настройка пропущена")"
+        log "$(ui_text "You can run it later through: sudo ${PUBLIC_LAUNCHER}" "Её можно запустить позже командой: sudo ${PUBLIC_LAUNCHER}")"
         return 0
         ;;
       *)
-        warn "Enter 1 or 2."
+        warn "$(ui_text "Enter 1 or 2." "Введите 1 или 2.")"
         ;;
     esac
   done
@@ -154,4 +154,3 @@ main() {
       ;;
   esac
 }
-

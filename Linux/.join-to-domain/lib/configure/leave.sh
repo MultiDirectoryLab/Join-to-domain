@@ -33,19 +33,19 @@ validate_leave_credentials() {
   load_join_env
 
   while [[ -z "${API_HOST:-}" ]]; do
-    read_tty API_HOST "Enter MULTIDIRECTORY server address (FQDN):"
+    read_tty API_HOST "$(ui_text "Enter MULTIDIRECTORY server address (FQDN):" "Введите адрес сервера MULTIDIRECTORY (FQDN):")"
     if [[ -z "${API_HOST}" ]]; then
-      warn "API host must be filled."
+      warn "$(ui_text "API host must be filled." "Адрес API не может быть пустым.")"
       continue
     fi
     if ! valid_join_domain "${API_HOST}"; then
-      warn "Invalid API host. Enter a FQDN."
+      warn "$(ui_text "Invalid API host. Enter a FQDN." "Некорректный адрес API. Введите FQDN.")"
       API_HOST=""
     fi
   done
 
-  read_tty leave_login "Enter domain administrator login:"
-  read_secret_tty leave_password "Enter domain administrator password:"
+  read_tty leave_login "$(ui_text "Enter domain administrator login:" "Введите логин администратора домена:")"
+  read_secret_tty leave_password "$(ui_text "Enter domain administrator password:" "Введите пароль администратора домена:")"
 
   [[ -n "$leave_login" && -n "$leave_password" ]] || die "Login and password must be filled"
 
@@ -141,6 +141,8 @@ remove_managed_files() {
 }
 
 restore_backups() {
+  local managed_path
+
   restore_one /etc/krb5.conf
   restore_one /etc/nsswitch.conf
   restore_one /etc/ssh/sshd_config.d/ssh_md.conf
@@ -167,10 +169,34 @@ restore_backups() {
   restore_one "$SALT_PKG_MODULE_DST"
   restore_one "$MD_GPUPDATE_LINK"
   restore_one "$MD_GPUPDATE_DST"
+
+  if [[ -f "$MD_MANIFEST" ]]; then
+    while IFS= read -r managed_path; do
+      [[ -n "$managed_path" ]] || continue
+      [[ "$managed_path" == "$MD_MANIFEST" ]] && continue
+      restore_one "$managed_path"
+    done < "$MD_MANIFEST"
+  fi
+
+  restore_networkmanager_dns_state || warn "NetworkManager DNS state was not fully restored"
+  restore_authselect_state || warn "authselect state was not fully restored"
+  restore_sssd_socket_state || warn "SSSD socket state was not fully restored"
+
+  if have_cmd update-ca-certificates; then
+    update-ca-certificates >/dev/null 2>&1 || true
+  elif have_cmd update-ca-trust; then
+    update-ca-trust extract >/dev/null 2>&1 || true
+  fi
 }
 
 cleanup_domain_state() {
-  rm -f /etc/krb5.keytab
+  if md_backup_exists /etc/krb5.keytab; then
+    log "Keeping restored Kerberos keytab backup"
+  else
+    rm -f /etc/krb5.keytab
+  fi
+
+  find "${MD_STATE_DIR}" -mindepth 1 -maxdepth 1 -type d -name 'ktadd.*' -exec rm -rf -- {} + 2>/dev/null || true
 
   if [[ -f "${MD_JOIN_ENV}" || -f "${MD_ROLLBACK_MARKER}" ]]; then
     rm -rf /var/lib/sss/db/* /var/lib/sss/mc/* 2>/dev/null || true
@@ -199,7 +225,7 @@ leave_domain() {
   setup_logging
   md_init_state
 
-  info "Leaving MultiDirectory domain"
+  info "$(ui_text "Leaving MultiDirectory domain" "Выход из домена MultiDirectory")"
 
   load_os_release
 
@@ -226,16 +252,16 @@ leave_domain() {
   restart_after_leave
 
   log "Local leave cleanup completed"
-  ok "MultiDirectory leave completed"
-  info "System reboot is recommended"
+  ok "$(ui_text "MultiDirectory leave completed" "Выход из MultiDirectory завершён")"
+  info "$(ui_text "System reboot is recommended" "Рекомендуется перезагрузить компьютер")"
 }
 
 rollback_local_changes() {
   local code="$1"
 
-  warn "Join failed with exit code ${code}"
-  warn "Rolling back local configuration changes"
-  warn "Server-side objects created via API are not removed by local rollback"
+  warn "$(ui_text "Join failed with exit code ${code}" "Присоединение завершилось ошибкой с кодом ${code}")"
+  warn "$(ui_text "Rolling back local configuration changes" "Выполняется откат локальных изменений")"
+  warn "$(ui_text "Server-side objects created via API are not removed by local rollback" "Объекты, созданные на сервере через API, не удаляются локальным откатом")"
 
   mkdir -p "${MD_STATE_DIR}"
   touch "${MD_ROLLBACK_MARKER}"
@@ -252,13 +278,14 @@ rollback_local_changes() {
 
   set -e
 
-  info "Rollback completed"
+  info "$(ui_text "Rollback completed" "Откат завершён")"
 }
 
 on_join_error() {
   local code=$?
 
   trap - ERR
+  MD_JOIN_ROLLBACK_ACTIVE=0
 
   rollback_local_changes "$code"
 

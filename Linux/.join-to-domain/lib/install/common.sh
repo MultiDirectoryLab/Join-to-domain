@@ -212,7 +212,11 @@ use_env_edition_if_available() {
 }
 
 load_os_release() {
+  local saved_edition="${EDITION-}"
+  local edition_was_set=0
+
   [[ -r /etc/os-release ]] || die "/etc/os-release not found"
+  [[ "${EDITION+x}" == "x" ]] && edition_was_set=1
 
   # shellcheck disable=SC1091
   . /etc/os-release
@@ -221,6 +225,12 @@ load_os_release() {
   OS_LIKE="${ID_LIKE:-}"
   OS_NAME="${PRETTY_NAME:-${OS_ID}}"
   OS_VARIANT_ID="${VARIANT_ID:-}"
+
+  if [[ "$edition_was_set" -eq 1 ]]; then
+    EDITION="$saved_edition"
+  else
+    unset EDITION
+  fi
 }
 
 is_astra_linux() {

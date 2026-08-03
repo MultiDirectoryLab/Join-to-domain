@@ -5,12 +5,12 @@ prompt_edition() {
     return 0
   fi
 
-  tty_echo "${YELLOW}Select MultiDirectory edition:${NC}"
+  tty_echo "${YELLOW}$(ui_text "Select MultiDirectory edition:" "Выберите редакцию MultiDirectory:")${NC}"
   tty_echo "1. Enterprise"
   tty_echo "2. Community"
 
   while true; do
-    read_tty choice "Select (1/2) [1]:"
+    read_tty choice "$(ui_text "Select (1/2) [1]:" "Выберите (1/2) [1]:")"
     choice="${choice:-1}"
 
     case "$choice" in
@@ -27,7 +27,7 @@ prompt_edition() {
         return 0
         ;;
       *)
-        warn "Enter 1 or 2."
+        warn "$(ui_text "Enter 1 or 2." "Введите 1 или 2.")"
         ;;
     esac
   done
@@ -127,4 +127,3 @@ get_deb_installed_version() {
 
   dpkg-query -W -f='${Version}' "$pkg" 2>/dev/null || true
 }
-

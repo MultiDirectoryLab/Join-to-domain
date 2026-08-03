@@ -1,7 +1,18 @@
 join_domain() {
+  local dns_failure_choice
+
   preflight
-  info "Starting domain join"
+  info "$(ui_text "Starting domain join" "Начинается присоединение к домену")"
+
+  detect_domain_state
+  if [[ "$DETECTED_DOMAIN_STATE" != "not_joined" ]]; then
+    warn "$(ui_text "Domain-related configuration already exists:" "Доменная конфигурация уже существует:")"
+    printf '  - %s\n' "${DETECTED_DOMAIN_REASONS[@]}" > /dev/tty
+    die "$(ui_text "Use 'Rejoin domain' from the main menu." "Используйте пункт «Повторно присоединить к домену» в главном меню.")"
+  fi
+
   md_init_state
+  MD_JOIN_ROLLBACK_ACTIVE=1
   load_join_state
 
   trap on_join_error ERR
@@ -15,54 +26,86 @@ join_domain() {
     if getent hosts "${API_HOST}" >/dev/null; then
       log "DNS resolution OK: ${API_HOST}"
     else
-      die "DNS resolution failed for API_HOST from environment: ${API_HOST}"
+      die "$(ui_text "DNS resolution failed for API_HOST from environment: ${API_HOST}" "Не удалось разрешить API_HOST из окружения через DNS: ${API_HOST}")"
     fi
   else
     while true; do
       if [[ -n "${SAVED_API_HOST:-}" ]]; then
-        read_tty API_HOST "Enter MULTIDIRECTORY server address (FQDN) [${SAVED_API_HOST}]:"
+        read_tty API_HOST "$(ui_text "Enter MULTIDIRECTORY server address (FQDN) [${SAVED_API_HOST}]:" "Введите адрес сервера MULTIDIRECTORY (FQDN) [${SAVED_API_HOST}]:")"
         API_HOST="${API_HOST:-$SAVED_API_HOST}"
       else
-        read_tty API_HOST "Enter MULTIDIRECTORY server address (FQDN), for example webadmin.domain.ru:"
+        read_tty API_HOST "$(ui_text "Enter MULTIDIRECTORY server address (FQDN), for example webadmin.domain.ru:" "Введите адрес сервера MULTIDIRECTORY (FQDN), например webadmin.domain.ru:")"
       fi
       if [[ -z "${API_HOST}" ]]; then
-        warn "API host must be filled."
+        warn "$(ui_text "API host must be filled." "Адрес API не может быть пустым.")"
         continue
       fi
       if ! valid_join_domain "${API_HOST}"; then
-        warn "Invalid API host. Enter a FQDN, for example webadmin.domain.ru."
+        warn "$(ui_text "Invalid API host. Enter a FQDN, for example webadmin.domain.ru." "Некорректный адрес API. Введите FQDN, например webadmin.domain.ru.")"
         continue
       fi
       if getent hosts "${API_HOST}" >/dev/null; then
         log "DNS resolution OK: ${API_HOST}"
         break
       else
-        warn "DNS resolution failed for ${API_HOST}. Please check the address."
+        warn "$(ui_text "DNS resolution failed for ${API_HOST}. Please check the address." "Не удалось разрешить ${API_HOST} через DNS. Проверьте адрес.")"
+
+        while true; do
+          tty_echo "${YELLOW}$(ui_text "What do you want to do?" "Что вы хотите сделать?")${NC}"
+          tty_echo "1. $(ui_text "Enter another server address" "Ввести другой адрес сервера")"
+          tty_echo "2. $(ui_text "Configure DNS servers" "Настроить DNS-серверы")"
+          tty_echo "3. $(ui_text "Cancel domain join" "Отменить присоединение к домену")"
+          read_tty dns_failure_choice "$(ui_text "Select (1/2/3) [1]:" "Выберите (1/2/3) [1]:")"
+          dns_failure_choice="${dns_failure_choice:-1}"
+
+          case "$dns_failure_choice" in
+            1)
+              break
+              ;;
+            2)
+              prompt_configure_dns
+
+              if getent hosts "${API_HOST}" >/dev/null; then
+                log "DNS resolution OK after DNS configuration: ${API_HOST}"
+                break 2
+              fi
+
+              warn "$(ui_text "DNS resolution still fails for ${API_HOST}." "${API_HOST} по-прежнему не разрешается через DNS.")"
+              ;;
+            3)
+              warn "$(ui_text "Domain join cancelled" "Присоединение к домену отменено")"
+              return 1
+              ;;
+            *)
+              warn "$(ui_text "Enter 1, 2 or 3." "Введите 1, 2 или 3.")"
+              ;;
+          esac
+        done
       fi
     done
   fi
 
   install_md_server_certificate
-  ok "Connected to MultiDirectory server"
+  ok "$(ui_text "Connected to MultiDirectory server" "Соединение с сервером MultiDirectory установлено")"
 
   while true; do
-    read_tty LOGIN "Enter administrator login, for example admin:"
-    read_secret_tty PASSWORD "Enter administrator password:"
+    read_tty LOGIN "$(ui_text "Enter administrator login, for example admin:" "Введите логин администратора, например admin:")"
+    read_secret_tty PASSWORD "$(ui_text "Enter administrator password:" "Введите пароль администратора:")"
     if [[ -z "${LOGIN}" || -z "${PASSWORD}" ]]; then
-      warn "Login and password must be filled."
+      warn "$(ui_text "Login and password must be filled." "Логин и пароль не могут быть пустыми.")"
       continue
     fi
     log "Authenticating domain administrator via API"
     if access_token="$(api_auth_cookie "${LOGIN}" "${PASSWORD}")" && [[ -n "${access_token}" ]]; then
       log "Domain administrator credentials are valid"
-      ok "Administrator authentication succeeded"
+      ok "$(ui_text "Administrator authentication succeeded" "Аутентификация администратора выполнена")"
       break
     else
-      warn "Authentication failed. Please check login and password."
+      warn "$(ui_text "Authentication failed. Please check login and password." "Ошибка аутентификации. Проверьте логин и пароль.")"
     fi
   done
   discover_and_validate_domain
-  info "Domain detected: ${DOMAIN}"
+  info "$(ui_text "Domain detected: ${DOMAIN}" "Обнаружен домен: ${DOMAIN}")"
 
   prompt_change_hostname
 
@@ -74,33 +117,33 @@ join_domain() {
   log "EDITION=${EDITION}"
   log "WITH_SALT=${WITH_SALT}"
 
-  info "Configuring system"
+  info "$(ui_text "Configuring system" "Настройка системы")"
   install_static_configs
   validate_no_password_based_sssd_auth
   validate_sssd_config
-  ok "System configuration completed"
+  ok "$(ui_text "System configuration completed" "Настройка системы завершена")"
 
-  info "Configuring computer account"
+  info "$(ui_text "Configuring computer account" "Настройка учётной записи компьютера")"
   create_computer_object_if_needed
-  ok "Computer account ready"
+  ok "$(ui_text "Computer account ready" "Учётная запись компьютера готова")"
 
-  info "Configuring Kerberos"
+  info "$(ui_text "Configuring Kerberos" "Настройка Kerberos")"
   log "Getting keytab"
   api_ktadd_download "${access_token}" "host/${HOSTNAME}" "host/${FQDN}"
 
   validate_keytab
-  ok "Kerberos authentication succeeded"
-  info "Checking LDAP GSSAPI authentication"
+  ok "$(ui_text "Kerberos authentication succeeded" "Аутентификация Kerberos выполнена")"
+  info "$(ui_text "Checking LDAP GSSAPI authentication" "Проверка аутентификации LDAP GSSAPI")"
   validate_ldap_gssapi_auth
-  ok "LDAP GSSAPI authentication succeeded"
+  ok "$(ui_text "LDAP GSSAPI authentication succeeded" "Аутентификация LDAP GSSAPI выполнена")"
   configure_astra_se_parsec_sssd
 
   if [[ "${WITH_SALT}" == "1" ]]; then
-    info "Configuring Salt minion"
+    info "$(ui_text "Configuring Salt minion" "Настройка Salt minion")"
   fi
   configure_salt
   if [[ "${WITH_SALT}" == "1" ]]; then
-    ok "Salt minion configured"
+    ok "$(ui_text "Salt minion configured" "Salt minion настроен")"
   fi
 
   unset PASSWORD
@@ -108,10 +151,11 @@ join_domain() {
   save_join_env
   start_services
 
+  MD_JOIN_ROLLBACK_ACTIVE=0
   trap - ERR
 
-  ok "Successfully joined domain: ${DOMAIN}"
-  info "System reboot is recommended"
+  ok "$(ui_text "Successfully joined domain: ${DOMAIN}" "Компьютер успешно присоединён к домену: ${DOMAIN}")"
+  info "$(ui_text "System reboot is recommended" "Рекомендуется перезагрузить компьютер")"
 }
 
 require_install_packages_launcher() {

@@ -103,7 +103,7 @@ api_principal_add() {
     -H "Content-Type: application/json" \
     -H "Cookie: id=${cookie}" \
     -d "{\"primary\":\"${primary}\",\"instance\":\"${instance}\"}" \
-    -o /tmp/md-principal-add.body \
+    -o /dev/null \
     -w '%{http_code}' 2>/dev/null
 }
 
@@ -124,8 +124,18 @@ api_ktadd_download() {
   local cookie="$1"
   shift
   local spn body sep http_code content_type detail
+  local tmp_dir tmp_headers tmp_body
 
-  rm -f /tmp/md-ktadd.hdr /tmp/md-ktadd.body /etc/krb5.keytab
+  mkdir -p "${MD_STATE_DIR}"
+  chmod 700 "${MD_STATE_DIR}"
+  tmp_dir="$(mktemp -d "${MD_STATE_DIR}/ktadd.XXXXXX")"
+  chmod 700 "$tmp_dir"
+  tmp_headers="${tmp_dir}/headers"
+  tmp_body="${tmp_dir}/keytab"
+  : > "$tmp_headers"
+  : > "$tmp_body"
+  chmod 600 "$tmp_headers" "$tmp_body"
+  trap 'rm -rf "${tmp_dir:-}"; trap - RETURN' RETURN
 
   if [[ "${EDITION}" == "community" ]]; then
     log "Community: registering principals"
@@ -154,8 +164,8 @@ api_ktadd_download() {
     curl -sS \
       --connect-timeout "${API_CONNECT_TIMEOUT}" \
       --max-time "${API_MAX_TIME}" \
-      -D /tmp/md-ktadd.hdr \
-      -o /tmp/md-ktadd.body \
+      -D "$tmp_headers" \
+      -o "$tmp_body" \
       -X POST "https://${API_HOST}/api/kerberos/ktadd" \
       -H "accept: application/octet-stream" \
       -H "Content-Type: application/json" \
@@ -164,7 +174,7 @@ api_ktadd_download() {
       -w '%{http_code}' 2>/dev/null
   )" || http_code="000"
 
-  content_type="$(response_content_type /tmp/md-ktadd.hdr)"
+  content_type="$(response_content_type "$tmp_headers")"
   log "Keytab API response: HTTP ${http_code}, content-type=${content_type:-unknown}"
 
   if [[ ! "$http_code" =~ ^2[0-9][0-9]$ ]]; then
@@ -175,29 +185,38 @@ api_ktadd_download() {
         else
           tostring
         end
-      ' /tmp/md-ktadd.body 2>/dev/null || head -n 20 /tmp/md-ktadd.body 2>/dev/null || true
+      ' "$tmp_body" 2>/dev/null || head -n 20 "$tmp_body" 2>/dev/null || true
     )"
 
+    rm -rf "$tmp_dir"
+    trap - RETURN
     die "Keytab retrieval failed. HTTP ${http_code}: ${detail}"
   fi
 
   if printf '%s' "$content_type" | grep -Eiq 'json|text|html'; then
     warn "API returned non-binary keytab:"
-    head -n 60 /tmp/md-ktadd.body || true
+    head -n 60 "$tmp_body" || true
+    rm -rf "$tmp_dir"
+    trap - RETURN
     die "keytab was not received as a binary file"
   fi
 
-  if [[ ! -s /tmp/md-ktadd.body ]]; then
+  if [[ ! -s "$tmp_body" ]]; then
+    rm -rf "$tmp_dir"
+    trap - RETURN
     die "keytab was not received: empty API response body"
   fi
 
-  if file /tmp/md-ktadd.body 2>/dev/null | grep -Ei 'json|text|html' >/dev/null; then
+  if file "$tmp_body" 2>/dev/null | grep -Ei 'json|text|html' >/dev/null; then
     warn "API returned non-binary keytab:"
-    head -n 60 /tmp/md-ktadd.body || true
+    head -n 60 "$tmp_body" || true
+    rm -rf "$tmp_dir"
+    trap - RETURN
     die "keytab was not received as a binary file"
   fi
 
-  install -m 600 -o root -g root /tmp/md-ktadd.body /etc/krb5.keytab
+  md_backup_once /etc/krb5.keytab
+  install -m 600 -o root -g root "$tmp_body" /etc/krb5.keytab
   md_track /etc/krb5.keytab
 
   log "Keytab installed: /etc/krb5.keytab"

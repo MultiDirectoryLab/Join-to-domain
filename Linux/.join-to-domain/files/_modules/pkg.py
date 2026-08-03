@@ -42,6 +42,9 @@ def __virtual__():
     if _cmd_exists("yum") and _cmd_exists("rpm"):
         return __virtualname__
 
+    if _cmd_exists("apt-get") and _cmd_exists("rpm"):
+        return __virtualname__
+
     return False, "No supported package backend found"
 
 
@@ -69,6 +72,9 @@ def _backend():
 
     if _cmd_exists("yum") and _cmd_exists("rpm"):
         return "yum"
+
+    if _cmd_exists("apt-get") and _cmd_exists("rpm"):
+        return "apt_rpm"
 
     return "unknown"
 
@@ -184,7 +190,7 @@ def _rpm_installed_version(name):
 def refresh_db(**kwargs):
     backend = _backend()
 
-    if backend == "apt":
+    if backend in ("apt", "apt_rpm"):
         code, out, err = _run("apt-get update", timeout=1800)
         return code == 0
 
@@ -225,7 +231,7 @@ def list_pkgs(versions_as_list=False, **kwargs):
 
         return ret
 
-    if backend in ("dnf", "yum"):
+    if backend in ("apt_rpm", "dnf", "yum"):
         code, out, err = _run(
             "rpm -qa --qf '%{NAME} %{VERSION}-%{RELEASE}\\n'",
             timeout=300,
@@ -263,7 +269,7 @@ def version(*names, **kwargs):
     for name in names:
         if backend == "apt":
             ret[name] = _apt_installed_version(name)
-        elif backend in ("dnf", "yum"):
+        elif backend in ("apt_rpm", "dnf", "yum"):
             ret[name] = _rpm_installed_version(name)
         else:
             ret[name] = ""
@@ -283,7 +289,7 @@ def latest_version(*names, **kwargs):
     backend = _backend()
     ret = {}
 
-    if backend == "apt":
+    if backend in ("apt", "apt_rpm"):
         for name in names:
             code, out, err = _run(
                 "apt-cache policy {}".format(_q(name)),
@@ -304,7 +310,7 @@ def latest_version(*names, **kwargs):
 
                         break
 
-            installed = _apt_installed_version(name)
+            installed = _apt_installed_version(name) if backend == "apt" else _rpm_installed_version(name)
 
             if installed and candidate and installed == candidate:
                 ret[name] = ""
@@ -388,7 +394,7 @@ def version_cmp(ver1, ver2, **kwargs):
 
         return 0
 
-    if backend in ("dnf", "yum") and _cmd_exists("rpmdev-vercmp"):
+    if backend in ("apt_rpm", "dnf", "yum") and _cmd_exists("rpmdev-vercmp"):
         code, out, err = _run(
             "rpmdev-vercmp {} {}".format(_q(ver1), _q(ver2)),
             timeout=60,
@@ -512,7 +518,7 @@ def install(name=None, pkgs=None, sources=None, refresh=False, **kwargs):
 
     backend = _backend()
 
-    if backend == "apt":
+    if backend in ("apt", "apt_rpm"):
         cmd = "apt-get install -y {}".format(" ".join(_q(x) for x in targets))
     elif backend in ("dnf", "yum"):
         pm = _pm_cmd()
@@ -551,7 +557,7 @@ def remove(name=None, pkgs=None, **kwargs):
     old = list_pkgs()
     backend = _backend()
 
-    if backend == "apt":
+    if backend in ("apt", "apt_rpm"):
         cmd = "apt-get remove -y {}".format(" ".join(_q(x) for x in targets))
     elif backend in ("dnf", "yum"):
         pm = _pm_cmd()
@@ -586,7 +592,7 @@ def purge(name=None, pkgs=None, **kwargs):
     old = list_pkgs()
     backend = _backend()
 
-    if backend == "apt":
+    if backend in ("apt", "apt_rpm"):
         cmd = "apt-get purge -y {}".format(" ".join(_q(x) for x in targets))
     elif backend in ("dnf", "yum"):
         pm = _pm_cmd()
@@ -638,7 +644,7 @@ def owner(*paths, **kwargs):
 
         return ret
 
-    if backend in ("dnf", "yum"):
+    if backend in ("apt_rpm", "dnf", "yum"):
         for path in paths:
             code, out, err = _run(
                 "rpm -qf {} 2>/dev/null".format(_q(path)),
@@ -659,7 +665,7 @@ def file_list(*packages, **kwargs):
     for package in packages:
         if backend == "apt":
             code, out, err = _run("dpkg -L {}".format(_q(package)), timeout=120)
-        elif backend in ("dnf", "yum"):
+        elif backend in ("apt_rpm", "dnf", "yum"):
             code, out, err = _run("rpm -ql {}".format(_q(package)), timeout=120)
         else:
             code, out, err = 1, "", ""
@@ -701,7 +707,7 @@ def info_installed(*names, **kwargs):
 
             ret[name] = data
 
-        elif backend in ("dnf", "yum"):
+        elif backend in ("apt_rpm", "dnf", "yum"):
             code, out, err = _run("rpm -qi {}".format(_q(name)), timeout=120)
 
             if code != 0:
@@ -724,7 +730,7 @@ def info_available(*names, **kwargs):
     ret = {}
 
     for name in names:
-        if backend == "apt":
+        if backend in ("apt", "apt_rpm"):
             code, out, err = _run(
                 "apt-cache show {}".format(_q(name)),
                 timeout=120,

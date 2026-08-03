@@ -49,6 +49,8 @@ source_install_module() {
 
 export JOIN_TO_DOMAIN_INTERNAL_DIR="$SCRIPT_DIR"
 
+. "${SCRIPT_DIR}/lib/i18n.sh"
+
 validate_install_modules
 
 for module in "${INSTALL_MODULES[@]}"; do

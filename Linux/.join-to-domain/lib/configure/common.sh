@@ -40,6 +40,9 @@ MD_BACKUP_DIR="${MD_STATE_DIR}/backups"
 MD_MANIFEST="${MD_STATE_DIR}/manifest"
 MD_JOIN_ENV="${MD_STATE_DIR}/join.env"
 MD_ROLLBACK_MARKER="${MD_STATE_DIR}/rollback-in-progress"
+MD_NM_DNS_STATE="${MD_STATE_DIR}/networkmanager-dns.env"
+MD_AUTHSELECT_STATE="${MD_STATE_DIR}/authselect.profile"
+MD_SSSD_SOCKET_STATE="${MD_STATE_DIR}/sssd-sockets.state"
 
 INSTALL_STATE_DIR="/var/lib/MultiDirectory/install"
 INSTALL_ENV="${INSTALL_STATE_DIR}/install.env"
@@ -47,6 +50,8 @@ INSTALL_ENV="${INSTALL_STATE_DIR}/install.env"
 LOG_FILE="/var/log/multidirectory-join.log"
 API_CONNECT_TIMEOUT=10
 API_MAX_TIME=30
+SALT_ACCEPT_CONNECT_TIMEOUT=5
+SALT_ACCEPT_MAX_TIME=10
 
 log() {
   printf '[DETAIL] %s\n' "$*" >> "$LOG_FILE" 2>/dev/null || true
@@ -72,6 +77,13 @@ die() {
   printf '[ERROR] %s\n' "$*" >> "$LOG_FILE" 2>/dev/null || true
   printf '%b\n' "${BLUE}[INFO]${NC} Full log: ${LOG_FILE}" > /dev/tty
   printf '[INFO] Full log: %s\n' "$LOG_FILE" >> "$LOG_FILE" 2>/dev/null || true
+
+  if [[ "${MD_JOIN_ROLLBACK_ACTIVE:-0}" -eq 1 ]] && declare -F rollback_local_changes >/dev/null 2>&1; then
+    MD_JOIN_ROLLBACK_ACTIVE=0
+    trap - ERR
+    rollback_local_changes 1
+  fi
+
   exit 1
 }
 
@@ -262,7 +274,11 @@ use_env_edition_if_available() {
 }
 
 load_os_release() {
+  local saved_edition="${EDITION-}"
+  local edition_was_set=0
+
   [[ -r /etc/os-release ]] || die "/etc/os-release not found"
+  [[ "${EDITION+x}" == "x" ]] && edition_was_set=1
 
   # shellcheck disable=SC1091
   . /etc/os-release
@@ -271,6 +287,12 @@ load_os_release() {
   OS_LIKE="${ID_LIKE:-}"
   OS_NAME="${PRETTY_NAME:-${OS_ID}}"
   OS_VARIANT_ID="${VARIANT_ID:-}"
+
+  if [[ "$edition_was_set" -eq 1 ]]; then
+    EDITION="$saved_edition"
+  else
+    unset EDITION
+  fi
 }
 
 is_astra_linux() {
@@ -425,6 +447,7 @@ restore_one() {
 
   if [[ -e "${MD_BACKUP_DIR}/${safe}" || -L "${MD_BACKUP_DIR}/${safe}" ]]; then
     rm -rf "$path"
+    mkdir -p "$(dirname -- "$path")"
     cp -a "${MD_BACKUP_DIR}/${safe}" "$path"
     log "Restored: $path"
   fi

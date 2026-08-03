@@ -127,17 +127,27 @@ install_md_gpupdate() {
   log "Installed md-gpupdate symlink: ${MD_GPUPDATE_LINK} -> ${MD_GPUPDATE_DST}"
 }
 
+detect_salt_pkg_provider() {
+  if is_altlinux; then
+    # The bundled extension module is installed as pkg.py and implements the
+    # apt-rpm combination used by ALT Linux.
+    printf '%s\n' pkg
+  elif is_deb_based; then
+    printf '%s\n' aptpkg
+  elif have_cmd dnf || have_cmd yum; then
+    printf '%s\n' yumpkg
+  elif have_cmd apt-get; then
+    printf '%s\n' aptpkg
+  else
+    return 1
+  fi
+}
+
 configure_salt_pkg_provider() {
   local provider
   local provider_file="/etc/salt/minion.d/pkg_provider.conf"
 
-  if is_deb_based; then
-    provider="aptpkg"
-  elif have_cmd dnf || have_cmd yum; then
-    provider="yumpkg"
-  elif have_cmd apt-get; then
-    provider="aptpkg"
-  else
+  if ! provider="$(detect_salt_pkg_provider)"; then
     warn "Supported Salt pkg provider was not detected; skipping ${provider_file}"
     return 0
   fi
@@ -164,13 +174,13 @@ prepare_salt_minion_identity() {
 
   log "Preparing Salt minion identity: ${guid}"
 
-  if pgrep -f "salt-minion" > /dev/null 2>&1; then
-    pkill -9 -f "salt-minion" 2>/dev/null || true
+  systemctl stop salt-minion.service 2>/dev/null || true
+  if pgrep -x salt-minion > /dev/null 2>&1; then
+    pkill -TERM -x salt-minion 2>/dev/null || true
     sleep 2
-    # Проверяем, что убили
-    if pgrep -f "salt-minion" > /dev/null 2>&1; then
-      warn "Some salt-minion processes still remain, killing again..."
-      pkill -9 -f "salt-minion" 2>/dev/null || true
+    if pgrep -x salt-minion > /dev/null 2>&1; then
+      warn "$(ui_text "Some salt-minion processes still remain, killing again..." "Некоторые процессы salt-minion не остановились; выполняется принудительная остановка...")"
+      pkill -KILL -x salt-minion 2>/dev/null || true
       sleep 1
     fi
     log "Salt processes stopped"
@@ -179,7 +189,7 @@ prepare_salt_minion_identity() {
   if [[ -f /etc/salt/minion_id ]]; then
     existing_minion_id="$(tr -d '\r\n' < /etc/salt/minion_id 2>/dev/null || true)"
     if [[ -n "$existing_minion_id" && "$existing_minion_id" != "$guid" ]]; then
-      warn "Updating Salt minion id from ${existing_minion_id} to ${guid}; keeping the existing minion key pair"
+      warn "$(ui_text "Updating Salt minion id from ${existing_minion_id} to ${guid}; keeping the existing minion key pair" "Идентификатор Salt minion меняется с ${existing_minion_id} на ${guid}; существующая пара ключей сохраняется")"
       log "Deleting the previous Salt minion id before publishing the new one: ${existing_minion_id}"
       api_delete_salt_minion_key "${access_token}" "${existing_minion_id}"
     fi
@@ -187,18 +197,23 @@ prepare_salt_minion_identity() {
 
   mkdir -p /etc/salt
 
+  md_backup_once /etc/salt/minion
+
   cat > /etc/salt/minion <<EOF
 master: ${SALT_MASTER}
 master_finger: ${gpo_token}
 EOF
 
-  md_backup_once /etc/salt/minion
   md_track /etc/salt/minion
 
   if [[ -d /etc/salt/minion.d ]]; then
-    find /etc/salt/minion.d -type f -name '*.conf' -exec sed -i '/^\s*master\s*:/d' {} \; 2>/dev/null || true
-    find /etc/salt/minion.d -type f -name '*.conf' -exec sed -i '/^\s*master_finger\s*:/d' {} \; 2>/dev/null || true
-    find /etc/salt/minion.d -type f -name '*.conf' -exec sed -i '/^\s*id\s*:/d' {} \; 2>/dev/null || true
+    while IFS= read -r -d '' salt_conf; do
+      if grep -Eq '^[[:space:]]*(master|master_finger|id)[[:space:]]*:' "$salt_conf" 2>/dev/null; then
+        md_backup_once "$salt_conf"
+        sed -i -E '/^[[:space:]]*(master|master_finger|id)[[:space:]]*:/d' "$salt_conf"
+        md_track "$salt_conf"
+      fi
+    done < <(find /etc/salt/minion.d -type f -name '*.conf' -print0)
   fi
 
   echo "$guid" > /etc/salt/minion_id
@@ -222,11 +237,60 @@ restart_salt_minion_and_wait() {
   sleep "$wait_seconds"
 }
 
+salt_minion_master_connected() {
+  local output=""
+
+  systemctl is-active --quiet salt-minion.service 2>/dev/null || return 1
+  have_cmd salt-call || return 1
+
+  if have_cmd timeout; then
+    output="$(timeout 6 salt-call --local --out=txt status.master "$SALT_MASTER" 2>/dev/null || true)"
+  else
+    output="$(salt-call --local --out=txt status.master "$SALT_MASTER" 2>/dev/null || true)"
+  fi
+
+  printf '%s\n' "$output" | grep -Eqi '(^[[:space:]]*true|:[[:space:]]*true)[[:space:]]*$'
+}
+
+wait_for_salt_minion_master_connection() {
+  local attempts="${1:-6}"
+  local delay="${2:-2}"
+  local attempt=1
+
+  while (( attempt <= attempts )); do
+    if salt_minion_master_connected; then
+      log "Salt minion has an established connection to ${SALT_MASTER}:4505"
+      return 0
+    fi
+
+    if (( attempt < attempts )); then
+      sleep "$delay"
+    fi
+    ((attempt++))
+  done
+
+  return 1
+}
+
+confirm_salt_accept_result() {
+  local result_description_en="$1"
+  local result_description_ru="$2"
+
+  restart_salt_minion_or_die
+  if wait_for_salt_minion_master_connection 10 2; then
+    log "Salt minion connection confirmed after ${result_description_en}"
+    return 0
+  fi
+
+  warn "$(ui_text "${result_description_en}, but the minion connection to ${SALT_MASTER}:4505 was not confirmed" "${result_description_ru}, но соединение minion с ${SALT_MASTER}:4505 не подтверждено")"
+  return 1
+}
+
 accept_salt_minion_key() {
   local guid="$1"
   local resp http_code body curl_rc
-  local retries=12
-  local delay=5
+  local retries=8
+  local delay=3
   local attempt=1
 
   while [[ $attempt -le $retries ]]; do
@@ -234,8 +298,8 @@ accept_salt_minion_key() {
 
     if resp="$(
       curl -sS -w "\n%{http_code}" \
-        --connect-timeout "${API_CONNECT_TIMEOUT}" \
-        --max-time "${API_MAX_TIME}" \
+        --connect-timeout "${SALT_ACCEPT_CONNECT_TIMEOUT}" \
+        --max-time "${SALT_ACCEPT_MAX_TIME}" \
         -X POST "https://${API_HOST}/api/salt/minion" \
         -H 'accept: application/json' \
         -H "Cookie: id=${access_token}" \
@@ -250,24 +314,32 @@ accept_salt_minion_key() {
     http_code="$(echo "$resp" | tail -n1)"
     body="$(echo "$resp" | sed '$d')"
 
-    if [[ "$http_code" -eq 200 ]]; then
+    if [[ "$http_code" == "200" ]]; then
       log "Salt minion key accepted"
-      restart_salt_minion_or_die
-      return 0
+      if confirm_salt_accept_result "Salt API accepted the minion key" "Salt API принял ключ minion"; then
+        return 0
+      fi
+      print_salt_diagnostics
+      warn "$(ui_text "Check TCP access from the minion to ${SALT_MASTER} on ports 4505 and 4506" "Проверьте доступ с minion к ${SALT_MASTER} по TCP-портам 4505 и 4506")"
+      die "$(ui_text "The Salt key was accepted, but the minion did not connect to the master" "Ключ Salt принят, но minion не подключился к master")"
     fi
 
     if [[ "$http_code" == "400" ]] && echo "$body" | grep -qi "Minion Already Exists"; then
-      log "Salt minion key already exists on master; treating the accept operation as idempotent success"
-      restart_salt_minion_or_die
-      return 0
+      log "Salt minion key already exists on master; verifying the actual minion connection"
+      if confirm_salt_accept_result "Salt API reports that the minion already exists" "Salt API сообщает, что minion уже существует"; then
+        return 0
+      fi
+      print_salt_diagnostics
+      warn "$(ui_text "Check TCP access from the minion to ${SALT_MASTER} on ports 4505 and 4506" "Проверьте доступ с minion к ${SALT_MASTER} по TCP-портам 4505 и 4506")"
+      die "$(ui_text "The Salt key exists, but the minion did not connect to the master" "Ключ Salt существует, но minion не подключился к master")"
     fi
 
-    if [[ "$http_code" -eq 400 ]] && echo "$body" | grep -qi "Unable to accept minion"; then
-      warn "Salt key is not ready on master yet. Waiting before retry."
+    if [[ "$http_code" == "400" ]] && echo "$body" | grep -qi "Unable to accept minion"; then
+      warn "$(ui_text "Salt key is not ready on master yet. Waiting before retry." "Ключ Salt ещё не появился на мастере. Ожидание перед повторной попыткой.")"
       sleep "$delay"
 
       if (( attempt % 3 == 0 )); then
-        warn "Restarting salt-minion to force key publication"
+        warn "$(ui_text "Restarting salt-minion to force key publication" "Перезапуск salt-minion для повторной публикации ключа")"
         restart_salt_minion_and_wait 8
       fi
 
@@ -276,16 +348,27 @@ accept_salt_minion_key() {
     fi
 
     if [[ "$curl_rc" -eq 28 ]]; then
-      warn "Salt API accept request timed out after ${API_MAX_TIME}s; the master may still complete it, retrying"
+      info "$(ui_text "Salt API response timed out after ${SALT_ACCEPT_MAX_TIME}s; checking whether the key was accepted anyway" "Ответ Salt API не получен за ${SALT_ACCEPT_MAX_TIME} с; проверяется, был ли ключ всё же принят")"
+      # The MultiDirectory endpoint waits for the accepted minion to appear in
+      # Salt. Restarting here forces an immediate authentication attempt instead
+      # of waiting for the minion's normal authentication retry interval.
+      log "Restarting salt-minion after API timeout to force immediate re-authentication"
+      restart_salt_minion_or_die
+      if wait_for_salt_minion_master_connection 5 2; then
+        log "Salt minion connection confirmed after an API response timeout"
+        return 0
+      fi
+      warn "$(ui_text "Salt minion connection is not confirmed yet; retrying the API request" "Соединение Salt minion пока не подтверждено; запрос к API будет повторён")"
     else
-      warn "Salt API returned HTTP ${http_code}: ${body}"
+      warn "$(ui_text "Salt API returned HTTP ${http_code}: ${body}" "Salt API вернул HTTP ${http_code}: ${body}")"
     fi
     sleep "$delay"
     ((attempt++))
   done
 
   print_salt_diagnostics
-  die "Failed to accept Salt minion key"
+  warn "$(ui_text "Check TCP access from the minion to ${SALT_MASTER} on ports 4505 and 4506" "Проверьте доступ с minion к ${SALT_MASTER} по TCP-портам 4505 и 4506")"
+  die "$(ui_text "Failed to accept Salt minion key" "Не удалось принять ключ Salt minion")"
 }
 
 configure_salt() {
@@ -300,6 +383,7 @@ configure_salt() {
 
   require_salt_minion_ready
   install_md_gpupdate
+  install_salt_custom_modules
   refresh_api_token_for_salt
 
   log "Checking DNS resolution: SALT_MASTER=${SALT_MASTER}"

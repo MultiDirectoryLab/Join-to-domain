@@ -72,7 +72,10 @@ detect_domain_state() {
     add_domain_state_reason "Kerberos keytab found: /etc/krb5.keytab"
   fi
 
-  krb5_conf_looks_domain_managed && add_domain_state_reason "Kerberos configuration found: /etc/krb5.conf"
+  if krb5_conf_looks_domain_managed; then
+    partial=1
+    add_domain_state_reason "Kerberos configuration found: /etc/krb5.conf"
+  fi
 
   if [[ -f /etc/sudoers.d/domain-admins ]]; then
     partial=1

@@ -22,11 +22,13 @@ install_md_server_certificate() {
     || die "Server certificate does not cover DNS name ${API_HOST}"
 
   fingerprint="$(openssl x509 -in "${tmp_cert}" -noout -fingerprint -sha256 | sed 's/^.*=//')"
-  warn "Trusting certificate received on first connection (TOFU), SHA-256: ${fingerprint}"
+  warn "$(ui_text "Trusting certificate received on first connection (TOFU), SHA-256: ${fingerprint}" "Устанавливается доверие сертификату, полученному при первом подключении (TOFU), SHA-256: ${fingerprint}")"
 
   if [[ -d /usr/local/share/ca-certificates ]] && have_cmd update-ca-certificates; then
     trust_file="/usr/local/share/ca-certificates/multidirectory-${API_HOST}.crt"
+    md_backup_once "${trust_file}"
     install -m 0644 "${tmp_cert}" "${trust_file}"
+    md_track "${trust_file}"
     update-ca-certificates >/dev/null
   elif have_cmd update-ca-trust; then
     trust_file="/etc/pki/ca-trust/source/anchors/multidirectory-${API_HOST}.crt"
@@ -36,6 +38,7 @@ install_md_server_certificate() {
     # OpenSSL TRUSTED CERTIFICATE with an explicit TLS server trust purpose so
     # update-ca-trust includes it in the generated CA bundle.
     install -d -m 0755 "$(dirname -- "${trust_file}")"
+    md_backup_once "${trust_file}"
     openssl x509 \
       -in "${tmp_cert}" \
       -addtrust serverAuth \
@@ -43,6 +46,7 @@ install_md_server_certificate() {
       -out "${tmp_trusted}" \
       || die "Failed to mark the MultiDirectory certificate as trusted for TLS"
     install -m 0644 "${tmp_trusted}" "${trust_file}"
+    md_track "${trust_file}"
     update-ca-trust extract >/dev/null
   else
     die "Unsupported system CA trust store"
@@ -63,20 +67,24 @@ install_md_server_certificate() {
 }
 
 renew_md_server_certificate() {
+  need_root
+  setup_logging
+  load_os_release
+  md_init_state
   load_join_state
   API_HOST="${SAVED_API_HOST:-}"
 
   while [[ -z "${API_HOST}" ]]; do
-    read_tty API_HOST "Enter MULTIDIRECTORY server address (FQDN):"
+    read_tty API_HOST "$(ui_text "Enter MULTIDIRECTORY server address (FQDN):" "Введите адрес сервера MULTIDIRECTORY (FQDN):")"
     API_HOST="$(sanitize_input "${API_HOST}")"
 
     if [[ -z "${API_HOST}" ]]; then
-      warn "Server address cannot be empty"
+      warn "$(ui_text "Server address cannot be empty" "Адрес сервера не может быть пустым")"
       continue
     fi
 
     if ! valid_join_domain "${API_HOST}"; then
-      warn "Invalid server address: ${API_HOST}"
+      warn "$(ui_text "Invalid server address: ${API_HOST}" "Некорректный адрес сервера: ${API_HOST}")"
       API_HOST=""
     fi
   done
@@ -86,4 +94,5 @@ renew_md_server_certificate() {
 
   install_md_server_certificate
   log "MultiDirectory TLS certificate renewed successfully"
+  ok "$(ui_text "MultiDirectory TLS certificate renewed successfully" "TLS-сертификат MultiDirectory успешно обновлён")"
 }

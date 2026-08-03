@@ -264,6 +264,11 @@ have_executable() {
 }
 
 load_os_release() {
+  local saved_edition="${EDITION-}"
+  local edition_was_set=0
+
+  [[ "${EDITION+x}" == "x" ]] && edition_was_set=1
+
   if [[ -r /etc/os-release ]]; then
     # shellcheck disable=SC1091
     . /etc/os-release
@@ -273,6 +278,14 @@ load_os_release() {
   OS_LIKE="${ID_LIKE:-}"
   OS_NAME="${PRETTY_NAME:-${OS_ID:-unknown}}"
   OS_VARIANT_ID="${VARIANT_ID:-}"
+
+  # Astra and some other distributions define EDITION in os-release. Keep the
+  # MultiDirectory edition selected through the script environment intact.
+  if [[ "$edition_was_set" -eq 1 ]]; then
+    EDITION="$saved_edition"
+  else
+    unset EDITION
+  fi
 }
 
 is_astra_linux() {

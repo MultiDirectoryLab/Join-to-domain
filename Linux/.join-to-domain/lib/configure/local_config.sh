@@ -139,6 +139,15 @@ install_astra_se_pam_config() {
 install_pam_config() {
   if is_redos_or_rhel_like; then
     if have_cmd authselect; then
+      if [[ ! -f "$MD_AUTHSELECT_STATE" ]]; then
+        if authselect current --raw > "$MD_AUTHSELECT_STATE" 2>/dev/null && [[ -s "$MD_AUTHSELECT_STATE" ]]; then
+          chmod 600 "$MD_AUTHSELECT_STATE"
+          log "Saved authselect profile"
+        else
+          rm -f "$MD_AUTHSELECT_STATE"
+          warn "Current authselect profile could not be saved"
+        fi
+      fi
       authselect select sssd with-mkhomedir --force || true
     fi
 
@@ -175,6 +184,33 @@ install_pam_config() {
       pam-auth-update --enable mkhomedir || true
     fi
   fi
+}
+
+restore_authselect_state() {
+  local -a authselect_args=()
+  local saved_arg
+
+  [[ -f "$MD_AUTHSELECT_STATE" ]] || return 0
+  have_cmd authselect || {
+    warn "Cannot restore authselect profile: authselect is unavailable"
+    return 1
+  }
+
+  while IFS= read -r saved_arg || [[ -n "$saved_arg" ]]; do
+    [[ -n "$saved_arg" ]] && authselect_args+=("$saved_arg")
+  done < "$MD_AUTHSELECT_STATE"
+  (( ${#authselect_args[@]} > 0 )) || {
+    warn "Cannot restore authselect profile: saved profile is empty"
+    return 1
+  }
+
+  authselect select "${authselect_args[@]}" --force || {
+    warn "Failed to restore authselect profile: ${authselect_args[*]}"
+    return 1
+  }
+
+  rm -f "$MD_AUTHSELECT_STATE"
+  log "Restored authselect profile: ${authselect_args[*]}"
 }
 
 install_accountsservice_cache_helper() {
@@ -603,6 +639,7 @@ configure_astra_parsec_mswitch() {
 
   [[ -f "$file" ]] || die "PARSEC switch configuration disappeared during configuration: ${file}"
 
+  md_backup_once "$file"
   backup_timestamped_file "$file" >/dev/null
 
   set_parsec_mswitch_db mac sssd

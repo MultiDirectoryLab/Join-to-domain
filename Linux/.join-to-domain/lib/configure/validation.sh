@@ -128,8 +128,20 @@ disable_sssd_socket_activation_if_needed() {
 
   systemctl daemon-reload >/dev/null 2>&1 || true
 
+  if [[ ! -f "$MD_SSSD_SOCKET_STATE" ]]; then
+    : > "$MD_SSSD_SOCKET_STATE"
+    chmod 600 "$MD_SSSD_SOCKET_STATE"
+  fi
+
   for unit in "${sockets[@]}"; do
     if systemctl list-unit-files "$unit" 2>/dev/null | grep -q "^${unit}"; then
+      if ! grep -Fq "${unit}|" "$MD_SSSD_SOCKET_STATE" 2>/dev/null; then
+        printf '%s|%s|%s\n' \
+          "$unit" \
+          "$(systemctl is-enabled "$unit" 2>/dev/null || true)" \
+          "$(systemctl is-active "$unit" 2>/dev/null || true)" \
+          >> "$MD_SSSD_SOCKET_STATE"
+      fi
       systemctl stop "$unit" 2>/dev/null || true
       systemctl disable "$unit" 2>/dev/null || true
       systemctl mask "$unit" 2>/dev/null || true
@@ -140,4 +152,50 @@ disable_sssd_socket_activation_if_needed() {
   if [[ "$disabled_count" -gt 0 ]]; then
     log "Disabled and masked conflicting SSSD socket activation units: ${disabled_count}"
   fi
+}
+
+restore_sssd_socket_state() {
+  local unit enabled_state active_state remask
+
+  [[ -f "$MD_SSSD_SOCKET_STATE" ]] || return 0
+  have_cmd systemctl || {
+    warn "Cannot restore SSSD socket state: systemctl is unavailable"
+    return 1
+  }
+
+  while IFS='|' read -r unit enabled_state active_state; do
+    [[ -n "$unit" ]] || continue
+
+    remask=0
+    systemctl unmask "$unit" >/dev/null 2>&1 || true
+    case "$enabled_state" in
+      enabled|enabled-runtime|linked|linked-runtime|alias)
+        systemctl enable "$unit" >/dev/null 2>&1 || true
+        ;;
+      masked|masked-runtime)
+        remask=1
+        ;;
+      disabled)
+        systemctl disable "$unit" >/dev/null 2>&1 || true
+        ;;
+      static|indirect|generated|transient)
+        ;;
+      *)
+        warn "Unknown saved enable state for ${unit}: ${enabled_state}"
+        ;;
+    esac
+
+    if [[ "$active_state" == "active" ]]; then
+      systemctl start "$unit" >/dev/null 2>&1 || true
+    else
+      systemctl stop "$unit" >/dev/null 2>&1 || true
+    fi
+
+    if [[ "$remask" -eq 1 ]]; then
+      systemctl mask "$unit" >/dev/null 2>&1 || true
+    fi
+  done < "$MD_SSSD_SOCKET_STATE"
+
+  rm -f "$MD_SSSD_SOCKET_STATE"
+  log "Restored SSSD socket activation state"
 }
