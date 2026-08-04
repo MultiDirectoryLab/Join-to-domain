@@ -165,6 +165,23 @@ configure_salt_pkg_provider() {
   log "Configured Salt pkg provider: ${provider}"
 }
 
+configure_salt_master_health() {
+  local health_file="/etc/salt/minion.d/99-master-health.conf"
+
+  mkdir -p "$(dirname -- "$health_file")"
+  md_backup_once "$health_file"
+
+  {
+    printf 'master_alive_interval: 10\n'
+    printf 'master_tries: -1\n'
+    printf 'retry_dns: 5\n'
+  } > "$health_file"
+
+  chmod 0644 "$health_file"
+  md_track "$health_file"
+  log "Configured Salt master health checks: ${health_file}"
+}
+
 prepare_salt_minion_identity() {
   local guid="$1"
   local gpo_token="$2"
@@ -221,6 +238,7 @@ EOF
   md_track /etc/salt/minion_id
 
   configure_salt_pkg_provider
+  configure_salt_master_health
 
   systemctl daemon-reload || true
   systemctl enable salt-minion.service >/dev/null 2>&1 || true
