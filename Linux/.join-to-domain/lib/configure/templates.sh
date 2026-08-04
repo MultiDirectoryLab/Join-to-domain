@@ -8,7 +8,7 @@ validate_non_empty_conf_dir() {
   shopt -u nullglob
 
   if (( ${#files[@]} == 0 )); then
-    [[ "$dir" == "$SCRIPT_DIR"* ]] && die "Required internal configuration files not found"
+    [[ "$dir" == "$SCRIPT_DIR"/* ]] && die "$(ui_text "Required internal configuration files not found in: ${dir#"$SCRIPT_DIR"/}" "Не найдены внутренние файлы конфигурации в: ${dir#"$SCRIPT_DIR"/}")"
     die "No .conf files found in ${dir}"
   fi
 }

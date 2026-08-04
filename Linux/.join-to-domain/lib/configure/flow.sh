@@ -11,14 +11,17 @@ join_domain() {
     die "$(ui_text "Use 'Rejoin domain' from the main menu." "Используйте пункт «Повторно присоединить к домену» в главном меню.")"
   fi
 
-  md_init_state
-  MD_JOIN_ROLLBACK_ACTIVE=1
   load_join_state
-
-  trap on_join_error ERR
 
   load_or_prompt_edition
   validate_files_structure
+
+  # Everything above is read-only. Start transactional state and rollback only
+  # immediately before the first possible system modification (DNS setup).
+  md_init_state
+  MD_JOIN_ROLLBACK_ACTIVE=1
+  trap on_join_error ERR
+
   prompt_configure_dns
 
   if env_has_key API_HOST; then

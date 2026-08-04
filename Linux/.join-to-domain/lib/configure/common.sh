@@ -144,20 +144,32 @@ find_executable() {
 }
 
 need_file() {
+  local display_path="$1"
+
+  if [[ "$1" == "$SCRIPT_DIR"/* ]]; then
+    display_path="${1#"$SCRIPT_DIR"/}"
+  fi
+
   if [[ ! -f "$1" ]]; then
-    [[ "$1" == "$SCRIPT_DIR"* ]] && die "Required internal file not found"
+    [[ "$1" == "$SCRIPT_DIR"/* ]] && die "$(ui_text "Required internal file not found: ${display_path}" "Не найден внутренний файл: ${display_path}")"
     die "File not found: $1"
   fi
 
   if [[ ! -s "$1" ]]; then
-    [[ "$1" == "$SCRIPT_DIR"* ]] && die "Required internal file is empty"
+    [[ "$1" == "$SCRIPT_DIR"/* ]] && die "$(ui_text "Required internal file is empty: ${display_path}" "Внутренний файл пуст: ${display_path}")"
     die "File is empty: $1"
   fi
 }
 
 need_dir() {
+  local display_path="$1"
+
+  if [[ "$1" == "$SCRIPT_DIR"/* ]]; then
+    display_path="${1#"$SCRIPT_DIR"/}"
+  fi
+
   if [[ ! -d "$1" ]]; then
-    [[ "$1" == "$SCRIPT_DIR"* ]] && die "Required internal directory not found"
+    [[ "$1" == "$SCRIPT_DIR"/* ]] && die "$(ui_text "Required internal directory not found: ${display_path}" "Не найден внутренний каталог: ${display_path}")"
     die "Directory not found: $1"
   fi
 }
