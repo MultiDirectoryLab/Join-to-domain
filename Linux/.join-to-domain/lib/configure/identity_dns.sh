@@ -222,6 +222,8 @@ configure_dns_networkmanager() {
   local ns="$1"
   local nm_dns="$1"
   local iface conn_uuid previous_dns previous_ignore_auto_dns
+  local previous_dns_priority previous_ipv6_ignore_auto_dns
+  local applied_dns applied_ignore_auto_dns
 
   have_cmd nmcli || return 1
   LC_ALL=C nmcli -t -f RUNNING general 2>/dev/null | grep -qx 'running' || return 1
@@ -238,11 +240,15 @@ configure_dns_networkmanager() {
   if [[ ! -f "$MD_NM_DNS_STATE" ]]; then
     previous_dns="$(LC_ALL=C nmcli -g ipv4.dns connection show uuid "$conn_uuid" 2>/dev/null | paste -sd, -)"
     previous_ignore_auto_dns="$(LC_ALL=C nmcli -g ipv4.ignore-auto-dns connection show uuid "$conn_uuid" 2>/dev/null | head -n1)"
+    previous_dns_priority="$(LC_ALL=C nmcli -g ipv4.dns-priority connection show uuid "$conn_uuid" 2>/dev/null | head -n1)"
+    previous_ipv6_ignore_auto_dns="$(LC_ALL=C nmcli -g ipv6.ignore-auto-dns connection show uuid "$conn_uuid" 2>/dev/null | head -n1)"
 
     {
       write_join_state_var CONNECTION_UUID "$conn_uuid"
       write_join_state_var IPV4_DNS "$previous_dns"
       write_join_state_var IPV4_IGNORE_AUTO_DNS "${previous_ignore_auto_dns:-no}"
+      write_join_state_var IPV4_DNS_PRIORITY "${previous_dns_priority:-0}"
+      write_join_state_var IPV6_IGNORE_AUTO_DNS "${previous_ipv6_ignore_auto_dns:-no}"
     } > "$MD_NM_DNS_STATE"
     chmod 600 "$MD_NM_DNS_STATE"
     log "Saved NetworkManager DNS state for connection ${conn_uuid}"
@@ -251,9 +257,26 @@ configure_dns_networkmanager() {
   LC_ALL=C nmcli connection modify uuid "$conn_uuid" \
     ipv4.dns "$nm_dns" \
     ipv4.ignore-auto-dns yes \
+    ipv4.dns-priority -50 \
+    ipv6.ignore-auto-dns yes \
     || return 1
 
   LC_ALL=C nmcli connection up uuid "$conn_uuid" >/dev/null 2>&1 || return 1
+
+  applied_ignore_auto_dns="$(LC_ALL=C nmcli -g ipv4.ignore-auto-dns connection show uuid "$conn_uuid" 2>/dev/null | head -n1)"
+  [[ "$applied_ignore_auto_dns" == "yes" ]] || {
+    warn "NetworkManager did not apply ipv4.ignore-auto-dns=yes for connection ${conn_uuid}"
+    return 1
+  }
+
+  applied_dns="$(LC_ALL=C nmcli -g IP4.DNS device show "$iface" 2>/dev/null | paste -sd' ' -)"
+  log "Active NetworkManager DNS on ${iface}: ${applied_dns:-not reported}"
+
+  if have_cmd resolvectl; then
+    resolvectl flush-caches >/dev/null 2>&1 || true
+  elif have_cmd systemd-resolve; then
+    systemd-resolve --flush-caches >/dev/null 2>&1 || true
+  fi
 
   log "NetworkManager DNS value: ${nm_dns}"
   log "Persistent DNS configured via NetworkManager connection UUID ${conn_uuid}: ${ns}"
@@ -264,6 +287,8 @@ restore_networkmanager_dns_state() {
   local CONNECTION_UUID=""
   local IPV4_DNS=""
   local IPV4_IGNORE_AUTO_DNS="no"
+  local IPV4_DNS_PRIORITY="0"
+  local IPV6_IGNORE_AUTO_DNS="no"
 
   [[ -f "$MD_NM_DNS_STATE" ]] || return 0
   have_cmd nmcli || {
@@ -283,6 +308,8 @@ restore_networkmanager_dns_state() {
   LC_ALL=C nmcli connection modify uuid "$CONNECTION_UUID" \
     ipv4.dns "$IPV4_DNS" \
     ipv4.ignore-auto-dns "$IPV4_IGNORE_AUTO_DNS" \
+    ipv4.dns-priority "$IPV4_DNS_PRIORITY" \
+    ipv6.ignore-auto-dns "$IPV6_IGNORE_AUTO_DNS" \
     || {
       warn "Failed to restore NetworkManager DNS state for ${CONNECTION_UUID}"
       return 1
@@ -291,6 +318,7 @@ restore_networkmanager_dns_state() {
   LC_ALL=C nmcli connection up uuid "$CONNECTION_UUID" >/dev/null 2>&1 || true
   rm -f "$MD_NM_DNS_STATE"
   log "Restored NetworkManager DNS state for connection ${CONNECTION_UUID}"
+  info "$(ui_text "Original NetworkManager DNS settings were restored" "Исходные настройки DNS NetworkManager восстановлены")"
 }
 
 configure_dns_static_resolv_conf() {

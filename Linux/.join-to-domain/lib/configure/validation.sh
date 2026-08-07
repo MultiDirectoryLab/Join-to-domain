@@ -1,6 +1,11 @@
 validate_api_host_resolution() {
+  if valid_ipv4_address "${API_HOST}"; then
+    log "API host is an IPv4 address; DNS resolution skipped: ${API_HOST}"
+    return 0
+  fi
+
   log "Checking DNS resolution: ${API_HOST}"
-  getent hosts "${API_HOST}" >/dev/null || die "DNS resolution failed: ${API_HOST}"
+  api_host_resolution_ok "${API_HOST}" || die "DNS resolution failed: ${API_HOST}"
   log "DNS resolution OK: ${API_HOST}"
 }
 
@@ -27,26 +32,40 @@ validate_initial_hosts_resolution() {
 validate_admin_credentials() {
   log "Authenticating domain administrator via API"
 
-  access_token="$(api_auth_cookie "${LOGIN}" "${PASSWORD}")"
-  [[ -n "${access_token}" ]] || die "Failed to authenticate domain administrator"
+  if ! access_token="$(api_auth_cookie "${LOGIN}" "${PASSWORD}")"; then
+    die "$(ui_text "Failed to authenticate domain administrator. Check the login, password, and API log." "Не удалось аутентифицировать администратора домена. Проверьте логин, пароль и журнал API.")"
+  fi
+  [[ -n "${access_token}" ]] || die "$(ui_text "Authentication did not return a session cookie" "Аутентификация не вернула cookie сессии")"
+
+  if ! api_validate_session "${access_token}"; then
+    unset access_token
+    die "$(ui_text "The API rejected the administrator session. Check the login and password." "API отклонил сессию администратора. Проверьте логин и пароль.")"
+  fi
 
   log "Domain administrator credentials are valid"
 }
 
 discover_and_validate_domain() {
+  local rootdse_response=""
+
   log "Detecting domain via RootDSE"
 
-  DOMAIN="$(api_rootdse_domain "${access_token}")"
-  [[ -n "${DOMAIN}" ]] || die "Failed to detect DOMAIN via RootDSE"
+  if ! rootdse_response="$(api_rootdse_response "${access_token}")"; then
+    die "$(ui_text "RootDSE API request failed. See the detailed response in ${LOG_FILE}" "Ошибка запроса RootDSE через API. Подробный ответ записан в ${LOG_FILE}")"
+  fi
+
+  DOMAIN="$(printf '%s' "$rootdse_response" | api_response_attribute "dnsHostName")"
+  LDAP_BASE_DN="$(printf '%s' "$rootdse_response" | api_response_attribute "defaultNamingContext")"
+  [[ -n "$LDAP_BASE_DN" ]] || LDAP_BASE_DN="$(printf '%s' "$rootdse_response" | api_response_attribute "rootDomainNamingContext")"
+  [[ -n "$LDAP_BASE_DN" ]] || LDAP_BASE_DN="$(printf '%s' "$rootdse_response" | api_response_attribute "namingContexts")"
+  [[ -n "$DOMAIN" ]] || DOMAIN="$(printf '%s' "$LDAP_BASE_DN" | dn_to_domain)"
+
+  [[ -n "$DOMAIN" ]] || die "$(ui_text "RootDSE response does not contain dnsHostName or a naming context. See ${LOG_FILE}" "Ответ RootDSE не содержит dnsHostName или контекст именования. Подробности записаны в ${LOG_FILE}")"
+  [[ -n "$LDAP_BASE_DN" ]] || die "$(ui_text "RootDSE response does not contain defaultNamingContext, rootDomainNamingContext, or namingContexts. See ${LOG_FILE}" "Ответ RootDSE не содержит defaultNamingContext, rootDomainNamingContext или namingContexts. Подробности записаны в ${LOG_FILE}")"
+
   DOMAIN="$(echo "$DOMAIN" | tr '[:upper:]' '[:lower:]')"
 
   log "Detected domain: ${DOMAIN}"
-
-  log "Getting defaultNamingContext"
-
-  LDAP_BASE_DN="$(api_rootdse_default_nc "${access_token}")"
-  [[ -n "${LDAP_BASE_DN}" ]] || die "Failed to get defaultNamingContext"
-
   log "Detected defaultNamingContext: ${LDAP_BASE_DN}"
 
   REALM="$(echo "$DOMAIN" | tr '[:lower:]' '[:upper:]')"

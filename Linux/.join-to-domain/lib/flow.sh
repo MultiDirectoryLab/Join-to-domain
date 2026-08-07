@@ -6,7 +6,9 @@ configure_domain() {
   fi
 
   detect_domain_state
-  if [[ "$DETECTED_DOMAIN_STATE" != "not_joined" ]]; then
+  if recoverable_incomplete_join_detected; then
+    status_info "$(ui_text "An incomplete previous join was found. Local recovery will run before retrying." "Обнаружено незавершённое предыдущее присоединение. Перед новой попыткой будет выполнено локальное восстановление.")"
+  elif [[ "$DETECTED_DOMAIN_STATE" != "not_joined" ]]; then
     warn "$(ui_text "Domain-related configuration already exists. Use 'Rejoin domain'." "Доменная конфигурация уже существует. Используйте пункт «Повторно присоединить к домену».")"
     printf '  - %s\n' "${DETECTED_DOMAIN_REASONS[@]}"
     return 1

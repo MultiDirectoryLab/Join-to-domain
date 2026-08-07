@@ -80,7 +80,7 @@ die() {
 
   if [[ "${MD_JOIN_ROLLBACK_ACTIVE:-0}" -eq 1 ]] && declare -F rollback_local_changes >/dev/null 2>&1; then
     MD_JOIN_ROLLBACK_ACTIVE=0
-    trap - ERR
+    trap - ERR INT TERM
     rollback_local_changes 1
   fi
 
@@ -427,6 +427,12 @@ md_track() {
   [[ -n "$path" ]] || return 0
 
   grep -Fxq "$path" "${MD_MANIFEST}" 2>/dev/null || echo "$path" >> "${MD_MANIFEST}"
+}
+
+md_is_tracked() {
+  local path="$1"
+
+  [[ -f "${MD_MANIFEST}" ]] && grep -Fxq "$path" "${MD_MANIFEST}" 2>/dev/null
 }
 
 md_backup_once() {

@@ -215,6 +215,8 @@ prepare_salt_minion_identity() {
   mkdir -p /etc/salt
 
   md_backup_once /etc/salt/minion
+  md_backup_once /etc/salt/pki/minion
+  md_track /etc/salt/pki/minion
 
   cat > /etc/salt/minion <<EOF
 master: ${SALT_MASTER}

@@ -1,17 +1,91 @@
 api_auth_cookie() {
   local user="$1"
   local pass="$2"
+  local tmp_headers tmp_body http_code curl_rc cookie detail
 
-  curl -sS -X POST "https://${API_HOST}/api/auth/" \
-    --connect-timeout "${API_CONNECT_TIMEOUT}" \
-    --max-time "${API_MAX_TIME}" \
-    -H "accept: application/json" \
-    -H "Content-Type: application/x-www-form-urlencoded" \
-    --data-urlencode "username=${user}" \
-    --data-urlencode "password=${pass}" \
-    -D - -o /dev/null \
-    | awk -F'id=|;' 'BEGIN{IGNORECASE=1} /set-cookie:[[:space:]]*id=/{print $2; exit}' \
-    | tr -d '\r\n'
+  tmp_headers="$(mktemp "${TMPDIR:-/tmp}/md-auth-headers.XXXXXX")"
+  tmp_body="$(mktemp "${TMPDIR:-/tmp}/md-auth-body.XXXXXX")"
+  chmod 600 "$tmp_headers" "$tmp_body"
+
+  set +e
+  http_code="$(
+    curl -sS -X POST "https://${API_HOST}/api/auth/" \
+      --connect-timeout "${API_CONNECT_TIMEOUT}" \
+      --max-time "${API_MAX_TIME}" \
+      -H "accept: application/json" \
+      -H "Content-Type: application/x-www-form-urlencoded" \
+      --data-urlencode "username=${user}" \
+      --data-urlencode "password=${pass}" \
+      -D "$tmp_headers" \
+      -o "$tmp_body" \
+      -w '%{http_code}'
+  )"
+  curl_rc=$?
+  set -e
+
+  if [[ "$curl_rc" -ne 0 || ! "$http_code" =~ ^2[0-9][0-9]$ ]]; then
+    detail="$(tr '\r\n' ' ' < "$tmp_body" | cut -c1-1000)"
+    log "Authentication failed: curl exit ${curl_rc}, HTTP ${http_code:-000}; response=${detail:-empty}"
+    rm -f "$tmp_headers" "$tmp_body"
+    return 1
+  fi
+
+  cookie="$(
+    awk '
+      {
+        line=$0
+      }
+      tolower(line) ~ /^set-cookie:[[:space:]]*id=/ {
+        sub(/^[^:]+:/, "", line)
+        sub(/^[[:space:]]*/, "", line)
+        sub(/^[^=]*=/, "", line)
+        sub(/;.*/, "", line)
+        gsub(/\r/, "", line)
+        print line
+        exit
+      }
+    ' "$tmp_headers"
+  )"
+
+  rm -f "$tmp_headers" "$tmp_body"
+
+  if [[ -z "$cookie" ]]; then
+    log "Authentication response was successful but did not contain the id cookie"
+    return 1
+  fi
+
+  printf '%s' "$cookie"
+}
+
+api_validate_session() {
+  local cookie="$1"
+  local tmp_body http_code curl_rc detail
+
+  tmp_body="$(mktemp "${TMPDIR:-/tmp}/md-auth-check.XXXXXX")"
+  chmod 600 "$tmp_body"
+
+  set +e
+  http_code="$(
+    curl -sS -X GET "https://${API_HOST}/api/auth/me" \
+      --connect-timeout "${API_CONNECT_TIMEOUT}" \
+      --max-time "${API_MAX_TIME}" \
+      -H "accept: application/json" \
+      -H "Cookie: id=${cookie}" \
+      -o "$tmp_body" \
+      -w '%{http_code}'
+  )"
+  curl_rc=$?
+  set -e
+
+  if [[ "$curl_rc" -eq 0 && "$http_code" =~ ^2[0-9][0-9]$ ]]; then
+    rm -f "$tmp_body"
+    return 0
+  fi
+
+  detail="$(tr '\r\n' ' ' < "$tmp_body" | cut -c1-1000)"
+  log "Authentication session validation failed: curl exit ${curl_rc}, HTTP ${http_code:-000}; response=${detail:-empty}"
+  rm -f "$tmp_body"
+  return 1
 }
 
 api_search() {
@@ -20,34 +94,99 @@ api_search() {
   local scope="$3"
   local filter="$4"
   local attrs_json="$5"
+  local size_limit="${6:-5}"
+  local tmp_body http_code curl_rc detail
+  local -a cookie_header=()
 
-  curl -sS -X POST "https://${API_HOST}/api/entry/search" \
-    --connect-timeout "${API_CONNECT_TIMEOUT}" \
-    --max-time "${API_MAX_TIME}" \
-    -H "accept: application/json" \
-    -H "Cookie: id=${cookie}" \
-    -H "Content-Type: application/json" \
-    -d "{
-      \"base_object\": \"${base_object}\",
-      \"scope\": ${scope},
-      \"deref_aliases\": 0,
-      \"size_limit\": 5,
-      \"time_limit\": 0,
-      \"types_only\": false,
-      \"filter\": \"${filter}\",
-      \"attributes\": ${attrs_json}
-    }"
+  if [[ -n "$cookie" ]]; then
+    cookie_header=(-H "Cookie: id=${cookie}")
+  fi
+
+  tmp_body="$(mktemp "${TMPDIR:-/tmp}/md-api-search.XXXXXX")"
+  chmod 600 "$tmp_body"
+
+  set +e
+  http_code="$(
+    curl -sS -X POST "https://${API_HOST}/api/entry/search" \
+      --connect-timeout "${API_CONNECT_TIMEOUT}" \
+      --max-time "${API_MAX_TIME}" \
+      -H "accept: application/json" \
+      "${cookie_header[@]}" \
+      -H "Content-Type: application/json" \
+      -d "{
+        \"base_object\": \"${base_object}\",
+        \"scope\": ${scope},
+        \"deref_aliases\": 0,
+        \"size_limit\": ${size_limit},
+        \"time_limit\": 0,
+        \"types_only\": false,
+        \"filter\": \"${filter}\",
+        \"attributes\": ${attrs_json}
+      }" \
+      -o "$tmp_body" \
+      -w '%{http_code}'
+  )"
+  curl_rc=$?
+  set -e
+
+  if [[ "$curl_rc" -ne 0 ]]; then
+    log "Entry search transport failure: curl exit ${curl_rc}, HTTP ${http_code:-000}"
+    rm -f "$tmp_body"
+    return 1
+  fi
+
+  if [[ ! "$http_code" =~ ^2[0-9][0-9]$ ]]; then
+    detail="$(tr '\r\n' ' ' < "$tmp_body" | cut -c1-1000)"
+    log "Entry search failed: HTTP ${http_code}; response=${detail:-empty}"
+    rm -f "$tmp_body"
+    return 1
+  fi
+
+  if ! jq -e . "$tmp_body" >/dev/null 2>&1; then
+    detail="$(tr '\r\n' ' ' < "$tmp_body" | cut -c1-1000)"
+    log "Entry search returned invalid JSON: HTTP ${http_code}; response=${detail:-empty}"
+    rm -f "$tmp_body"
+    return 1
+  fi
+
+  cat "$tmp_body"
+  rm -f "$tmp_body"
+}
+
+api_response_attribute() {
+  local attribute="$1"
+
+  jq -r --arg wanted "$attribute" '
+    [
+      .. | objects |
+      if (((.type? // .name? // "") | tostring | ascii_downcase) == ($wanted | ascii_downcase)) then
+        (.vals? // .values? // empty) |
+        if type == "array" then .[0] else . end
+      else
+        to_entries[]? |
+        select((.key | ascii_downcase) == ($wanted | ascii_downcase)) |
+        .value |
+        if type == "array" then .[0] else . end
+      end
+    ]
+    | map(select(. != null and . != ""))
+    | .[0] // empty
+  '
 }
 
 api_rootdse_default_nc() {
   local cookie="$1"
-  local resp
+  local resp nc
 
-  resp="$(api_search "$cookie" "" 0 "(objectClass=*)" "[\"defaultNamingContext\"]")"
+  if ! resp="$(api_rootdse_response "$cookie")"; then
+    return 1
+  fi
 
-  printf '%s' "$resp" | jq -r '
-    (.search_result[0].partial_attributes[]? | select(.type=="defaultNamingContext") | .vals[0]) // empty
-  '
+  nc="$(printf '%s' "$resp" | api_response_attribute "defaultNamingContext")"
+  [[ -n "$nc" ]] || nc="$(printf '%s' "$resp" | api_response_attribute "rootDomainNamingContext")"
+  [[ -n "$nc" ]] || nc="$(printf '%s' "$resp" | api_response_attribute "namingContexts")"
+
+  printf '%s' "$nc"
 }
 
 dn_to_domain() {
@@ -66,25 +205,37 @@ dn_to_domain() {
   '
 }
 
+api_rootdse_response() {
+  local cookie="${1:-}"
+
+  api_search "$cookie" "" 0 "(objectClass=*)" \
+    '["dnsHostName","rootDomainNamingContext","defaultNamingContext","namingContexts","subschemaSubentry","supportedLDAPVersion","supportedSASLMechanisms","supportedExtension","supportedControl","supportedFeatures","vendorName","name","vendorVersion","objectClass"]' \
+    0
+}
+
 api_rootdse_domain() {
   local cookie="$1"
   local resp dom nc
 
-  resp="$(api_search "$cookie" "" 0 "(objectClass=*)" "[\"dnsDomainName\",\"dnsForestName\",\"dnsHostName\",\"defaultNamingContext\"]")"
+  if ! resp="$(api_rootdse_response "$cookie")"; then
+    return 1
+  fi
 
-  dom="$(printf '%s' "$resp" | jq -r '
-    (.search_result[0].partial_attributes[]? | select(.type=="dnsDomainName") | .vals[0]) // empty
-  ')"
+  dom="$(printf '%s' "$resp" | api_response_attribute "dnsHostName")"
 
-  [[ -n "$dom" ]] || dom="$(printf '%s' "$resp" | jq -r '
-    (.search_result[0].partial_attributes[]? | select(.type=="dnsForestName") | .vals[0]) // empty
-  ')"
+  [[ -n "$dom" ]] || dom="$(printf '%s' "$resp" | api_response_attribute "dnsDomainName")"
+
+  [[ -n "$dom" ]] || dom="$(printf '%s' "$resp" | api_response_attribute "dnsForestName")"
 
   if [[ -z "$dom" ]]; then
-    nc="$(printf '%s' "$resp" | jq -r '
-      (.search_result[0].partial_attributes[]? | select(.type=="defaultNamingContext") | .vals[0]) // empty
-    ')"
+    nc="$(printf '%s' "$resp" | api_response_attribute "defaultNamingContext")"
+    [[ -n "$nc" ]] || nc="$(printf '%s' "$resp" | api_response_attribute "rootDomainNamingContext")"
+    [[ -n "$nc" ]] || nc="$(printf '%s' "$resp" | api_response_attribute "namingContexts")"
     [[ -n "$nc" ]] && dom="$(printf '%s' "$nc" | dn_to_domain)"
+  fi
+
+  if [[ -z "$dom" ]]; then
+    log "RootDSE response contains no usable domain attributes: $(printf '%s' "$resp" | tr '\r\n' ' ' | cut -c1-1500)"
   fi
 
   printf '%s' "$dom"

@@ -361,6 +361,33 @@ cleanup_valid_domain_name() {
   [[ "$value" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$ ]]
 }
 
+cleanup_valid_ipv4_address() {
+  local ip="$1"
+  local IFS=.
+  local octets octet
+
+  [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+  read -r -a octets <<< "$ip"
+  [[ "${#octets[@]}" -eq 4 ]] || return 1
+
+  for octet in "${octets[@]}"; do
+    [[ "$octet" =~ ^[0-9]+$ ]] || return 1
+    (( 10#$octet >= 0 && 10#$octet <= 255 )) || return 1
+  done
+}
+
+cleanup_valid_api_host() {
+  cleanup_valid_ipv4_address "$1" || cleanup_valid_domain_name "$1"
+}
+
+cleanup_api_host_resolution_ok() {
+  if cleanup_valid_ipv4_address "$1"; then
+    return 0
+  fi
+
+  getent hosts "$1" >/dev/null
+}
+
 cleanup_api_auth_cookie() {
   local api_host="$1"
   local user="$2"
@@ -385,6 +412,7 @@ cleanup_api_search() {
   local scope="$4"
   local filter="$5"
   local attrs_json="$6"
+  local size_limit="${7:-5}"
 
   curl -k -sS -X POST "https://${api_host}/api/entry/search" \
     --connect-timeout "${API_CONNECT_TIMEOUT}" \
@@ -396,12 +424,33 @@ cleanup_api_search() {
       \"base_object\": \"${base_object}\",
       \"scope\": ${scope},
       \"deref_aliases\": 0,
-      \"size_limit\": 5,
+      \"size_limit\": ${size_limit},
       \"time_limit\": 0,
       \"types_only\": false,
       \"filter\": \"${filter}\",
       \"attributes\": ${attrs_json}
     }"
+}
+
+cleanup_api_response_attribute() {
+  local attribute="$1"
+
+  jq -r --arg wanted "$attribute" '
+    [
+      .. | objects |
+      if (((.type? // .name? // "") | tostring | ascii_downcase) == ($wanted | ascii_downcase)) then
+        (.vals? // .values? // empty) |
+        if type == "array" then .[0] else . end
+      else
+        to_entries[]? |
+        select((.key | ascii_downcase) == ($wanted | ascii_downcase)) |
+        .value |
+        if type == "array" then .[0] else . end
+      end
+    ]
+    | map(select(. != null and . != ""))
+    | .[0] // empty
+  '
 }
 
 cleanup_dn_to_domain() {
@@ -425,13 +474,20 @@ cleanup_api_rootdse_domain() {
   local cookie="$2"
   local resp dom nc
 
-  resp="$(cleanup_api_search "$api_host" "$cookie" "" 0 "(objectClass=*)" "[\"dnsDomainName\",\"dnsForestName\",\"dnsHostName\",\"defaultNamingContext\"]")"
+  resp="$(
+    cleanup_api_search "$api_host" "$cookie" "" 0 "(objectClass=*)" \
+      '["dnsHostName","rootDomainNamingContext","defaultNamingContext","namingContexts","subschemaSubentry","supportedLDAPVersion","supportedSASLMechanisms","supportedExtension","supportedControl","supportedFeatures","vendorName","name","vendorVersion","objectClass"]' \
+      0
+  )"
 
-  dom="$(printf '%s' "$resp" | jq -r '(.search_result[0].partial_attributes[]? | select(.type=="dnsDomainName") | .vals[0]) // empty')"
-  [[ -n "$dom" ]] || dom="$(printf '%s' "$resp" | jq -r '(.search_result[0].partial_attributes[]? | select(.type=="dnsForestName") | .vals[0]) // empty')"
+  dom="$(printf '%s' "$resp" | cleanup_api_response_attribute "dnsHostName")"
+  [[ -n "$dom" ]] || dom="$(printf '%s' "$resp" | cleanup_api_response_attribute "dnsDomainName")"
+  [[ -n "$dom" ]] || dom="$(printf '%s' "$resp" | cleanup_api_response_attribute "dnsForestName")"
 
   if [[ -z "$dom" ]]; then
-    nc="$(printf '%s' "$resp" | jq -r '(.search_result[0].partial_attributes[]? | select(.type=="defaultNamingContext") | .vals[0]) // empty')"
+    nc="$(printf '%s' "$resp" | cleanup_api_response_attribute "defaultNamingContext")"
+    [[ -n "$nc" ]] || nc="$(printf '%s' "$resp" | cleanup_api_response_attribute "rootDomainNamingContext")"
+    [[ -n "$nc" ]] || nc="$(printf '%s' "$resp" | cleanup_api_response_attribute "namingContexts")"
     [[ -n "$nc" ]] && dom="$(printf '%s' "$nc" | cleanup_dn_to_domain)"
   fi
 
@@ -455,13 +511,13 @@ cleanup_validate_remote_credentials() {
   [[ -n "$saved_domain" ]] || warn "DOMAIN is missing in ${MD_JOIN_ENV}; it will be detected after authentication"
 
   while [[ -z "$saved_api_host" ]]; do
-    cleanup_read_tty saved_api_host "Enter MULTIDIRECTORY server address (FQDN):"
+    cleanup_read_tty saved_api_host "Enter MULTIDIRECTORY server address (IPv4 or FQDN):"
     if [[ -z "$saved_api_host" ]]; then
       warn "API host must be filled."
       continue
     fi
-    if ! cleanup_valid_domain_name "$saved_api_host"; then
-      warn "Invalid API host. Enter a FQDN."
+    if ! cleanup_valid_api_host "$saved_api_host"; then
+      warn "Invalid API host. Enter an IPv4 address or FQDN."
       saved_api_host=""
     fi
   done
@@ -475,8 +531,8 @@ cleanup_validate_remote_credentials() {
     return 1
   }
 
-  info "Checking DNS resolution: ${saved_api_host}"
-  getent hosts "${saved_api_host}" >/dev/null || {
+  info "Checking API host address: ${saved_api_host}"
+  cleanup_api_host_resolution_ok "${saved_api_host}" || {
     unset password
     error "DNS resolution failed: ${saved_api_host}"
     return 1
@@ -491,20 +547,19 @@ cleanup_validate_remote_credentials() {
     return 1
   }
 
-  info "Detecting domain via RootDSE"
-  detected_domain="$(cleanup_api_rootdse_domain "$saved_api_host" "$token" | tr '[:upper:]' '[:lower:]')"
   saved_domain="$(printf '%s' "$saved_domain" | tr '[:upper:]' '[:lower:]')"
 
-  [[ -n "$detected_domain" ]] || {
-    error "Failed to detect domain via RootDSE"
-    return 1
-  }
-
-  if [[ -z "$saved_domain" ]]; then
+  if [[ -n "$saved_domain" ]]; then
+    detected_domain="$saved_domain"
+    info "Using domain from saved join state: ${saved_domain}"
+  else
+    info "Detecting domain via RootDSE"
+    detected_domain="$(cleanup_api_rootdse_domain "$saved_api_host" "$token" | tr '[:upper:]' '[:lower:]')"
+    [[ -n "$detected_domain" ]] || {
+      error "Failed to detect domain via RootDSE and no saved domain is available"
+      return 1
+    }
     saved_domain="$detected_domain"
-  elif [[ "$detected_domain" != "$saved_domain" ]]; then
-    error "Domain mismatch. Saved domain is ${saved_domain}, but authenticated domain is ${detected_domain}"
-    return 1
   fi
 
   API_HOST="$saved_api_host"
@@ -570,10 +625,7 @@ cleanup_delete_salt_key_on_leave() {
       return 0
     }
 
-    minion_id="$(
-      printf '%s' "$lookup_resp" \
-        | jq -r '.search_result[0].partial_attributes[]? | select(.type=="objectGUID") | .vals[0] // empty' 2>/dev/null || true
-    )"
+    minion_id="$(printf '%s' "$lookup_resp" | cleanup_api_response_attribute "objectGUID" 2>/dev/null || true)"
   fi
 
   if [[ -z "$minion_id" ]]; then

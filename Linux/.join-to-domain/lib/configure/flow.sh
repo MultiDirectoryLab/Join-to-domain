@@ -4,6 +4,10 @@ join_domain() {
   preflight
   info "$(ui_text "Starting domain join" "Начинается присоединение к домену")"
 
+  if recoverable_incomplete_join_detected; then
+    recover_incomplete_join_state
+  fi
+
   detect_domain_state
   if [[ "$DETECTED_DOMAIN_STATE" != "not_joined" ]]; then
     warn "$(ui_text "Domain-related configuration already exists:" "Доменная конфигурация уже существует:")"
@@ -21,34 +25,44 @@ join_domain() {
   md_init_state
   MD_JOIN_ROLLBACK_ACTIVE=1
   trap on_join_error ERR
+  trap on_join_signal INT TERM
 
   prompt_configure_dns
 
   if env_has_key API_HOST; then
     [[ -n "${API_HOST:-}" ]] || die "API_HOST is empty in environment"
-    if getent hosts "${API_HOST}" >/dev/null; then
-      log "DNS resolution OK: ${API_HOST}"
+    valid_api_host "${API_HOST}" || die "Invalid API_HOST in environment: ${API_HOST}"
+    if api_host_resolution_ok "${API_HOST}"; then
+      if valid_ipv4_address "${API_HOST}"; then
+        log "API host is an IPv4 address; DNS resolution skipped: ${API_HOST}"
+      else
+        log "DNS resolution OK: ${API_HOST}"
+      fi
     else
       die "$(ui_text "DNS resolution failed for API_HOST from environment: ${API_HOST}" "Не удалось разрешить API_HOST из окружения через DNS: ${API_HOST}")"
     fi
   else
     while true; do
       if [[ -n "${SAVED_API_HOST:-}" ]]; then
-        read_tty API_HOST "$(ui_text "Enter MULTIDIRECTORY server address (FQDN) [${SAVED_API_HOST}]:" "Введите адрес сервера MULTIDIRECTORY (FQDN) [${SAVED_API_HOST}]:")"
+        read_tty API_HOST "$(ui_text "Enter MULTIDIRECTORY server address (IPv4 or FQDN) [${SAVED_API_HOST}]:" "Введите адрес сервера MULTIDIRECTORY (IPv4 или FQDN) [${SAVED_API_HOST}]:")"
         API_HOST="${API_HOST:-$SAVED_API_HOST}"
       else
-        read_tty API_HOST "$(ui_text "Enter MULTIDIRECTORY server address (FQDN), for example webadmin.domain.ru:" "Введите адрес сервера MULTIDIRECTORY (FQDN), например webadmin.domain.ru:")"
+        read_tty API_HOST "$(ui_text "Enter MULTIDIRECTORY server address (IPv4 or FQDN), for example 192.168.69.138 or webadmin.domain.ru:" "Введите адрес сервера MULTIDIRECTORY (IPv4 или FQDN), например 192.168.69.138 или webadmin.domain.ru:")"
       fi
       if [[ -z "${API_HOST}" ]]; then
         warn "$(ui_text "API host must be filled." "Адрес API не может быть пустым.")"
         continue
       fi
-      if ! valid_join_domain "${API_HOST}"; then
-        warn "$(ui_text "Invalid API host. Enter a FQDN, for example webadmin.domain.ru." "Некорректный адрес API. Введите FQDN, например webadmin.domain.ru.")"
+      if ! valid_api_host "${API_HOST}"; then
+        warn "$(ui_text "Invalid API host. Enter an IPv4 address or FQDN, for example 192.168.69.138 or webadmin.domain.ru." "Некорректный адрес API. Введите IPv4-адрес или FQDN, например 192.168.69.138 или webadmin.domain.ru.")"
         continue
       fi
-      if getent hosts "${API_HOST}" >/dev/null; then
-        log "DNS resolution OK: ${API_HOST}"
+      if api_host_resolution_ok "${API_HOST}"; then
+        if valid_ipv4_address "${API_HOST}"; then
+          log "API host is an IPv4 address; DNS resolution skipped: ${API_HOST}"
+        else
+          log "DNS resolution OK: ${API_HOST}"
+        fi
         break
       else
         warn "$(ui_text "DNS resolution failed for ${API_HOST}. Please check the address." "Не удалось разрешить ${API_HOST} через DNS. Проверьте адрес.")"
@@ -68,8 +82,12 @@ join_domain() {
             2)
               prompt_configure_dns
 
-              if getent hosts "${API_HOST}" >/dev/null; then
-                log "DNS resolution OK after DNS configuration: ${API_HOST}"
+              if api_host_resolution_ok "${API_HOST}"; then
+                if valid_ipv4_address "${API_HOST}"; then
+                  log "API host is an IPv4 address; DNS resolution skipped: ${API_HOST}"
+                else
+                  log "DNS resolution OK after DNS configuration: ${API_HOST}"
+                fi
                 break 2
               fi
 
@@ -155,7 +173,7 @@ join_domain() {
   start_services
 
   MD_JOIN_ROLLBACK_ACTIVE=0
-  trap - ERR
+  trap - ERR INT TERM
 
   ok "$(ui_text "Successfully joined domain: ${DOMAIN}" "Компьютер успешно присоединён к домену: ${DOMAIN}")"
   info "$(ui_text "System reboot is recommended" "Рекомендуется перезагрузить компьютер")"

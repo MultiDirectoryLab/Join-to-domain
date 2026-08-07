@@ -33,13 +33,13 @@ validate_leave_credentials() {
   load_join_env
 
   while [[ -z "${API_HOST:-}" ]]; do
-    read_tty API_HOST "$(ui_text "Enter MULTIDIRECTORY server address (FQDN):" "Введите адрес сервера MULTIDIRECTORY (FQDN):")"
+    read_tty API_HOST "$(ui_text "Enter MULTIDIRECTORY server address (IPv4 or FQDN):" "Введите адрес сервера MULTIDIRECTORY (IPv4 или FQDN):")"
     if [[ -z "${API_HOST}" ]]; then
       warn "$(ui_text "API host must be filled." "Адрес API не может быть пустым.")"
       continue
     fi
-    if ! valid_join_domain "${API_HOST}"; then
-      warn "$(ui_text "Invalid API host. Enter a FQDN." "Некорректный адрес API. Введите FQDN.")"
+    if ! valid_api_host "${API_HOST}"; then
+      warn "$(ui_text "Invalid API host. Enter an IPv4 address or FQDN." "Некорректный адрес API. Введите IPv4-адрес или FQDN.")"
       API_HOST=""
     fi
   done
@@ -49,8 +49,8 @@ validate_leave_credentials() {
 
   [[ -n "$leave_login" && -n "$leave_password" ]] || die "Login and password must be filled"
 
-  log "Checking DNS resolution: ${API_HOST}"
-  getent hosts "${API_HOST}" >/dev/null || die "DNS resolution failed: ${API_HOST}"
+  log "Checking API host address: ${API_HOST}"
+  api_host_resolution_ok "${API_HOST}" || die "DNS resolution failed: ${API_HOST}"
 
   install_md_server_certificate
 
@@ -192,8 +192,10 @@ restore_backups() {
 cleanup_domain_state() {
   if md_backup_exists /etc/krb5.keytab; then
     log "Keeping restored Kerberos keytab backup"
-  else
+  elif md_is_tracked /etc/krb5.keytab; then
     rm -f /etc/krb5.keytab
+  else
+    log "Keeping untracked Kerberos keytab"
   fi
 
   find "${MD_STATE_DIR}" -mindepth 1 -maxdepth 1 -type d -name 'ktadd.*' -exec rm -rf -- {} + 2>/dev/null || true
@@ -204,13 +206,41 @@ cleanup_domain_state() {
 
   if md_backup_exists /etc/salt/pki/minion; then
     log "Keeping restored Salt minion key backup"
-  else
+  elif md_is_tracked /etc/salt/pki/minion; then
     rm -rf /etc/salt/pki/minion/* 2>/dev/null || true
+  else
+    log "Keeping untracked Salt minion key pair"
   fi
 
   find /var/cache/salt/minion/extmods/modules -mindepth 0 -maxdepth 0 -type d -empty -delete 2>/dev/null || true
   find /var/cache/salt/minion/extmods -mindepth 0 -maxdepth 0 -type d -empty -delete 2>/dev/null || true
   find /etc/systemd/resolved.conf.d -mindepth 0 -maxdepth 0 -type d -empty -delete 2>/dev/null || true
+}
+
+perform_local_rollback_cleanup() {
+  set +e
+
+  stop_domain_services
+  remove_managed_files
+  restore_backups
+  cleanup_domain_state
+  restart_after_leave
+
+  set -e
+}
+
+recover_incomplete_join_state() {
+  warn "$(ui_text "The previous join did not finish. Completing local rollback before retrying." "Предыдущее присоединение не завершилось. Перед новой попыткой завершается локальный откат.")"
+
+  mkdir -p "${MD_STATE_DIR}"
+  touch "${MD_ROLLBACK_MARKER}"
+
+  perform_local_rollback_cleanup
+
+  # Keep the marker and backups if the process is interrupted. Remove the
+  # transaction directory only after all local recovery steps have returned.
+  rm -rf "${MD_ETC_DIR}"
+  ok "$(ui_text "Incomplete join state was recovered" "Состояние незавершённого присоединения восстановлено")"
 }
 
 restart_after_leave() {
@@ -266,17 +296,12 @@ rollback_local_changes() {
   mkdir -p "${MD_STATE_DIR}"
   touch "${MD_ROLLBACK_MARKER}"
 
-  set +e
+  perform_local_rollback_cleanup
 
-  stop_domain_services
-  remove_managed_files
-  restore_backups
-  cleanup_domain_state
-  restart_after_leave
-
-  rm -f "${MD_ROLLBACK_MARKER}"
-
-  set -e
+  # A completed rollback must not look like an active managed join on the next
+  # run. If the process is interrupted before this point, the marker remains
+  # and the next normal Join action resumes recovery.
+  rm -rf "${MD_ETC_DIR}"
 
   info "$(ui_text "Rollback completed" "Откат завершён")"
 }
@@ -284,9 +309,21 @@ rollback_local_changes() {
 on_join_error() {
   local code=$?
 
-  trap - ERR
+  trap - ERR INT TERM
   MD_JOIN_ROLLBACK_ACTIVE=0
 
+  rollback_local_changes "$code"
+
+  exit "$code"
+}
+
+on_join_signal() {
+  local code=130
+
+  trap - ERR INT TERM
+  MD_JOIN_ROLLBACK_ACTIVE=0
+
+  warn "$(ui_text "Domain join was interrupted" "Присоединение к домену прервано")"
   rollback_local_changes "$code"
 
   exit "$code"

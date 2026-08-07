@@ -46,6 +46,23 @@ valid_join_domain() {
   [[ "$value" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$ ]]
 }
 
+valid_api_host() {
+  local value="$1"
+
+  valid_ipv4_address "$value" || valid_join_domain "$value"
+}
+
+api_host_resolution_ok() {
+  local value="$1"
+
+  if valid_ipv4_address "$value"; then
+    log "API host is an IPv4 address; DNS resolution skipped: ${value}"
+    return 0
+  fi
+
+  getent hosts "$value" >/dev/null
+}
+
 valid_join_realm() {
   local value="$1"
 

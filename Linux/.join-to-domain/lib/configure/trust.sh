@@ -18,8 +18,13 @@ install_md_server_certificate() {
     die "Failed to retrieve TLS certificate from ${API_HOST}:443"
   fi
 
-  openssl x509 -in "${tmp_cert}" -noout -checkhost "${API_HOST}" >/dev/null 2>&1 \
-    || die "Server certificate does not cover DNS name ${API_HOST}"
+  if valid_ipv4_address "${API_HOST}"; then
+    openssl x509 -in "${tmp_cert}" -noout -checkip "${API_HOST}" >/dev/null 2>&1 \
+      || die "Server certificate does not cover IP address ${API_HOST}"
+  else
+    openssl x509 -in "${tmp_cert}" -noout -checkhost "${API_HOST}" >/dev/null 2>&1 \
+      || die "Server certificate does not cover DNS name ${API_HOST}"
+  fi
 
   fingerprint="$(openssl x509 -in "${tmp_cert}" -noout -fingerprint -sha256 | sed 's/^.*=//')"
   warn "$(ui_text "Trusting certificate received on first connection (TOFU), SHA-256: ${fingerprint}" "Устанавливается доверие сертификату, полученному при первом подключении (TOFU), SHA-256: ${fingerprint}")"
@@ -75,7 +80,7 @@ renew_md_server_certificate() {
   API_HOST="${SAVED_API_HOST:-}"
 
   while [[ -z "${API_HOST}" ]]; do
-    read_tty API_HOST "$(ui_text "Enter MULTIDIRECTORY server address (FQDN):" "Введите адрес сервера MULTIDIRECTORY (FQDN):")"
+    read_tty API_HOST "$(ui_text "Enter MULTIDIRECTORY server address (IPv4 or FQDN):" "Введите адрес сервера MULTIDIRECTORY (IPv4 или FQDN):")"
     API_HOST="$(sanitize_input "${API_HOST}")"
 
     if [[ -z "${API_HOST}" ]]; then
@@ -83,14 +88,14 @@ renew_md_server_certificate() {
       continue
     fi
 
-    if ! valid_join_domain "${API_HOST}"; then
+    if ! valid_api_host "${API_HOST}"; then
       warn "$(ui_text "Invalid server address: ${API_HOST}" "Некорректный адрес сервера: ${API_HOST}")"
       API_HOST=""
     fi
   done
 
-  log "Checking DNS resolution: ${API_HOST}"
-  getent hosts "${API_HOST}" >/dev/null || die "DNS resolution failed: ${API_HOST}"
+  log "Checking API host address: ${API_HOST}"
+  api_host_resolution_ok "${API_HOST}" || die "DNS resolution failed: ${API_HOST}"
 
   install_md_server_certificate
   log "MultiDirectory TLS certificate renewed successfully"

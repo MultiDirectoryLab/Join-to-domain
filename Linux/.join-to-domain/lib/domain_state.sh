@@ -27,6 +27,39 @@ sssd_conf_has_domain_block() {
   grep -Eq '^\[domain/[^]]+\]|MultiDirectory' /etc/sssd/sssd.conf 2>/dev/null
 }
 
+recoverable_incomplete_join_detected() {
+  local rollback_marker="${MD_ROLLBACK_MARKER:-${MD_STATE_DIR}/rollback-in-progress}"
+
+  # This marker is created before rollback starts and is removed only after
+  # local restoration has completed. Its presence makes recovery unambiguous.
+  if [[ -f "$rollback_marker" ]]; then
+    return 0
+  fi
+
+  # Without a rollback marker, a saved join.env marks a completed managed
+  # join. Never clean it up automatically from the normal Join action.
+  if [[ -f "$MD_JOIN_ENV" ]]; then
+    return 1
+  fi
+
+  # Older versions removed the marker but left an empty transaction manifest.
+  # Recover that case only when there are no strong signs of a real join.
+  if [[ ! -f "$MD_MANIFEST" ]]; then
+    return 1
+  fi
+  if sssd_conf_has_domain_block; then
+    return 1
+  fi
+  if [[ -f /etc/krb5.keytab ]]; then
+    return 1
+  fi
+  if have_cmd realm && realm list 2>/dev/null | grep -q '^[^[:space:]]'; then
+    return 1
+  fi
+
+  return 0
+}
+
 detect_domain_state() {
   local managed=0 partial=0 unmanaged_sssd=0
 
@@ -43,9 +76,9 @@ detect_domain_state() {
     add_domain_state_reason "MultiDirectory manifest found: ${MD_MANIFEST}"
   fi
 
-  if [[ -f "${MD_STATE_DIR}/rollback-in-progress" ]]; then
+  if [[ -f "${MD_ROLLBACK_MARKER:-${MD_STATE_DIR}/rollback-in-progress}" ]]; then
     partial=1
-    add_domain_state_reason "MultiDirectory rollback marker found: ${MD_STATE_DIR}/rollback-in-progress"
+    add_domain_state_reason "MultiDirectory rollback marker found: ${MD_ROLLBACK_MARKER:-${MD_STATE_DIR}/rollback-in-progress}"
   fi
 
   if have_cmd realm && realm list 2>/dev/null | grep -q '^[^[:space:]]'; then
