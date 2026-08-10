@@ -28,18 +28,24 @@ load_join_env() {
 }
 
 validate_leave_credentials() {
-  local leave_login leave_password leave_token detected_domain
+  local leave_login leave_password leave_token detected_domain dns_input dns_servers
 
   load_join_env
 
+  # TLS certificate validation requires the server FQDN.  Do not use a saved
+  # IPv4 API address during leave; use the saved domain name instead.
+  if valid_ipv4_address "${API_HOST:-}"; then
+    API_HOST="${DOMAIN:-}"
+  fi
+
   while [[ -z "${API_HOST:-}" ]]; do
-    read_tty API_HOST "$(ui_text "Enter MULTIDIRECTORY server address (IPv4 or FQDN):" "Введите адрес сервера MULTIDIRECTORY (IPv4 или FQDN):")"
+    read_tty API_HOST "$(ui_text "Enter MULTIDIRECTORY domain/server FQDN:" "Введите FQDN домена/сервера MULTIDIRECTORY:")"
     if [[ -z "${API_HOST}" ]]; then
       warn "$(ui_text "API host must be filled." "Адрес API не может быть пустым.")"
       continue
     fi
-    if ! valid_api_host "${API_HOST}"; then
-      warn "$(ui_text "Invalid API host. Enter an IPv4 address or FQDN." "Некорректный адрес API. Введите IPv4-адрес или FQDN.")"
+    if valid_ipv4_address "${API_HOST}" || ! valid_api_host "${API_HOST}"; then
+      warn "$(ui_text "Invalid server name. Enter an FQDN; IPv4 addresses are not accepted during leave." "Некорректное имя сервера. Введите FQDN; IP-адрес при выходе из домена не принимается.")"
       API_HOST=""
     fi
   done
@@ -50,7 +56,20 @@ validate_leave_credentials() {
   [[ -n "$leave_login" && -n "$leave_password" ]] || die "Login and password must be filled"
 
   log "Checking API host address: ${API_HOST}"
-  api_host_resolution_ok "${API_HOST}" || die "DNS resolution failed: ${API_HOST}"
+  while ! api_host_resolution_ok "${API_HOST}"; do
+    warn "$(ui_text "DNS resolution failed: ${API_HOST}" "Не удалось разрешить имя через DNS: ${API_HOST}")"
+    read_tty dns_input "$(ui_text "Enter DNS server IP address:" "Введите IP-адрес DNS-сервера:")"
+    dns_servers="$(normalize_dns_servers "${dns_input}" 2>/dev/null || true)"
+    if [[ -z "${dns_servers}" ]]; then
+      warn "$(ui_text "Invalid DNS server address." "Некорректный адрес DNS-сервера.")"
+      continue
+    fi
+    md_set_resolv_first "${dns_servers}" || {
+      warn "$(ui_text "Failed to configure DNS servers." "Не удалось настроить DNS-серверы.")"
+      continue
+    }
+    log "DNS servers configured: $(dns_servers_csv "${dns_servers}")"
+  done
 
   install_md_server_certificate
 

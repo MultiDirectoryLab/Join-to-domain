@@ -60,6 +60,7 @@ cleanup_domain_runtime_state() {
   local path failed=0
   local domain_paths=(
     /etc/krb5.keytab
+    /etc/salt/minion_id
     /etc/sudoers.d/domain-admins
     /etc/systemd/resolved.conf.d/MultiDirectory.conf
     /etc/salt/minion.append
@@ -76,6 +77,21 @@ cleanup_domain_runtime_state() {
   done
 
   return "$failed"
+}
+
+cleanup_kerberos_domain_state() {
+  local backup
+
+  krb5_conf_looks_domain_managed || return 0
+
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    info "Dry-run: move managed /etc/krb5.conf aside"
+    return 0
+  fi
+
+  backup="$(timestamped_backup_path /etc/krb5.conf)"
+  mv /etc/krb5.conf "$backup" || return 1
+  cleanup_log "Moved managed Kerberos configuration to ${backup}"
 }
 
 cleanup_sssd_cache() {
@@ -380,6 +396,41 @@ cleanup_valid_api_host() {
   cleanup_valid_ipv4_address "$1" || cleanup_valid_domain_name "$1"
 }
 
+cleanup_normalize_dns_servers() {
+  local raw="$1" item normalized=""
+  local IFS=,
+  local servers=()
+
+  read -r -a servers <<< "$raw"
+  [[ "${#servers[@]}" -ge 1 && "${#servers[@]}" -le 3 ]] || return 1
+  for item in "${servers[@]}"; do
+    item="$(sanitize_input "$item")"
+    cleanup_valid_ipv4_address "$item" || return 1
+    normalized="${normalized}${normalized:+ }${item}"
+  done
+  printf '%s\n' "$normalized"
+}
+
+cleanup_set_dns_servers() {
+  local servers="$1" iface
+
+  if have_cmd nmcli; then
+    iface="$(nmcli -t -f DEVICE,TYPE,STATE device status 2>/dev/null | awk -F: '$2 ~ /ethernet|wifi/ && $3 == "connected" {print $1; exit}')"
+    if [[ -n "$iface" ]] && nmcli device modify "$iface" ipv4.dns "$servers" ipv4.ignore-auto-dns yes >/dev/null 2>&1; then
+      cleanup_log "Configured temporary NetworkManager DNS on ${iface}: ${servers}"
+      return 0
+    fi
+  fi
+
+  # Do not replace a resolver symlink managed by NetworkManager/systemd.
+  [[ ! -L /etc/resolv.conf ]] || return 1
+  {
+    for iface in $servers; do
+      printf 'nameserver %s\n' "$iface"
+    done
+  } > /etc/resolv.conf
+}
+
 cleanup_api_host_resolution_ok() {
   if cleanup_valid_ipv4_address "$1"; then
     return 0
@@ -495,7 +546,7 @@ cleanup_api_rootdse_domain() {
 }
 
 cleanup_validate_remote_credentials() {
-  local saved_domain saved_api_host login password token detected_domain
+  local saved_domain saved_api_host login password token detected_domain dns_input dns_servers
 
   CLEANUP_REMOTE_READY=0
 
@@ -503,6 +554,12 @@ cleanup_validate_remote_credentials() {
 
   saved_domain="$(cleanup_join_state_value DOMAIN 2>/dev/null || true)"
   saved_api_host="$(cleanup_join_state_value API_HOST 2>/dev/null || true)"
+  # Leave uses the domain FQDN for TLS/DNS.  Never fall back to an IP address
+  # entered as a remote API endpoint; the certificate is issued for the name.
+  [[ -n "$saved_api_host" ]] || saved_api_host="$saved_domain"
+  if cleanup_valid_ipv4_address "$saved_api_host"; then
+    saved_api_host=""
+  fi
   LDAP_COMPUTER_OU="$(cleanup_join_state_value LDAP_COMPUTER_OU 2>/dev/null || true)"
   HOSTNAME="$(cleanup_join_state_value HOSTNAME 2>/dev/null || true)"
   SALT_MINION_ID="$(cleanup_join_state_value SALT_MINION_ID 2>/dev/null || true)"
@@ -511,13 +568,13 @@ cleanup_validate_remote_credentials() {
   [[ -n "$saved_domain" ]] || warn "DOMAIN is missing in ${MD_JOIN_ENV}; it will be detected after authentication"
 
   while [[ -z "$saved_api_host" ]]; do
-    cleanup_read_tty saved_api_host "Enter MULTIDIRECTORY server address (IPv4 or FQDN):"
+    cleanup_read_tty saved_api_host "Enter MULTIDIRECTORY domain/server FQDN:"
     if [[ -z "$saved_api_host" ]]; then
       warn "API host must be filled."
       continue
     fi
-    if ! cleanup_valid_api_host "$saved_api_host"; then
-      warn "Invalid API host. Enter an IPv4 address or FQDN."
+    if cleanup_valid_ipv4_address "$saved_api_host" || ! cleanup_valid_api_host "$saved_api_host"; then
+      warn "Invalid server name. Enter an FQDN; IPv4 addresses are not accepted during domain leave."
       saved_api_host=""
     fi
   done
@@ -532,11 +589,20 @@ cleanup_validate_remote_credentials() {
   }
 
   info "Checking API host address: ${saved_api_host}"
-  cleanup_api_host_resolution_ok "${saved_api_host}" || {
-    unset password
-    error "DNS resolution failed: ${saved_api_host}"
-    return 1
-  }
+  while ! cleanup_api_host_resolution_ok "${saved_api_host}"; do
+    warn "DNS resolution failed: ${saved_api_host}"
+    cleanup_read_tty dns_input "Enter DNS server IP address (or comma-separated addresses):"
+    dns_servers="$(cleanup_normalize_dns_servers "$dns_input" 2>/dev/null || true)"
+    if [[ -z "$dns_servers" ]]; then
+      warn "Invalid DNS server address."
+      continue
+    fi
+    cleanup_set_dns_servers "$dns_servers" || {
+      warn "Failed to configure DNS servers."
+      continue
+    }
+    info "DNS servers configured: ${dns_servers// /,}"
+  done
 
   info "Authenticating domain administrator"
   token="$(cleanup_api_auth_cookie "$saved_api_host" "$login" "$password")"
@@ -574,6 +640,11 @@ cleanup_delete_salt_minion_key() {
   local resp http_code body
 
   [[ -n "$minion_id" ]] || return 0
+  if [[ ! "$minion_id" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$ ]]; then
+    warn "Salt minion id is not a UUID (${minion_id}); UUID deletion endpoint skipped"
+    cleanup_log "Salt key cleanup skipped: non-UUID minion id ${minion_id}"
+    return 0
+  fi
 
   resp="$(
     curl -k -sS -w "\n%{http_code}" \
@@ -742,10 +813,16 @@ safe_leave_domain() {
 
   validate_pam_safety || true
   validate_ssh_safety || true
-  cleanup_remote_domain_objects || return 1
+  if [[ -f "$MD_JOIN_ENV" || -f "$MD_MANIFEST" ]]; then
+    cleanup_remote_domain_objects || return 1
+  else
+    warn "Join state and manifest are absent; skipping remote cleanup and removing stale local domain configuration"
+    cleanup_log "Remote cleanup skipped: no join state or manifest"
+  fi
 
   stop_domain_services_for_cleanup
   cleanup_domain_runtime_state || failed=1
+  cleanup_kerberos_domain_state || failed=1
   cleanup_sssd_domain_state || failed=1
   cleanup_ssh_domain_state || failed=1
   cleanup_sssd_cache

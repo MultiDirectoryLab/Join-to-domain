@@ -4,6 +4,10 @@ api_delete_salt_minion_key() {
   local resp http_code body
 
   [[ -n "$minion_id" ]] || return 0
+  if [[ ! "$minion_id" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$ ]]; then
+    warn "Salt minion id is not a UUID (${minion_id}); UUID deletion endpoint skipped"
+    return 0
+  fi
 
   resp="$(
     curl -sS -w "\n%{http_code}" \
@@ -67,6 +71,11 @@ delete_salt_minion_key_on_leave() {
 
   if [[ -z "$guid" ]]; then
     warn "Computer objectGUID not found, Salt key cleanup skipped"
+    return 0
+  fi
+
+  if [[ ! "$guid" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$ ]]; then
+    warn "Salt minion id is not a UUID (${guid}); UUID deletion endpoint skipped"
     return 0
   fi
 
@@ -207,8 +216,13 @@ prepare_salt_minion_identity() {
     existing_minion_id="$(tr -d '\r\n' < /etc/salt/minion_id 2>/dev/null || true)"
     if [[ -n "$existing_minion_id" && "$existing_minion_id" != "$guid" ]]; then
       warn "$(ui_text "Updating Salt minion id from ${existing_minion_id} to ${guid}; keeping the existing minion key pair" "Идентификатор Salt minion меняется с ${existing_minion_id} на ${guid}; существующая пара ключей сохраняется")"
-      log "Deleting the previous Salt minion id before publishing the new one: ${existing_minion_id}"
-      api_delete_salt_minion_key "${access_token}" "${existing_minion_id}"
+      if [[ "$existing_minion_id" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$ ]]; then
+        log "Deleting the previous Salt minion id before publishing the new one: ${existing_minion_id}"
+        api_delete_salt_minion_key "${access_token}" "${existing_minion_id}"
+      else
+        warn "Previous Salt minion id is not a UUID (${existing_minion_id}); skipping deletion via UUID endpoint"
+        log "Skipped deletion of incompatible legacy Salt minion id: ${existing_minion_id}"
+      fi
     fi
   fi
 

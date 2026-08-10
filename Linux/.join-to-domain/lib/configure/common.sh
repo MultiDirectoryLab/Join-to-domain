@@ -415,6 +415,9 @@ normalize_files_eol() {
 
 md_init_state() {
   mkdir -p "${MD_STATE_DIR}" "${MD_BACKUP_DIR}"
+  # A new transaction must not inherit an orphaned marker from an already
+  # completed rollback.
+  rm -f "${MD_ROLLBACK_MARKER}"
   touch "${MD_MANIFEST}"
   chmod 700 "${MD_STATE_DIR}"
   chmod 700 "${MD_BACKUP_DIR}"
