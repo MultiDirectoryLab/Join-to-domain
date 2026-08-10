@@ -238,14 +238,14 @@ check_dependencies() {
 
   error "Missing required dependencies"
   if [[ "${#MISSING_PACKAGES[@]}" -gt 0 ]]; then
-    printf '\nMissing packages:\n'
+    printf '\n%s:\n' "$(ui_text "Missing packages" "Отсутствующие пакеты")"
     for package in "${MISSING_PACKAGES[@]}"; do
       printf '  - %s\n' "$package"
     done
   fi
 
   if [[ "${#MISSING_BINARIES[@]}" -gt 0 ]]; then
-    printf '\nMissing commands:\n'
+    printf '\n%s:\n' "$(ui_text "Missing commands" "Отсутствующие команды")"
     for binary in "${MISSING_BINARIES[@]}"; do
       printf '  - %s\n' "$binary"
     done

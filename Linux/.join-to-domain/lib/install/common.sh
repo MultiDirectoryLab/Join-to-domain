@@ -9,10 +9,10 @@ YELLOW='\033[1;33m'
 RED='\033[0;31m'
 NC='\033[0m'
 
-log()  { echo -e "${GREEN}[OK]${NC} $*"; }
-info() { echo -e "${BLUE}[INFO]${NC} $*"; }
-warn() { echo -e "${YELLOW}[WARN]${NC} $*"; }
-die()  { echo -e "${RED}[ERR]${NC} $*" >&2; exit 1; }
+log()  { echo -e "${GREEN}[OK]${NC} $(runtime_text "$*")"; }
+info() { echo -e "${BLUE}[INFO]${NC} $(runtime_text "$*")"; }
+warn() { echo -e "${YELLOW}[WARN]${NC} $(runtime_text "$*")"; }
+die()  { echo -e "${RED}[ERR]${NC} $(runtime_text "$*")" >&2; exit 1; }
 
 tty_echo() {
   echo -e "$*" > /dev/tty
@@ -88,7 +88,7 @@ PACKAGES_TO_REMOVE="${STATE_DIR}/packages-to-remove.list"
 INSTALL_ENV="${STATE_DIR}/install.env"
 
 usage() {
-  echo "Use: sudo ${PUBLIC_LAUNCHER}"
+  echo "$(ui_text "Use" "Использование"): sudo ${PUBLIC_LAUNCHER}"
   exit 1
 }
 

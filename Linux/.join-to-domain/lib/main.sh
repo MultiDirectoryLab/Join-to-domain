@@ -8,7 +8,7 @@ source_join_module() {
   local path="${JOIN_TO_DOMAIN_LIB_DIR}/${module}.sh"
 
   if [[ ! -f "$path" ]]; then
-    printf '[ERROR] Required internal module not found: %s\n' "$module" >&2
+    printf '[ERROR] %s: %s\n' "$(ui_text "Required internal module not found" "Не найден обязательный внутренний модуль")" "$module" >&2
     return 1
   fi
 

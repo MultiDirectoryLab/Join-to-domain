@@ -73,6 +73,124 @@ ui_text() {
   fi
 }
 
+# Translates legacy one-argument status messages. New messages should prefer
+# ui_text, but the central formatter keeps every module Russian when language 1
+# is selected, including package installation and rollback paths.
+runtime_text() {
+  local text="$1"
+  [[ "${MD_UI_LANG:-en}" == "ru" ]] || { printf '%s' "$text"; return; }
+  # Messages already selected by ui_text/tr_text must pass through unchanged.
+  [[ "$text" =~ [АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯабвгдеёжзийклмнопрстуфхцчшщъыьэюя] ]] \
+    && { printf '%s' "$text"; return; }
+
+  case "$text" in
+    "All required dependencies are installed") printf 'Все необходимые зависимости установлены' ;;
+    "Missing required dependencies") printf 'Отсутствуют необходимые зависимости' ;;
+    "Required internal component not found") printf 'Не найден обязательный внутренний компонент' ;;
+    "No packages to install") printf 'Нет пакетов для установки' ;;
+    "Updating package index") printf 'Обновление индекса пакетов' ;;
+    "Installing required packages") printf 'Установка необходимых пакетов' ;;
+    "Package installation completed") printf 'Установка пакетов завершена' ;;
+    "One or more packages failed verification") printf 'Один или несколько пакетов не прошли проверку' ;;
+    "Running package installation") printf 'Запуск установки пакетов' ;;
+    "Installer returned an empty dependency list") printf 'Установщик вернул пустой список зависимостей' ;;
+    "Input contains invalid characters. Please enter the value again.") printf 'Ввод содержит недопустимые символы. Повторите ввод.' ;;
+    "No supported package manager found"*) printf 'Не найден поддерживаемый менеджер пакетов%s' "${text#No supported package manager found}" ;;
+    "Unsupported OS: "*) printf 'Неподдерживаемая ОС: %s' "${text#Unsupported OS: }" ;;
+    "Run as root: "*) printf 'Запустите с правами root: %s' "${text#Run as root: }" ;;
+    "Command not found: "*) printf 'Команда не найдена: %s' "${text#Command not found: }" ;;
+    "File not found: "*) printf 'Файл не найден: %s' "${text#File not found: }" ;;
+    "File is empty: "*) printf 'Файл пуст: %s' "${text#File is empty: }" ;;
+    "Directory not found: "*) printf 'Каталог не найден: %s' "${text#Directory not found: }" ;;
+    "Installed: "*) printf 'Установлено: %s' "${text#Installed: }" ;;
+    "Package is not installed after installation attempt: "*) printf 'Пакет не установлен после попытки установки: %s' "${text#Package is not installed after installation attempt: }" ;;
+    "DNS resolution failed: "*) printf 'Ошибка разрешения DNS: %s' "${text#DNS resolution failed: }" ;;
+    "API_HOST is empty in environment") printf 'API_HOST в файле окружения не задан' ;;
+    "Invalid API_HOST in environment: "*) printf 'Некорректный API_HOST в файле окружения: %s' "${text#Invalid API_HOST in environment: }" ;;
+    "Login and password must be filled") printf 'Логин и пароль должны быть заполнены' ;;
+    "Saved domain is unavailable"*) printf 'Сохранённый домен недоступен; он будет определён после аутентификации' ;;
+    "Saved API host is unavailable"*) printf 'Сохранённый адрес API недоступен; потребуется интерактивный ввод' ;;
+    "Failed to authenticate domain administrator") printf 'Не удалось аутентифицировать администратора домена' ;;
+    "Failed to detect domain via RootDSE") printf 'Не удалось определить домен через RootDSE' ;;
+    "Domain mismatch."*) printf 'Домен не совпадает.%s' "${text#Domain mismatch.}" ;;
+    "Active join backup is missing or corrupted") printf 'Активная резервная копия присоединения отсутствует или повреждена' ;;
+    "Original configuration could not be fully restored") printf 'Не удалось полностью восстановить исходную конфигурацию' ;;
+    "Restored PAM/NSS/SSH configuration validation failed") printf 'Восстановленная конфигурация PAM/NSS/SSH не прошла проверку' ;;
+    "Error in SSH daemon configuration") printf 'Ошибка в конфигурации SSH-сервера' ;;
+    "PAM restore validation failed: local authentication module missing") printf 'Ошибка проверки восстановленного PAM: отсутствует модуль локальной аутентификации' ;;
+    "PAM restore validation failed: "*) printf 'Ошибка проверки восстановленного PAM: %s' "${text#PAM restore validation failed: }" ;;
+    "NetworkManager DNS state was not fully restored") printf 'Состояние DNS NetworkManager восстановлено не полностью' ;;
+    "authselect state was not fully restored") printf 'Состояние authselect восстановлено не полностью' ;;
+    "SSSD socket state was not fully restored") printf 'Состояние сокетов SSSD восстановлено не полностью' ;;
+    "Required internal helper is not loaded: "*) printf 'Не загружена обязательная внутренняя функция: %s' "${text#Required internal helper is not loaded: }" ;;
+    "Failed to create a safe pre-join backup") printf 'Не удалось создать безопасную резервную копию перед присоединением' ;;
+    "No backup transaction is loaded for "*) printf 'Не загружена транзакция резервного копирования: %s' "${text#No backup transaction is loaded for }" ;;
+    "Failed to back up: "*) printf 'Не удалось создать резервную копию: %s' "${text#Failed to back up: }" ;;
+    "Invalid keytab") printf 'Некорректный keytab' ;;
+    "Kerberos keytab authentication failed") printf 'Аутентификация Kerberos по keytab завершилась ошибкой' ;;
+    "LDAP GSSAPI authentication failed") printf 'Аутентификация LDAP GSSAPI завершилась ошибкой' ;;
+    "Failed to check whether computer object exists in LDAP") printf 'Не удалось проверить наличие объекта компьютера в LDAP' ;;
+    "Computer already exists in LDAP, creation skipped") printf 'Компьютер уже существует в LDAP, создание пропущено' ;;
+    "Failed to create computer object "*) printf 'Не удалось создать объект компьютера %s' "${text#Failed to create computer object }" ;;
+    "PAM file not found: "*) printf 'Файл PAM не найден: %s' "${text#PAM file not found: }" ;;
+    "Failed to patch PAM file: "*) printf 'Не удалось изменить файл PAM: %s' "${text#Failed to patch PAM file: }" ;;
+    "NSS configuration not found: "*) printf 'Конфигурация NSS не найдена: %s' "${text#NSS configuration not found: }" ;;
+    "SSSD configuration validated") printf 'Конфигурация SSSD проверена' ;;
+    "SSSD configuration validation failed") printf 'Конфигурация SSSD не прошла проверку' ;;
+    "sssctl not found, SSSD config validation skipped") printf 'sssctl не найден, проверка конфигурации SSSD пропущена' ;;
+    "sudoers validation failed") printf 'Конфигурация sudoers не прошла проверку' ;;
+    "visudo not found, sudoers validation skipped") printf 'visudo не найден, проверка sudoers пропущена' ;;
+    "Backing up Astra SE configuration") printf 'Создание резервной копии конфигурации Astra SE' ;;
+    "Astra SE configuration backup completed") printf 'Резервная копия конфигурации Astra SE создана' ;;
+    "Applying Astra SE SSSD/PARSEC configuration") printf 'Применение конфигурации SSSD/PARSEC для Astra SE' ;;
+    "Astra SE configuration completed") printf 'Настройка Astra SE завершена' ;;
+    "Astra Linux SE detected: preserving existing SSSD snippets") printf 'Обнаружена Astra Linux SE: существующие фрагменты конфигурации SSSD будут сохранены' ;;
+    "Keytab retrieval failed."*) printf 'Не удалось получить keytab.%s' "${text#Keytab retrieval failed.}" ;;
+    "keytab was not received"*) printf 'Keytab не получен%s' "${text#keytab was not received}" ;;
+    "Failed to enable computer account: "*) printf 'Не удалось включить учётную запись компьютера: %s' "${text#Failed to enable computer account: }" ;;
+    "Computer account is disabled, enabling it") printf 'Учётная запись компьютера отключена, выполняется включение' ;;
+    "Disabling computer account") printf 'Отключение учётной записи компьютера' ;;
+    "Computer account was not disabled"*) printf 'Учётная запись компьютера не была отключена%s' "${text#Computer account was not disabled}" ;;
+    "Failed to refresh API session before Salt key operations") printf 'Не удалось обновить API-сессию перед операциями с ключом Salt' ;;
+    "Salt minion id is not a UUID "*) printf 'Идентификатор Salt minion не является UUID %s' "${text#Salt minion id is not a UUID }" ;;
+    "Failed to request Salt key deletion for "*) printf 'Не удалось запросить удаление ключа Salt для %s' "${text#Failed to request Salt key deletion for }" ;;
+    "Salt key deletion returned HTTP "*) printf 'Удаление ключа Salt вернуло HTTP %s' "${text#Salt key deletion returned HTTP }" ;;
+    "Continuing without blocking the current operation") printf 'Текущая операция будет продолжена' ;;
+    "API access token is missing"*) printf 'Токен API отсутствует; очистка Salt пропущена' ;;
+    "Computer LDAP path is unknown"*) printf 'Путь компьютера в LDAP неизвестен; очистка Salt пропущена' ;;
+    "Failed to get computer objectGUID"*) printf 'Не удалось получить objectGUID компьютера; очистка Salt пропущена' ;;
+    "Computer objectGUID not found"*) printf 'objectGUID компьютера не найден; очистка Salt пропущена' ;;
+    "Deleting Salt key on master for minion id: "*) printf 'Удаление ключа Salt на master для minion: %s' "${text#Deleting Salt key on master for minion id: }" ;;
+    "Custom Salt pkg module not found"*) printf 'Пользовательский модуль Salt pkg не найден; установка пропущена' ;;
+    "salt-call not found"*) printf 'salt-call не найден; обновление модулей Salt пропущено' ;;
+    "Failed to get objectGUID") printf 'Не удалось получить objectGUID' ;;
+    "Failed to get Salt master_finger") printf 'Не удалось получить master_finger Salt' ;;
+    "Salt minion diagnostics:") printf 'Диагностика Salt minion:' ;;
+    "salt-minion binary not found in PATH") printf 'Исполняемый файл salt-minion не найден в PATH' ;;
+    "Failed to restart salt-minion.service") printf 'Не удалось перезапустить salt-minion.service' ;;
+    "Existing join state was created without a pre-join backup reference") printf 'Существующее состояние присоединения создано без ссылки на исходную резервную копию' ;;
+    "Recovery rejoin failed with exit code "*) printf 'Восстановительное присоединение завершилось с кодом %s' "${text#Recovery rejoin failed with exit code }" ;;
+    "Pre-rejoin configuration restored; the original pre-join backup was preserved") printf 'Конфигурация до повторного присоединения восстановлена; исходная резервная копия сохранена' ;;
+    "Existing domain configuration is incomplete"*) printf 'Существующая доменная конфигурация неполна или не соответствует сохранённому домену' ;;
+    "Failed to create the recovery rejoin operation backup") printf 'Не удалось создать резервную копию операции повторного присоединения' ;;
+    "Failed to determine the computer object state in LDAP") printf 'Не удалось определить состояние объекта компьютера в LDAP' ;;
+    "Existing join state has no pre-join backup"*) printf 'В существующем состоянии нет исходной резервной копии; локальная операция запрещена' ;;
+    "Existing join state contains an invalid pre-join backup reference."*) printf 'Существующее состояние содержит некорректную ссылку на исходную резервную копию: %s' "${text#Existing join state contains an invalid pre-join backup reference. }" ;;
+    "NOT ACTIVE: "*) printf 'НЕ АКТИВЕН: %s' "${text#NOT ACTIVE: }" ;;
+    "Converting CRLF to LF: "*) printf 'Преобразование CRLF в LF: %s' "${text#Converting CRLF to LF: }" ;;
+    "Failed to retrieve TLS certificate from "*) printf 'Не удалось получить TLS-сертификат от %s' "${text#Failed to retrieve TLS certificate from }" ;;
+    "Server certificate does not cover IP address "*) printf 'Сертификат сервера не содержит IP-адрес %s' "${text#Server certificate does not cover IP address }" ;;
+    "Server certificate does not cover DNS name "*) printf 'Сертификат сервера не содержит DNS-имя %s' "${text#Server certificate does not cover DNS name }" ;;
+    "Unsupported system CA trust store") printf 'Неподдерживаемое системное хранилище сертификатов' ;;
+    "TLS verification failed"*) printf 'Проверка TLS завершилась ошибкой%s' "${text#TLS verification failed}" ;;
+    "Changed MultiDirectory certificate was not accepted") printf 'Изменённый сертификат MultiDirectory не был принят' ;;
+    "Active join backup is missing or corrupted") printf 'Активная резервная копия присоединения отсутствует или повреждена' ;;
+    "Ignoring invalid "*) printf 'Некорректное сохранённое значение проигнорировано: %s' "${text#Ignoring invalid }" ;;
+    "No valid join state values found in "*) printf 'В файле состояния не найдено корректных значений: %s' "${text#No valid join state values found in }" ;;
+    *) printf 'Внутренняя операция; подробности записаны в журнал' ;;
+  esac
+}
+
 select_ui_language() {
   local choice
 

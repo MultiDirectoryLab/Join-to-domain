@@ -73,8 +73,6 @@ renew_certificate_from_menu() {
 }
 
 rejoin_domain() {
-  local code
-
   rejoin_log "Rejoin requested"
 
   if ! need_script "$CONFIGURE_SCRIPT"; then
@@ -82,41 +80,22 @@ rejoin_domain() {
     return 1
   fi
 
-  detect_domain_state
-  rejoin_log "Detected domain config state: ${DETECTED_DOMAIN_STATE}"
-  cleanup_log "Detected state: ${DETECTED_DOMAIN_STATE}"
-
-  if [[ "$DETECTED_DOMAIN_STATE" != "not_joined" ]]; then
-    warn "$(ui_text "Domain-related configuration was found:" "Обнаружена конфигурация домена:")"
-    printf '  - %s\n' "${DETECTED_DOMAIN_REASONS[@]}"
-    rejoin_log "Detected config indicators: ${DETECTED_DOMAIN_REASONS[*]}"
-
-    if ! confirm_safe_leave; then
-      warn "$(ui_text "Safe leave cancelled by user" "Безопасный выход отменён пользователем")"
-      rejoin_log "Safe leave cancelled by user"
-      return 0
-    fi
-
-    if ! safe_leave_domain; then
-      error "$(ui_text "Safe domain leave failed" "Не удалось выполнить безопасный выход из домена")"
-      rejoin_log "Safe leave failed"
-      return 1
-    fi
-
-    status_info "$(ui_text "Safe leave completed. Starting domain join again." "Безопасный выход завершён. Запускается повторное присоединение к домену.")"
-    rejoin_log "Safe leave completed; starting configure flow"
-    run_configure_flow
-    code=$?
-    rejoin_log "Rejoin configure flow exit code: ${code}"
-    return "$code"
+  if ! check_dependencies; then
+    handle_missing_dependencies
+    return $?
   fi
 
-  status_info "$(ui_text "No domain-related configuration detected. Starting normal join flow." "Конфигурация домена не обнаружена. Запускается обычное присоединение.")"
-  rejoin_log "No domain-related configuration detected; running configure flow"
-  run_configure_flow
-  code=$?
-  rejoin_log "run_configure_flow exit code: ${code}"
-  return "$code"
+  if [[ "${EUID:-$(id -u)}" -ne 0 && "$DRY_RUN" -eq 0 ]]; then
+    error "$(ui_text "Domain rejoin requires root. Run: sudo $0" "Для повторного присоединения требуются права root. Запустите: sudo $0")"
+    return 1
+  fi
+
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    info "Dry-run: inspect local and remote rejoin state"
+    return 0
+  fi
+
+  MD_CALLED_FROM_INSTALL_PACKAGES=1 bash "$CONFIGURE_SCRIPT" rejoin < /dev/tty
 }
 
 handle_missing_dependencies() {
@@ -197,8 +176,8 @@ show_menu() {
 ========================================
 1) $(tr_text menu.install)
 2) $(tr_text menu.join)
-3) $(tr_text menu.rejoin)
-4) $(tr_text menu.leave)
+3) $(tr_text menu.leave)
+4) $(tr_text menu.rejoin)
 5) $(tr_text menu.renew_certificate)
 6) $(tr_text menu.reboot)
 7) $(tr_text menu.exit)
@@ -223,11 +202,11 @@ main_menu() {
         pause
         ;;
       3)
-        rejoin_domain
+        leave_domain_from_menu
         pause
         ;;
       4)
-        leave_domain_from_menu
+        rejoin_domain
         pause
         ;;
       5)

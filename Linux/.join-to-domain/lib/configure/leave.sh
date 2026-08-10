@@ -142,70 +142,71 @@ stop_domain_services() {
 }
 
 remove_managed_files() {
-  if [[ ! -f "$MD_MANIFEST" ]]; then
-    warn "Manifest not found: ${MD_MANIFEST}"
-    return 0
-  fi
-
-  while IFS= read -r p; do
-    [[ -n "$p" ]] || continue
-    [[ "$p" == "/" ]] && continue
-    [[ "$p" == "$MD_MANIFEST" ]] && continue
-
-    if [[ -L "$p" || -f "$p" ]]; then
-      rm -f "$p"
-      log "Removed managed file: $p"
-    fi
-  done < "$MD_MANIFEST"
+  : # restore_one removes paths recorded as absent in the manifest.
 }
 
 restore_backups() {
-  local managed_path
+  local managed_path failed=0
 
-  restore_one /etc/krb5.conf
-  restore_one /etc/nsswitch.conf
-  restore_one /etc/ssh/sshd_config.d/ssh_md.conf
-  restore_one /etc/sssd/sssd.conf
-  restore_one /etc/sssd/conf.d
-  restore_one /etc/hostname
-  restore_one /etc/hosts
-  restore_one /etc/resolv.conf
+  while IFS= read -r managed_path; do
+    managed_path="${managed_path#*=}"
+    restore_one "$managed_path" || failed=1
+  done < <(grep '^FILE_.*_PATH=' "$MD_MANIFEST")
+  [[ "$failed" -eq 0 ]] || return 1
 
-  restore_one /etc/pam.d/system-auth
-  restore_one /etc/pam.d/su
-  restore_one /etc/pam.d/sshd
-  restore_one /etc/pam.d/gdm-password
-  restore_one /etc/pam.d/login
-  restore_one /etc/pam.d/common-login
-  restore_one /etc/pam.d/common-auth
-  restore_one /etc/pam.d/common-account
-  restore_one /etc/pam.d/common-session
-  restore_one /etc/pam.d/common-password
-
-  restore_one /etc/salt/minion
-  restore_one /etc/salt/minion_id
-  restore_one /etc/salt/pki/minion
-  restore_one "$SALT_PKG_MODULE_DST"
-  restore_one "$MD_GPUPDATE_LINK"
-  restore_one "$MD_GPUPDATE_DST"
-
-  if [[ -f "$MD_MANIFEST" ]]; then
-    while IFS= read -r managed_path; do
-      [[ -n "$managed_path" ]] || continue
-      [[ "$managed_path" == "$MD_MANIFEST" ]] && continue
-      restore_one "$managed_path"
-    done < "$MD_MANIFEST"
+  if [[ "${MD_RESTORE_OPERATION_ONLY:-0}" -ne 1 ]]; then
+    restore_networkmanager_dns_state || warn "NetworkManager DNS state was not fully restored"
+    restore_authselect_state || warn "authselect state was not fully restored"
+    restore_sssd_socket_state || warn "SSSD socket state was not fully restored"
   fi
-
-  restore_networkmanager_dns_state || warn "NetworkManager DNS state was not fully restored"
-  restore_authselect_state || warn "authselect state was not fully restored"
-  restore_sssd_socket_state || warn "SSSD socket state was not fully restored"
 
   if have_cmd update-ca-certificates; then
     update-ca-certificates >/dev/null 2>&1 || true
   elif have_cmd update-ca-trust; then
     update-ca-trust extract >/dev/null 2>&1 || true
   fi
+}
+
+validate_join_backup() {
+  local path key rel existed
+  [[ -n "${MD_BACKUP_DIR:-}" && -d "$MD_BACKUP_DIR" && -r "$MD_MANIFEST" ]] || return 1
+  case "$MD_BACKUP_DIR" in "$MD_BACKUPS_ROOT"/join-*|"$MD_BACKUPS_ROOT"/rejoin-*) ;; *) return 1 ;; esac
+  grep -q '^BACKUP_VERSION=1$' "$MD_MANIFEST" || return 1
+  while IFS= read -r path; do
+    key="$(backup_key "$path")"
+    existed="$(sed -n "s/^${key}_EXISTED=//p" "$MD_MANIFEST" | tail -n1)"
+    [[ "$existed" == 0 || "$existed" == 1 ]] || return 1
+    rel="${path#/}"
+    if [[ "$existed" == 1 && ! -e "$MD_BACKUP_DIR/files/$rel" && ! -L "$MD_BACKUP_DIR/files/$rel" ]]; then
+      return 1
+    fi
+  done < <(managed_join_paths | awk '!seen[$0]++')
+
+  while IFS= read -r path; do
+    path="${path#*=}"
+    key="$(backup_key "$path")"
+    existed="$(sed -n "s/^${key}_EXISTED=//p" "$MD_MANIFEST" | tail -n1)"
+    rel="${path#/}"
+    [[ "$existed" == 0 || "$existed" == 1 ]] || return 1
+    [[ "$existed" == 0 || -e "$MD_BACKUP_DIR/files/$rel" || -L "$MD_BACKUP_DIR/files/$rel" ]] || return 1
+  done < <(grep '^FILE_.*_PATH=' "$MD_MANIFEST")
+}
+
+validate_restored_system() {
+  local pam_file sshd_bin
+  for pam_file in /etc/pam.d/common-auth /etc/pam.d/common-account /etc/pam.d/common-session /etc/pam.d/common-password; do
+    [[ ! -e "$pam_file" ]] && continue
+    [[ -s "$pam_file" ]] || { warn "PAM restore validation failed: $pam_file"; return 1; }
+  done
+  if [[ -f /etc/pam.d/common-auth ]] && ! grep -Eq 'pam_unix\.so|pam_localuser\.so' /etc/pam.d/common-auth; then
+    warn "PAM restore validation failed: local authentication module missing"
+    return 1
+  fi
+  if [[ -f /etc/nsswitch.conf ]]; then
+    awk '$1 ~ /^(passwd|group):$/ && $0 ~ /(^|[[:space:]])files([[:space:]]|$)/ {ok[$1]=1} END {exit !(ok["passwd:"] && ok["group:"])}' /etc/nsswitch.conf || return 1
+  fi
+  sshd_bin="$(find_executable sshd 2>/dev/null || true)"
+  [[ -z "$sshd_bin" ]] || "$sshd_bin" -t || return 1
 }
 
 cleanup_domain_state() {
@@ -254,11 +255,15 @@ recover_incomplete_join_state() {
   mkdir -p "${MD_STATE_DIR}"
   touch "${MD_ROLLBACK_MARKER}"
 
+  if ! load_active_backup || ! validate_join_backup; then
+    die "Active join backup is missing or corrupted"
+  fi
+
   perform_local_rollback_cleanup
 
   # Keep the marker and backups if the process is interrupted. Remove the
   # transaction directory only after all local recovery steps have returned.
-  rm -rf "${MD_ETC_DIR}"
+  rm -rf "${MD_STATE_DIR}"
   ok "$(ui_text "Incomplete join state was recovered" "Состояние незавершённого присоединения восстановлено")"
 }
 
@@ -269,11 +274,36 @@ restart_after_leave() {
   systemctl restart sshd.service 2>/dev/null || true
 }
 
+perform_authenticated_leave() {
+  if ! load_active_backup || ! validate_join_backup; then
+    die "Active join backup is missing or corrupted"
+  fi
+
+  log "Starting remote domain cleanup"
+  delete_salt_minion_key_on_leave
+  disable_computer_account_on_leave
+  log "Remote domain cleanup step completed"
+
+  log "Starting local leave cleanup"
+  stop_domain_services
+  remove_managed_files
+  restore_backups || die "Original configuration could not be fully restored"
+  cleanup_domain_state
+
+  validate_restored_system || die "Restored PAM/NSS/SSH configuration validation failed"
+  printf 'RESTORED_AT=%q\n' "$(date --iso-8601=seconds)" >> "$MD_MANIFEST"
+  rm -rf "$MD_STATE_DIR"
+
+  restart_after_leave
+
+  log "Local leave cleanup completed"
+  ok "$(ui_text "MultiDirectory leave completed" "Выход из MultiDirectory завершён")"
+  info "$(ui_text "System reboot is recommended" "Рекомендуется перезагрузить компьютер")"
+}
+
 leave_domain() {
   need_root
   setup_logging
-  md_init_state
-
   info "$(ui_text "Leaving MultiDirectory domain" "Выход из домена MultiDirectory")"
 
   load_os_release
@@ -284,25 +314,16 @@ leave_domain() {
   need_cmd awk
   need_cmd tr
 
+  if ! load_active_backup || ! validate_join_backup; then
+    die "Active join backup is missing or corrupted"
+  fi
+  ok "$(ui_text "Backup validated" "Резервная копия проверена")"
+
+  info "$(ui_text "Authenticating directory administrator" "Проверка аутентификации администратора каталога")"
   validate_leave_credentials
-  log "Starting optional remote LDAP cleanup"
-  delete_salt_minion_key_on_leave
-  disable_computer_account_on_leave
-  log "Remote LDAP cleanup step completed"
+  ok "$(ui_text "Directory administrator authentication succeeded" "Аутентификация администратора каталога выполнена успешно")"
 
-  log "Starting local leave cleanup"
-  stop_domain_services
-  remove_managed_files
-  restore_backups
-  cleanup_domain_state
-
-  rm -rf "$MD_ETC_DIR"
-
-  restart_after_leave
-
-  log "Local leave cleanup completed"
-  ok "$(ui_text "MultiDirectory leave completed" "Выход из MultiDirectory завершён")"
-  info "$(ui_text "System reboot is recommended" "Рекомендуется перезагрузить компьютер")"
+  perform_authenticated_leave
 }
 
 rollback_local_changes() {
@@ -320,7 +341,8 @@ rollback_local_changes() {
   # A completed rollback must not look like an active managed join on the next
   # run. If the process is interrupted before this point, the marker remains
   # and the next normal Join action resumes recovery.
-  rm -rf "${MD_ETC_DIR}"
+  printf 'RESTORED_AT=%q\n' "$(date --iso-8601=seconds)" >> "$MD_MANIFEST"
+  rm -rf "${MD_STATE_DIR}"
 
   info "$(ui_text "Rollback completed" "Откат завершён")"
 }
@@ -348,6 +370,29 @@ on_join_signal() {
   exit "$code"
 }
 
+validate_internal_modules() {
+  local helper
+  local -a required_helpers=(
+    create_join_backup md_backup_once restore_one rollback_local_changes
+    build_sssd_conf install_pam_config install_nsswitch_config
+    validate_sssd_config validate_no_password_based_sssd_auth
+  )
+
+  if is_astra_se; then
+    required_helpers+=(
+      astra_parsec_mswitch_available install_astra_parsec_sssd_packages
+      write_astra_parsec_sssd_conf validate_astra_parsec_sssd_config_or_rollback
+      configure_astra_parsec_mswitch restart_astra_parsec_sssd_or_rollback
+    )
+  fi
+
+  info "$(ui_text "Validating internal modules" "Проверка внутренних модулей")"
+  for helper in "${required_helpers[@]}"; do
+    declare -F "$helper" >/dev/null 2>&1 || die "Required internal helper is not loaded: ${helper}"
+  done
+  ok "$(ui_text "Internal modules loaded" "Внутренние модули загружены")"
+}
+
 preflight() {
   need_root
   setup_logging
@@ -366,6 +411,8 @@ preflight() {
   need_cmd kinit
   need_cmd ldapwhoami
   need_cmd sort
+
+  validate_internal_modules
 
   normalize_files_eol
 }

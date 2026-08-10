@@ -23,7 +23,7 @@ validate_install_modules() {
 
     if [[ ! -f "$path" ]]; then
       if [[ "$missing" -eq 0 ]]; then
-        printf '[ERR] Missing required install modules:\n' >&2
+        printf '[ERR] %s\n' "$(ui_text "Missing required install modules:" "Отсутствуют обязательные модули установки:")" >&2
       fi
 
       printf '  - %s: %s\n' "$module" "$path" >&2
@@ -39,8 +39,8 @@ source_install_module() {
   local path="${INSTALL_LIB_DIR}/${module}.sh"
 
   if [[ ! -f "$path" ]]; then
-    printf '[ERR] Required install module not found: %s\n' "$module" >&2
-    printf '[ERR] Expected path: %s\n' "$path" >&2
+    printf '[ERR] %s: %s\n' "$(ui_text "Required install module not found" "Не найден обязательный модуль установки")" "$module" >&2
+    printf '[ERR] %s: %s\n' "$(ui_text "Expected path" "Ожидаемый путь")" "$path" >&2
     return 1
   fi
 

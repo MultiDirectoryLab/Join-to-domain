@@ -22,6 +22,9 @@ join_domain() {
 
   # Everything above is read-only. Start transactional state and rollback only
   # immediately before the first possible system modification (DNS setup).
+  info "$(ui_text "Creating pre-join system backup" "Создание резервной копии системы перед присоединением")"
+  create_join_backup || die "Failed to create a safe pre-join backup"
+  ok "$(ui_text "Backup created" "Резервная копия создана")"
   md_init_state
   MD_JOIN_ROLLBACK_ACTIVE=1
   trap on_join_error ERR
@@ -169,9 +172,9 @@ join_domain() {
 
   unset PASSWORD
 
-  save_join_env
-  rm -f "${MD_ROLLBACK_MARKER}"
   start_services
+  save_join_env
+  rm -f "${MD_ROLLBACK_MARKER}" "${MD_PENDING_BACKUP}"
 
   MD_JOIN_ROLLBACK_ACTIVE=0
   trap - ERR INT TERM
@@ -200,6 +203,9 @@ main() {
       ;;
     leave)
       leave_domain
+      ;;
+    rejoin)
+      rejoin_domain_configure
       ;;
     renew-certificate)
       renew_md_server_certificate
