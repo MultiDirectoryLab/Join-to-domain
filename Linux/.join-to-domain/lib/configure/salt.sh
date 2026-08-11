@@ -191,6 +191,128 @@ configure_salt_master_health() {
   log "Configured Salt master health checks: ${health_file}"
 }
 
+build_salt_master_fqdns() {
+  local raw_nodes="${MD_NODES:-}"
+  local item node_ip node_name fqdn configured_master existing
+  local master_count=0
+  local nodes=()
+
+  SALT_MASTER_FQDNS=()
+
+  [[ -n "$raw_nodes" ]] \
+    || die "MD_NODES is missing in ${JOIN_TO_DOMAIN_ENV_FILE:-the join environment file}"
+
+  IFS=',' read -r -a nodes <<< "$raw_nodes"
+  for item in "${nodes[@]}"; do
+    item="$(sanitize_input "$item")"
+    [[ -n "$item" ]] || die "MD_NODES contains an empty node entry"
+    [[ "$item" == *:* ]] || die "Invalid MD_NODES entry: ${item}. Expected IPv4:hostname"
+
+    node_ip="$(sanitize_input "${item%%:*}")"
+    node_name="$(sanitize_input "${item#*:}")"
+    node_name="$(printf '%s' "$node_name" | tr '[:upper:]' '[:lower:]')"
+
+    valid_ipv4_address "$node_ip" \
+      || die "Invalid IPv4 address in MD_NODES entry: ${item}"
+
+    if valid_hostname "$node_name"; then
+      fqdn="${node_name}.${DOMAIN}"
+    elif valid_join_domain "$node_name"; then
+      [[ "$node_name" == *."${DOMAIN}" ]] \
+        || die "Salt master FQDN from MD_NODES is outside the detected domain ${DOMAIN}: ${node_name}"
+      fqdn="$node_name"
+    else
+      die "Invalid hostname in MD_NODES entry: ${item}"
+    fi
+
+    valid_join_domain "$fqdn" || die "Invalid Salt master FQDN generated from MD_NODES: ${fqdn}"
+
+    existing=0
+    if (( master_count > 0 )); then
+      for configured_master in "${SALT_MASTER_FQDNS[@]}"; do
+        if [[ "$configured_master" == "$fqdn" ]]; then
+          existing=1
+          break
+        fi
+      done
+    fi
+    if [[ "$existing" -eq 0 ]]; then
+      SALT_MASTER_FQDNS+=("$fqdn")
+      master_count=$((master_count + 1))
+    fi
+  done
+
+  [[ "$master_count" -gt 0 ]] || die "MD_NODES does not contain any Salt master nodes"
+  SALT_MASTER="${SALT_MASTER_FQDNS[0]}"
+  SALT_MASTERS_DISPLAY="$(IFS=,; printf '%s' "${SALT_MASTER_FQDNS[*]}")"
+  log "Salt masters from MD_NODES: ${SALT_MASTERS_DISPLAY}"
+}
+
+validate_salt_master_fqdns() {
+  local master
+
+  for master in "${SALT_MASTER_FQDNS[@]}"; do
+    log "Checking DNS resolution: SALT_MASTER=${master}"
+    getent hosts "$master" >/dev/null || die "DNS resolution failed for Salt master ${master}"
+  done
+}
+
+remove_conflicting_salt_identity_settings() {
+  local master_file="$1"
+  local salt_conf tmp_conf
+
+  [[ -d /etc/salt/minion.d ]] || return 0
+
+  while IFS= read -r -d '' salt_conf; do
+    [[ "$salt_conf" == "$master_file" ]] && continue
+    if grep -Eq '^[[:space:]]*(master|master_type|master_finger|id)[[:space:]]*:' "$salt_conf" 2>/dev/null; then
+      md_backup_once "$salt_conf"
+      tmp_conf="$(mktemp "${salt_conf}.tmp.XXXXXX")"
+      awk '
+        /^[[:space:]]*master[[:space:]]*:/ {
+          skipping_master = 1
+          next
+        }
+        skipping_master && /^[[:space:]]*-[[:space:]]+/ { next }
+        skipping_master { skipping_master = 0 }
+        /^[[:space:]]*(master_type|master_finger|id)[[:space:]]*:/ { next }
+        { print }
+      ' "$salt_conf" > "$tmp_conf"
+      chmod --reference="$salt_conf" "$tmp_conf" 2>/dev/null || chmod 0644 "$tmp_conf"
+      chown --reference="$salt_conf" "$tmp_conf" 2>/dev/null || true
+      mv -f "$tmp_conf" "$salt_conf"
+      md_track "$salt_conf"
+    fi
+  done < <(find /etc/salt/minion.d -type f -name '*.conf' -print0)
+}
+
+write_salt_master_config() {
+  local master_file="$1"
+  local master
+
+  {
+    printf 'master:\n'
+    for master in "${SALT_MASTER_FQDNS[@]}"; do
+      printf '  - %s\n' "$master"
+    done
+    printf 'master_type: str\n'
+  } > "$master_file"
+}
+
+configure_salt_masters() {
+  local master_file="/etc/salt/minion.d/master.conf"
+
+  mkdir -p "$(dirname -- "$master_file")"
+  remove_conflicting_salt_identity_settings "$master_file"
+  md_backup_once "$master_file"
+
+  write_salt_master_config "$master_file"
+
+  chmod 0644 "$master_file"
+  md_track "$master_file"
+  log "Configured Salt masters: ${master_file} (${SALT_MASTERS_DISPLAY})"
+}
+
 prepare_salt_minion_identity() {
   local guid="$1"
   local gpo_token="$2"
@@ -233,21 +355,10 @@ prepare_salt_minion_identity() {
   md_track /etc/salt/pki/minion
 
   cat > /etc/salt/minion <<EOF
-master: ${SALT_MASTER}
 master_finger: ${gpo_token}
 EOF
 
   md_track /etc/salt/minion
-
-  if [[ -d /etc/salt/minion.d ]]; then
-    while IFS= read -r -d '' salt_conf; do
-      if grep -Eq '^[[:space:]]*(master|master_finger|id)[[:space:]]*:' "$salt_conf" 2>/dev/null; then
-        md_backup_once "$salt_conf"
-        sed -i -E '/^[[:space:]]*(master|master_finger|id)[[:space:]]*:/d' "$salt_conf"
-        md_track "$salt_conf"
-      fi
-    done < <(find /etc/salt/minion.d -type f -name '*.conf' -print0)
-  fi
 
   echo "$guid" > /etc/salt/minion_id
   chmod 0644 /etc/salt/minion_id
@@ -272,18 +383,25 @@ restart_salt_minion_and_wait() {
 }
 
 salt_minion_master_connected() {
-  local output=""
+  local master output=""
 
   systemctl is-active --quiet salt-minion.service 2>/dev/null || return 1
   have_cmd salt-call || return 1
 
-  if have_cmd timeout; then
-    output="$(timeout 6 salt-call --local --out=txt status.master "$SALT_MASTER" 2>/dev/null || true)"
-  else
-    output="$(salt-call --local --out=txt status.master "$SALT_MASTER" 2>/dev/null || true)"
-  fi
+  for master in "${SALT_MASTER_FQDNS[@]}"; do
+    if have_cmd timeout; then
+      output="$(timeout 6 salt-call --local --out=txt status.master "$master" 2>/dev/null || true)"
+    else
+      output="$(salt-call --local --out=txt status.master "$master" 2>/dev/null || true)"
+    fi
 
-  printf '%s\n' "$output" | grep -Eqi '(^[[:space:]]*true|:[[:space:]]*true)[[:space:]]*$'
+    if printf '%s\n' "$output" | grep -Eqi '(^[[:space:]]*true|:[[:space:]]*true)[[:space:]]*$'; then
+      SALT_CONNECTED_MASTER="$master"
+      return 0
+    fi
+  done
+
+  return 1
 }
 
 wait_for_salt_minion_master_connection() {
@@ -293,7 +411,7 @@ wait_for_salt_minion_master_connection() {
 
   while (( attempt <= attempts )); do
     if salt_minion_master_connected; then
-      log "Salt minion has an established connection to ${SALT_MASTER}:4505"
+      log "Salt minion has an established connection to ${SALT_CONNECTED_MASTER}:4505"
       return 0
     fi
 
@@ -316,7 +434,7 @@ confirm_salt_accept_result() {
     return 0
   fi
 
-  warn "$(ui_text "${result_description_en}, but the minion connection to ${SALT_MASTER}:4505 was not confirmed" "${result_description_ru}, но соединение minion с ${SALT_MASTER}:4505 не подтверждено")"
+  warn "$(ui_text "${result_description_en}, but the minion connection to ${SALT_MASTERS_DISPLAY}:4505 was not confirmed" "${result_description_ru}, но соединение minion с ${SALT_MASTERS_DISPLAY}:4505 не подтверждено")"
   return 1
 }
 
@@ -354,7 +472,7 @@ accept_salt_minion_key() {
         return 0
       fi
       print_salt_diagnostics
-      warn "$(ui_text "Check TCP access from the minion to ${SALT_MASTER} on ports 4505 and 4506" "Проверьте доступ с minion к ${SALT_MASTER} по TCP-портам 4505 и 4506")"
+      warn "$(ui_text "Check TCP access from the minion to ${SALT_MASTERS_DISPLAY} on ports 4505 and 4506" "Проверьте доступ с minion к ${SALT_MASTERS_DISPLAY} по TCP-портам 4505 и 4506")"
       die "$(ui_text "The Salt key was accepted, but the minion did not connect to the master" "Ключ Salt принят, но minion не подключился к master")"
     fi
 
@@ -364,7 +482,7 @@ accept_salt_minion_key() {
         return 0
       fi
       print_salt_diagnostics
-      warn "$(ui_text "Check TCP access from the minion to ${SALT_MASTER} on ports 4505 and 4506" "Проверьте доступ с minion к ${SALT_MASTER} по TCP-портам 4505 и 4506")"
+      warn "$(ui_text "Check TCP access from the minion to ${SALT_MASTERS_DISPLAY} on ports 4505 and 4506" "Проверьте доступ с minion к ${SALT_MASTERS_DISPLAY} по TCP-портам 4505 и 4506")"
       die "$(ui_text "The Salt key exists, but the minion did not connect to the master" "Ключ Salt существует, но minion не подключился к master")"
     fi
 
@@ -401,7 +519,7 @@ accept_salt_minion_key() {
   done
 
   print_salt_diagnostics
-  warn "$(ui_text "Check TCP access from the minion to ${SALT_MASTER} on ports 4505 and 4506" "Проверьте доступ с minion к ${SALT_MASTER} по TCP-портам 4505 и 4506")"
+  warn "$(ui_text "Check TCP access from the minion to ${SALT_MASTERS_DISPLAY} on ports 4505 and 4506" "Проверьте доступ с minion к ${SALT_MASTERS_DISPLAY} по TCP-портам 4505 и 4506")"
   die "$(ui_text "Failed to accept Salt minion key" "Не удалось принять ключ Salt minion")"
 }
 
@@ -413,15 +531,14 @@ configure_salt() {
 
   local gpo_token guid
 
-  SALT_MASTER="salt.${DOMAIN}"
+  build_salt_master_fqdns
+  validate_salt_master_fqdns
+  configure_salt_masters
 
   require_salt_minion_ready
   install_md_gpupdate
   install_salt_custom_modules
   refresh_api_token_for_salt
-
-  log "Checking DNS resolution: SALT_MASTER=${SALT_MASTER}"
-  getent hosts "${SALT_MASTER}" >/dev/null || die "DNS resolution failed for ${SALT_MASTER}"
 
   gpo_token="$(
     curl -sS -X GET "https://${API_HOST}/api/salt/master/key" \
