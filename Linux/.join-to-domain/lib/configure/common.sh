@@ -36,9 +36,11 @@ MD_GPUPDATE_LINK="/usr/local/bin/md-gpupdate"
 
 MD_ETC_DIR="/etc/MultiDirectory"
 MD_STATE_DIR="${MD_ETC_DIR}/state"
-MD_BACKUP_DIR="${MD_STATE_DIR}/backups"
-MD_MANIFEST="${MD_STATE_DIR}/manifest"
+MD_BACKUPS_ROOT="${MD_ETC_DIR}/backups"
+MD_BACKUP_DIR=""
+MD_MANIFEST=""
 MD_JOIN_ENV="${MD_STATE_DIR}/join.env"
+MD_PENDING_BACKUP="${MD_STATE_DIR}/active-backup"
 MD_ROLLBACK_MARKER="${MD_STATE_DIR}/rollback-in-progress"
 MD_NM_DNS_STATE="${MD_STATE_DIR}/networkmanager-dns.env"
 MD_AUTHSELECT_STATE="${MD_STATE_DIR}/authselect.profile"
@@ -58,30 +60,35 @@ log() {
 }
 
 info() {
-  printf '%b\n' "${BLUE}[INFO]${NC} $*" > /dev/tty
-  printf '[INFO] %s\n' "$*" >> "$LOG_FILE" 2>/dev/null || true
+  local message="$(runtime_text "$*")"
+  printf '%b\n' "${BLUE}[INFO]${NC} ${message}" > /dev/tty
+  printf '[INFO] %s\n' "$message" >> "$LOG_FILE" 2>/dev/null || true
 }
 
 ok() {
-  printf '%b\n' "${GREEN}[OK]${NC} $*" > /dev/tty
-  printf '[OK] %s\n' "$*" >> "$LOG_FILE" 2>/dev/null || true
+  local message="$(runtime_text "$*")"
+  printf '%b\n' "${GREEN}[OK]${NC} ${message}" > /dev/tty
+  printf '[OK] %s\n' "$message" >> "$LOG_FILE" 2>/dev/null || true
 }
 
 warn() {
-  printf '%b\n' "${YELLOW}[WARN]${NC} $*" > /dev/tty
-  printf '[WARN] %s\n' "$*" >> "$LOG_FILE" 2>/dev/null || true
+  local message="$(runtime_text "$*")"
+  printf '%b\n' "${YELLOW}[WARN]${NC} ${message}" > /dev/tty
+  printf '[WARN] %s\n' "$message" >> "$LOG_FILE" 2>/dev/null || true
 }
 
 die() {
-  printf '%b\n' "${RED}[ERROR]${NC} $*" > /dev/tty
-  printf '[ERROR] %s\n' "$*" >> "$LOG_FILE" 2>/dev/null || true
+  local message="$(runtime_text "$*")"
+  printf '%b\n' "${RED}[ERROR]${NC} ${message}" > /dev/tty
+  printf '[ERROR] %s\n' "$message" >> "$LOG_FILE" 2>/dev/null || true
   printf '%b\n' "${BLUE}[INFO]${NC} Full log: ${LOG_FILE}" > /dev/tty
   printf '[INFO] Full log: %s\n' "$LOG_FILE" >> "$LOG_FILE" 2>/dev/null || true
 
-  if [[ "${MD_JOIN_ROLLBACK_ACTIVE:-0}" -eq 1 ]] && declare -F rollback_local_changes >/dev/null 2>&1; then
+  local rollback_handler="${MD_ROLLBACK_HANDLER:-rollback_local_changes}"
+  if [[ "${MD_JOIN_ROLLBACK_ACTIVE:-0}" -eq 1 ]] && declare -F "$rollback_handler" >/dev/null 2>&1; then
     MD_JOIN_ROLLBACK_ACTIVE=0
     trap - ERR INT TERM
-    rollback_local_changes 1
+    "$rollback_handler" 1
   fi
 
   exit 1
@@ -93,9 +100,9 @@ tty_echo() {
 
 usage() {
   if [[ -w /dev/tty ]]; then
-    echo "Use: sudo ${PUBLIC_LAUNCHER}" > /dev/tty
+    echo "$(ui_text "Use" "Использование"): sudo ${PUBLIC_LAUNCHER}" > /dev/tty
   else
-    echo "Use: sudo ${PUBLIC_LAUNCHER}" >&2
+    echo "$(ui_text "Use" "Использование"): sudo ${PUBLIC_LAUNCHER}" >&2
   fi
   exit 1
 }
@@ -413,12 +420,107 @@ normalize_files_eol() {
   normalize_lf "$0"
 }
 
+managed_join_paths() {
+  printf '%s\n' \
+    /etc/krb5.conf /etc/krb5.keytab /etc/nsswitch.conf \
+    /etc/sssd/sssd.conf /etc/sssd/conf.d \
+    /etc/pam.d/system-auth /etc/pam.d/su /etc/pam.d/sshd \
+    /etc/pam.d/gdm-password /etc/pam.d/login /etc/pam.d/common-login \
+    /etc/pam.d/password-auth /etc/pam.d/fingerprint-auth \
+    /etc/pam.d/smartcard-auth /etc/pam.d/postlogin \
+    /etc/pam.d/common-auth /etc/pam.d/common-account \
+    /etc/pam.d/common-session /etc/pam.d/common-password \
+    /etc/ssh/sshd_config.d/ssh_md.conf /etc/sudoers.d/domain-admins \
+    /etc/systemd/resolved.conf.d/MultiDirectory.conf \
+    /etc/salt/minion /etc/salt/minion.append /etc/salt/minion_id \
+    /etc/salt/pki/minion /etc/profile.d/multidirectory-prompt.sh \
+    /usr/local/sbin/md-cache-accountsservice-user /usr/bin/sudo \
+    "$SALT_PKG_MODULE_DST" "$MD_GPUPDATE_DST" "$MD_GPUPDATE_LINK" \
+    /etc/parsec/mswitch.conf /etc/hostname /etc/hosts /etc/resolv.conf
+}
+
+backup_key() {
+  printf 'FILE_%s' "$(printf '%s' "$1" | sed 's#^/##; s#[^A-Za-z0-9]#_#g' | tr '[:lower:]' '[:upper:]')"
+}
+
+create_backup_set() {
+  local kind="$1"
+  local stamp candidate=0 path key rel existed
+
+  mkdir -p "$MD_STATE_DIR" "$MD_BACKUPS_ROOT"
+  chmod 700 "$MD_STATE_DIR" "$MD_BACKUPS_ROOT"
+  stamp="$(date '+%Y%m%d-%H%M%S')"
+  MD_BACKUP_DIR="${MD_BACKUPS_ROOT}/${kind}-${stamp}"
+  while [[ -e "$MD_BACKUP_DIR" ]]; do
+    candidate=$((candidate + 1))
+    MD_BACKUP_DIR="${MD_BACKUPS_ROOT}/${kind}-${stamp}-${candidate}"
+  done
+  MD_MANIFEST="${MD_BACKUP_DIR}/manifest.env"
+  mkdir -p "$MD_BACKUP_DIR/files"
+  chmod 700 "$MD_BACKUP_DIR" "$MD_BACKUP_DIR/files"
+  {
+    printf 'BACKUP_VERSION=1\n'
+    printf 'BACKUP_KIND=%q\n' "$kind"
+    printf 'CREATED_AT=%q\n' "$(date --iso-8601=seconds)"
+    printf 'BACKUP_DIR=%q\n' "$MD_BACKUP_DIR"
+  } > "$MD_MANIFEST"
+
+  while IFS= read -r path; do
+    [[ -n "$path" ]] || continue
+    key="$(backup_key "$path")"
+    rel="${path#/}"
+    existed=0
+    if [[ -e "$path" || -L "$path" ]]; then
+      mkdir -p "$MD_BACKUP_DIR/files/$(dirname "$rel")"
+      cp -a -- "$path" "$MD_BACKUP_DIR/files/$rel" || return 1
+      existed=1
+    fi
+    printf '%s_PATH=%q\n%s_EXISTED=%s\n%s_BACKUP=%q\n' \
+      "$key" "$path" "$key" "$existed" "$key" "files/$rel" >> "$MD_MANIFEST"
+  done < <(managed_join_paths | awk '!seen[$0]++')
+  chmod 600 "$MD_MANIFEST"
+  printf '%s\n' "$MD_BACKUP_DIR" > "$MD_PENDING_BACKUP"
+  chmod 600 "$MD_PENDING_BACKUP"
+  log "${kind} backup created: ${MD_BACKUP_DIR}"
+}
+
+create_join_backup() {
+  create_backup_set join
+}
+
+create_recovery_backup() {
+  create_backup_set rejoin
+}
+
+load_prejoin_backup() {
+  local backup
+  backup="$(join_state_value BACKUP_DIR 2>/dev/null || true)"
+  [[ -n "$backup" ]] || return 1
+  case "$backup" in "$MD_BACKUPS_ROOT"/join-*) ;; *) return 1 ;; esac
+  [[ -d "$backup" && -r "$backup/manifest.env" ]] || return 1
+  MD_BACKUP_DIR="$backup"
+  MD_MANIFEST="$backup/manifest.env"
+}
+
+load_active_backup() {
+  local backup
+  if [[ -r "$MD_PENDING_BACKUP" ]]; then
+    IFS= read -r backup < "$MD_PENDING_BACKUP"
+    case "$backup" in "$MD_BACKUPS_ROOT"/join-*|"$MD_BACKUPS_ROOT"/rejoin-*) ;; *) return 1 ;; esac
+    [[ -d "$backup" && -r "$backup/manifest.env" ]] || return 1
+    MD_BACKUP_DIR="$backup"
+    MD_MANIFEST="$backup/manifest.env"
+    return 0
+  fi
+  load_prejoin_backup
+}
+
 md_init_state() {
-  mkdir -p "${MD_STATE_DIR}" "${MD_BACKUP_DIR}"
-  touch "${MD_MANIFEST}"
+  mkdir -p "${MD_STATE_DIR}"
+  # A new transaction must not inherit an orphaned marker from an already
+  # completed rollback.
+  rm -f "${MD_ROLLBACK_MARKER}"
   chmod 700 "${MD_STATE_DIR}"
-  chmod 700 "${MD_BACKUP_DIR}"
-  chmod 600 "${MD_MANIFEST}"
 }
 
 md_track() {
@@ -426,48 +528,60 @@ md_track() {
 
   [[ -n "$path" ]] || return 0
 
-  grep -Fxq "$path" "${MD_MANIFEST}" 2>/dev/null || echo "$path" >> "${MD_MANIFEST}"
+  : # The centralized manifest is complete before the first modification.
 }
 
 md_is_tracked() {
   local path="$1"
 
-  [[ -f "${MD_MANIFEST}" ]] && grep -Fxq "$path" "${MD_MANIFEST}" 2>/dev/null
+  local key
+  key="$(backup_key "$path")"
+  [[ -f "${MD_MANIFEST:-}" ]] && grep -q "^${key}_PATH=" "$MD_MANIFEST"
 }
 
 md_backup_once() {
   local path="$1"
-  local safe
+  local key rel existed=0
 
-  safe="$(echo "$path" | sed 's#/#__#g')"
-
+  md_is_tracked "$path" && return 0
+  [[ -n "${MD_BACKUP_DIR:-}" && -f "${MD_MANIFEST:-}" ]] \
+    || die "No backup transaction is loaded for ${path}; check BACKUP_DIR in ${MD_JOIN_ENV}"
+  key="$(backup_key "$path")"
+  rel="${path#/}"
   if [[ -e "$path" || -L "$path" ]]; then
-    if [[ ! -e "${MD_BACKUP_DIR}/${safe}" && ! -L "${MD_BACKUP_DIR}/${safe}" ]]; then
-      cp -a "$path" "${MD_BACKUP_DIR}/${safe}"
-      log "Backup created: $path"
-    fi
+    mkdir -p "$MD_BACKUP_DIR/files/$(dirname "$rel")"
+    cp -a -- "$path" "$MD_BACKUP_DIR/files/$rel" || die "Failed to back up: $path"
+    existed=1
   fi
+  printf '%s_PATH=%q\n%s_EXISTED=%s\n%s_BACKUP=%q\n' \
+    "$key" "$path" "$key" "$existed" "$key" "files/$rel" >> "$MD_MANIFEST"
+  log "Dynamically registered backup target: $path"
 }
 
 md_backup_exists() {
   local path="$1"
-  local safe
-
-  safe="$(echo "$path" | sed 's#/#__#g')"
-  [[ -e "${MD_BACKUP_DIR}/${safe}" || -L "${MD_BACKUP_DIR}/${safe}" ]]
+  local key
+  key="$(backup_key "$path")"
+  grep -q "^${key}_EXISTED=1$" "${MD_MANIFEST:-/nonexistent}" 2>/dev/null
 }
 
 restore_one() {
   local path="$1"
-  local safe
-
-  safe="$(echo "$path" | sed 's#/#__#g')"
-
-  if [[ -e "${MD_BACKUP_DIR}/${safe}" || -L "${MD_BACKUP_DIR}/${safe}" ]]; then
+  local key rel existed
+  key="$(backup_key "$path")"
+  existed="$(sed -n "s/^${key}_EXISTED=//p" "$MD_MANIFEST" | tail -n1)"
+  rel="${path#/}"
+  if [[ "$existed" == 1 ]]; then
+    [[ -e "${MD_BACKUP_DIR}/files/${rel}" || -L "${MD_BACKUP_DIR}/files/${rel}" ]] || return 1
     rm -rf "$path"
     mkdir -p "$(dirname -- "$path")"
-    cp -a "${MD_BACKUP_DIR}/${safe}" "$path"
+    cp -a -- "${MD_BACKUP_DIR}/files/${rel}" "$path"
     log "Restored: $path"
+  elif [[ "$existed" == 0 ]]; then
+    rm -rf -- "$path"
+    log "Removed join-created path: $path"
+  else
+    return 1
   fi
 }
 

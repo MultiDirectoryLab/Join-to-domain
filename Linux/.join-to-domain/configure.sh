@@ -9,7 +9,11 @@ source_configure_module() {
   local path="${CONFIGURE_LIB_DIR}/${module}.sh"
 
   if [[ ! -f "$path" ]]; then
-    printf '[ERR] Required configure module not found: %s\n' "$module" >&2
+    if [[ "${MD_UI_LANG:-en}" == "ru" ]]; then
+      printf '[ОШИБКА] Не найден обязательный модуль настройки: %s\n' "$module" >&2
+    else
+      printf '[ERR] Required configure module not found: %s\n' "$module" >&2
+    fi
     return 1
   fi
 
@@ -30,6 +34,7 @@ source_configure_module validation
 source_configure_module local_config
 source_configure_module salt
 source_configure_module leave
+source_configure_module rejoin
 source_configure_module flow
 
 main "$@"

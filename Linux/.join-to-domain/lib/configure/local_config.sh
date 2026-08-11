@@ -165,6 +165,7 @@ install_pam_config() {
     [[ -f "${PAM_D_SRC}/alt-login" && -f /etc/pam.d/login ]] && install_local_file "${PAM_D_SRC}/alt-login" /etc/pam.d/login 0644
     [[ -f "${PAM_D_SRC}/alt-common-login" && -f /etc/pam.d/common-login ]] && install_local_file "${PAM_D_SRC}/alt-common-login" /etc/pam.d/common-login 0644
 
+    md_backup_once /usr/bin/sudo
     chmod 4711 /usr/bin/sudo 2>/dev/null || true
     return 0
   fi
@@ -576,19 +577,6 @@ install_astra_parsec_sssd_packages() {
   astra_parsec_sssd_packages_installed || die "Astra SE PARSEC/SSSD packages are still missing after installation"
 }
 
-backup_timestamped_file() {
-  local path="$1"
-  local backup=""
-
-  if [[ -f "$path" ]]; then
-    backup="${path}.bak.$(date +%F_%H-%M-%S)"
-    cp "$path" "$backup"
-    log "Backup created: ${backup}"
-  fi
-
-  printf '%s' "$backup"
-}
-
 write_astra_parsec_sssd_conf() {
   need_file "$ASTRA_PARSEC_SSSD_SRC"
   mkdir -p /etc/sssd
@@ -640,7 +628,6 @@ configure_astra_parsec_mswitch() {
   [[ -f "$file" ]] || die "PARSEC switch configuration disappeared during configuration: ${file}"
 
   md_backup_once "$file"
-  backup_timestamped_file "$file" >/dev/null
 
   set_parsec_mswitch_db mac sssd
   set_parsec_mswitch_db audit sssd
@@ -651,8 +638,6 @@ configure_astra_parsec_mswitch() {
 }
 
 restart_astra_parsec_sssd_or_rollback() {
-  local sssd_backup="$1"
-
   sss_cache -E 2>/dev/null || true
 
   if systemctl restart sssd; then
@@ -661,21 +646,10 @@ restart_astra_parsec_sssd_or_rollback() {
   fi
 
   warn "SSSD restart failed after Astra SE PARSEC configuration"
-
-  if [[ -n "$sssd_backup" && -f "$sssd_backup" ]]; then
-    cp "$sssd_backup" /etc/sssd/sssd.conf
-    chmod 600 /etc/sssd/sssd.conf
-    systemctl restart sssd 2>/dev/null || true
-    die "SSSD failed to start. Restored /etc/sssd/sssd.conf from ${sssd_backup}"
-  fi
-
-  rm -f /etc/sssd/sssd.conf
-  die "SSSD failed to start. Removed generated /etc/sssd/sssd.conf because no backup existed."
+  die "SSSD failed to start after Astra SE configuration; restoring the pre-join backup"
 }
 
 validate_astra_parsec_sssd_config_or_rollback() {
-  local sssd_backup="$1"
-
   validate_no_password_based_sssd_auth
 
   if have_cmd sssctl; then
@@ -684,22 +658,13 @@ validate_astra_parsec_sssd_config_or_rollback() {
       return 0
     fi
 
-    if [[ -n "$sssd_backup" && -f "$sssd_backup" ]]; then
-      cp "$sssd_backup" /etc/sssd/sssd.conf
-      chmod 600 /etc/sssd/sssd.conf
-      die "Generated Astra SE SSSD configuration is invalid. Restored /etc/sssd/sssd.conf from ${sssd_backup}"
-    fi
-
-    rm -f /etc/sssd/sssd.conf
-    die "Generated Astra SE SSSD configuration is invalid. Removed generated /etc/sssd/sssd.conf because no backup existed."
+    die "Generated Astra SE SSSD configuration is invalid; restoring the pre-join backup"
   fi
 
   warn "sssctl not found, SSSD config validation skipped"
 }
 
 configure_astra_se_parsec_sssd() {
-  local sssd_backup
-
   is_astra_se || return 0
 
   info "Astra Linux SE detected: preserving existing SSSD snippets"
@@ -711,10 +676,17 @@ configure_astra_se_parsec_sssd() {
 
   install_astra_parsec_sssd_packages
 
-  sssd_backup="$(backup_timestamped_file /etc/sssd/sssd.conf)"
+  info "Backing up Astra SE configuration"
+  md_backup_once /etc/sssd/sssd.conf
+  md_backup_once /etc/sssd/conf.d
+  md_backup_once /etc/parsec/mswitch.conf
+  ok "Astra SE configuration backup completed"
+
+  info "Applying Astra SE SSSD/PARSEC configuration"
   write_astra_parsec_sssd_conf
-  validate_astra_parsec_sssd_config_or_rollback "$sssd_backup"
+  validate_astra_parsec_sssd_config_or_rollback
 
   configure_astra_parsec_mswitch
-  restart_astra_parsec_sssd_or_rollback "$sssd_backup"
+  restart_astra_parsec_sssd_or_rollback
+  ok "Astra SE configuration completed"
 }

@@ -9,6 +9,11 @@ directory_has_entries() {
   find "$dir" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null | grep -q .
 }
 
+manifest_has_tracked_paths() {
+  [[ -f "$MD_MANIFEST" ]] || return 1
+  grep -Eq '^[[:space:]]*/[^[:space:]]+' "$MD_MANIFEST" 2>/dev/null
+}
+
 krb5_conf_looks_domain_managed() {
   [[ -f /etc/krb5.conf ]] || return 1
 
@@ -30,9 +35,10 @@ sssd_conf_has_domain_block() {
 recoverable_incomplete_join_detected() {
   local rollback_marker="${MD_ROLLBACK_MARKER:-${MD_STATE_DIR}/rollback-in-progress}"
 
-  # This marker is created before rollback starts and is removed only after
-  # local restoration has completed. Its presence makes recovery unambiguous.
-  if [[ -f "$rollback_marker" ]]; then
+  # The marker alone is not enough: older versions can leave an empty marker
+  # together with an empty manifest after a completed rollback. Recover only
+  # when the manifest contains paths changed by the interrupted transaction.
+  if [[ -f "$rollback_marker" ]] && manifest_has_tracked_paths; then
     return 0
   fi
 
@@ -42,9 +48,9 @@ recoverable_incomplete_join_detected() {
     return 1
   fi
 
-  # Older versions removed the marker but left an empty transaction manifest.
-  # Recover that case only when there are no strong signs of a real join.
-  if [[ ! -f "$MD_MANIFEST" ]]; then
+  # A blank manifest contains no changes to recover and must not block a new
+  # join. This also handles an orphaned, empty rollback marker.
+  if ! manifest_has_tracked_paths; then
     return 1
   fi
   if sssd_conf_has_domain_block; then
@@ -71,12 +77,12 @@ detect_domain_state() {
     add_domain_state_reason "MultiDirectory join state found: ${MD_JOIN_ENV}"
   fi
 
-  if [[ -f "$MD_MANIFEST" ]]; then
+  if manifest_has_tracked_paths; then
     managed=1
     add_domain_state_reason "MultiDirectory manifest found: ${MD_MANIFEST}"
   fi
 
-  if [[ -f "${MD_ROLLBACK_MARKER:-${MD_STATE_DIR}/rollback-in-progress}" ]]; then
+  if [[ -f "${MD_ROLLBACK_MARKER:-${MD_STATE_DIR}/rollback-in-progress}" ]] && manifest_has_tracked_paths; then
     partial=1
     add_domain_state_reason "MultiDirectory rollback marker found: ${MD_ROLLBACK_MARKER:-${MD_STATE_DIR}/rollback-in-progress}"
   fi

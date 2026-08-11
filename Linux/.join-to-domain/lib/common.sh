@@ -68,28 +68,32 @@ cleanup_log() {
 }
 
 info() {
-  printf '%b\n' "${GREEN}[OK]${NC} $*"
-  log "OK" "$*"
+  local message="$(runtime_text "$*")"
+  printf '%b\n' "${GREEN}[OK]${NC} ${message}"
+  log "OK" "$message"
 }
 
 status_info() {
-  printf '%b\n' "${BLUE}[INFO]${NC} $*"
-  log "INFO" "$*"
+  local message="$(runtime_text "$*")"
+  printf '%b\n' "${BLUE}[INFO]${NC} ${message}"
+  log "INFO" "$message"
 }
 
 warn() {
-  printf '%b\n' "${YELLOW}[WARN]${NC} $*"
-  log "WARN" "$*"
+  local message="$(runtime_text "$*")"
+  printf '%b\n' "${YELLOW}[WARN]${NC} ${message}"
+  log "WARN" "$message"
 }
 
 error() {
-  printf '%b\n' "${RED}[ERROR]${NC} $*" >&2
-  log "ERROR" "$*"
+  local message="$(runtime_text "$*")"
+  printf '%b\n' "${RED}[ERROR]${NC} ${message}" >&2
+  log "ERROR" "$message"
 }
 
 debug() {
   if [[ "$DEBUG" -eq 1 ]]; then
-    printf '[DEBUG] %s\n' "$*"
+    printf '[DEBUG] %s\n' "$(runtime_text "$*")"
   fi
 
   log "DEBUG" "$*"

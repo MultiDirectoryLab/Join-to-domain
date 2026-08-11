@@ -22,6 +22,9 @@ join_domain() {
 
   # Everything above is read-only. Start transactional state and rollback only
   # immediately before the first possible system modification (DNS setup).
+  info "$(ui_text "Creating pre-join system backup" "Создание резервной копии системы перед присоединением")"
+  create_join_backup || die "Failed to create a safe pre-join backup"
+  ok "$(ui_text "Backup created" "Резервная копия создана")"
   md_init_state
   MD_JOIN_ROLLBACK_ACTIVE=1
   trap on_join_error ERR
@@ -44,17 +47,17 @@ join_domain() {
   else
     while true; do
       if [[ -n "${SAVED_API_HOST:-}" ]]; then
-        read_tty API_HOST "$(ui_text "Enter MULTIDIRECTORY server address (IPv4 or FQDN) [${SAVED_API_HOST}]:" "Введите адрес сервера MULTIDIRECTORY (IPv4 или FQDN) [${SAVED_API_HOST}]:")"
+        read_tty API_HOST "$(ui_text "Enter MULTIDIRECTORY server FQDN [${SAVED_API_HOST}]:" "Введите FQDN сервера MULTIDIRECTORY [${SAVED_API_HOST}]:")"
         API_HOST="${API_HOST:-$SAVED_API_HOST}"
       else
-        read_tty API_HOST "$(ui_text "Enter MULTIDIRECTORY server address (IPv4 or FQDN), for example 192.168.69.138 or webadmin.domain.ru:" "Введите адрес сервера MULTIDIRECTORY (IPv4 или FQDN), например 192.168.69.138 или webadmin.domain.ru:")"
+        read_tty API_HOST "$(ui_text "Enter MULTIDIRECTORY server FQDN, for example webadmin.domain.ru:" "Введите FQDN сервера MULTIDIRECTORY, например webadmin.domain.ru:")"
       fi
       if [[ -z "${API_HOST}" ]]; then
         warn "$(ui_text "API host must be filled." "Адрес API не может быть пустым.")"
         continue
       fi
-      if ! valid_api_host "${API_HOST}"; then
-        warn "$(ui_text "Invalid API host. Enter an IPv4 address or FQDN, for example 192.168.69.138 or webadmin.domain.ru." "Некорректный адрес API. Введите IPv4-адрес или FQDN, например 192.168.69.138 или webadmin.domain.ru.")"
+      if valid_ipv4_address "${API_HOST}" || ! valid_join_domain "${API_HOST}"; then
+        warn "$(ui_text "Invalid API host. Enter a server FQDN, for example webadmin.domain.ru." "Некорректный адрес API. Введите FQDN сервера, например webadmin.domain.ru.")"
         continue
       fi
       if api_host_resolution_ok "${API_HOST}"; then
@@ -169,8 +172,9 @@ join_domain() {
 
   unset PASSWORD
 
-  save_join_env
   start_services
+  save_join_env
+  rm -f "${MD_ROLLBACK_MARKER}" "${MD_PENDING_BACKUP}"
 
   MD_JOIN_ROLLBACK_ACTIVE=0
   trap - ERR INT TERM
@@ -199,6 +203,9 @@ main() {
       ;;
     leave)
       leave_domain
+      ;;
+    rejoin)
+      rejoin_domain_configure
       ;;
     renew-certificate)
       renew_md_server_certificate

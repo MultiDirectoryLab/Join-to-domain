@@ -238,6 +238,7 @@ save_join_env() {
     write_join_state_var COMPUTER_DN "${computer_dn}"
     write_join_state_var SALT_MASTER "${SALT_MASTER:-}"
     write_join_state_var SALT_MINION_ID "${SALT_MINION_ID:-}"
+    write_join_state_var BACKUP_DIR "${MD_BACKUP_DIR}"
     write_join_state_var JOINED_AT "${joined_at}"
   } > "$tmp"
 
@@ -246,7 +247,5 @@ save_join_env() {
   mv -f "$tmp" "$MD_JOIN_ENV"
   chmod 600 "$MD_JOIN_ENV"
   chown root:root "$MD_JOIN_ENV" 2>/dev/null || true
-  md_track "$MD_JOIN_ENV"
-
   log "Join state saved: ${MD_JOIN_ENV}"
 }
