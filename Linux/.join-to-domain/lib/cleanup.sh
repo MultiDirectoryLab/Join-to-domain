@@ -663,7 +663,6 @@ cleanup_delete_salt_minion_key() {
   body="$(echo "$resp" | sed '$d')"
 
   if [[ "$http_code" =~ ^2[0-9][0-9]$ || "$http_code" == "404" ]]; then
-    info "Salt key deleted or was not present: ${minion_id}"
     cleanup_log "Salt key deleted or absent: ${minion_id}"
     return 0
   fi
@@ -705,7 +704,8 @@ cleanup_delete_salt_key_on_leave() {
     return 0
   fi
 
-  warn "Deleting Salt key on master for minion id: ${minion_id}"
+  info "$(ui_text "Deleting Salt key ${minion_id} from the master" "Удаление ключа Salt ${minion_id} с мастера")"
+  cleanup_log "Deleting Salt key on master for minion id: ${minion_id}"
   cleanup_delete_salt_minion_key "$minion_id"
 }
 
@@ -836,7 +836,7 @@ safe_leave_domain() {
   fi
 
   info "Safe MultiDirectory domain leave completed"
-  warn "System reboot is recommended"
+  info "$(ui_text "System reboot is recommended" "Рекомендуется перезагрузить компьютер")"
   cleanup_log "Final leave result: success"
   return 0
 }

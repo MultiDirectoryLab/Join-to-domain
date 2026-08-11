@@ -1,3 +1,72 @@
+prompt_api_address() {
+  local entered default_address dns_failure_choice supplied_address=""
+
+  if env_has_key API_ADDRESS; then
+    supplied_address="${API_ADDRESS:-}"
+    [[ -n "$supplied_address" ]] || die "API_ADDRESS is empty in environment"
+  elif env_has_key API_HOST; then
+    supplied_address="${API_HOST:-}"
+    [[ -n "$supplied_address" ]] || die "API_HOST is empty in environment"
+  fi
+
+  if [[ -n "$supplied_address" ]]; then
+    set_api_address "$supplied_address" \
+      || die "Invalid API address in environment: ${supplied_address}"
+    api_host_resolution_ok "$API_ADDRESS" \
+      || die "$(ui_text "DNS resolution failed for API address from environment: ${API_ADDRESS}" "Не удалось разрешить адрес API из окружения через DNS: ${API_ADDRESS}")"
+    return 0
+  fi
+
+  default_address="${API_ADDRESS:-${SAVED_API_ADDRESS:-${SAVED_API_HOST:-}}}"
+  while true; do
+    entered=""
+    if [[ -n "$default_address" ]]; then
+      read_tty entered "$(ui_text "Enter MULTIDIRECTORY server address (IPv4 or FQDN) [${default_address}]:" "Введите адрес сервера MULTIDIRECTORY (IPv4 или FQDN) [${default_address}]:")"
+      entered="${entered:-$default_address}"
+    else
+      read_tty entered "$(ui_text "Enter MULTIDIRECTORY server address (IPv4 or FQDN), for example 10.10.10.10 or dc1.domain.ru:" "Введите адрес сервера MULTIDIRECTORY (IPv4 или FQDN), например 10.10.10.10 или dc1.domain.ru:")"
+    fi
+
+    if ! set_api_address "$entered"; then
+      warn "$(ui_text "Invalid API address. Enter an IPv4 address or FQDN." "Некорректный адрес API. Введите IPv4-адрес или FQDN.")"
+      continue
+    fi
+
+    if api_host_resolution_ok "$API_ADDRESS"; then
+      if valid_ipv4_address "$API_ADDRESS"; then
+        info "$(ui_text "Using controller IP address: ${API_ADDRESS}" "Используется IP-адрес контроллера: ${API_ADDRESS}")"
+      else
+        log "DNS resolution OK: ${API_ADDRESS}"
+      fi
+      return 0
+    fi
+
+    warn "$(ui_text "DNS resolution failed for ${API_ADDRESS}. Please check the address." "Не удалось разрешить ${API_ADDRESS} через DNS. Проверьте адрес.")"
+    show_dns_failure_summary
+    while true; do
+      tty_echo "${YELLOW}$(ui_text "What do you want to do?" "Что вы хотите сделать?")${NC}"
+      tty_echo "1. $(ui_text "Enter another server address" "Ввести другой адрес сервера")"
+      tty_echo "2. $(ui_text "Configure DNS servers" "Настроить DNS-серверы")"
+      tty_echo "3. $(ui_text "Cancel domain operation" "Отменить операцию с доменом")"
+      read_tty dns_failure_choice "$(ui_text "Select (1/2/3) [1]:" "Выберите (1/2/3) [1]:")"
+      dns_failure_choice="${dns_failure_choice:-1}"
+      case "$dns_failure_choice" in
+        1) break ;;
+        2)
+          prompt_configure_dns
+          if api_host_resolution_ok "$API_ADDRESS"; then
+            return 0
+          fi
+          warn "$(ui_text "DNS resolution still fails for ${API_ADDRESS}." "${API_ADDRESS} по-прежнему не разрешается через DNS.")"
+          show_dns_failure_summary
+          ;;
+        3) return 1 ;;
+        *) warn "$(ui_text "Enter 1, 2 or 3." "Введите 1, 2 или 3.")" ;;
+      esac
+    done
+  done
+}
+
 refresh_domain_membership() {
   local mode="${1:-normal}"
   local update_parsec="${2:-1}"
@@ -47,7 +116,6 @@ refresh_domain_membership() {
 }
 
 join_domain() {
-  local dns_failure_choice
   local JOIN_MODE="${JOIN_MODE:-normal}"
 
   preflight
@@ -76,90 +144,14 @@ join_domain() {
   ok "$(ui_text "Backup created" "Резервная копия создана")"
   md_init_state
   MD_JOIN_ROLLBACK_ACTIVE=1
-  trap on_join_error ERR
+  trap 'on_join_error "$?" "${BASH_SOURCE[0]}" "${FUNCNAME[0]:-main}" "$LINENO" "$BASH_COMMAND"' ERR
   trap on_join_signal INT TERM
 
   prompt_configure_dns
-
-  if env_has_key API_HOST; then
-    [[ -n "${API_HOST:-}" ]] || die "API_HOST is empty in environment"
-    valid_api_host "${API_HOST}" || die "Invalid API_HOST in environment: ${API_HOST}"
-    if api_host_resolution_ok "${API_HOST}"; then
-      if valid_ipv4_address "${API_HOST}"; then
-        log "API host is an IPv4 address; DNS resolution skipped: ${API_HOST}"
-      else
-        log "DNS resolution OK: ${API_HOST}"
-      fi
-    else
-      die "$(ui_text "DNS resolution failed for API_HOST from environment: ${API_HOST}" "Не удалось разрешить API_HOST из окружения через DNS: ${API_HOST}")"
-    fi
-  else
-    while true; do
-      if [[ -n "${SAVED_API_HOST:-}" ]]; then
-        read_tty API_HOST "$(ui_text "Enter MULTIDIRECTORY server address (IPv4 or FQDN) [${SAVED_API_HOST}]:" "Введите адрес сервера MULTIDIRECTORY (IPv4 или FQDN) [${SAVED_API_HOST}]:")"
-        API_HOST="${API_HOST:-$SAVED_API_HOST}"
-      else
-        read_tty API_HOST "$(ui_text "Enter MULTIDIRECTORY server address (IPv4 or FQDN), for example 10.10.10.10
-         or webadmin.domain.ru:" "Введите адрес сервера MULTIDIRECTORY (IPv4 или FQDN), например 10.10.10.10 или webadmin.domain.ru:")"
-      fi
-      if [[ -z "${API_HOST}" ]]; then
-        warn "$(ui_text "API host must be filled." "Адрес API не может быть пустым.")"
-        continue
-      fi
-      if ! valid_api_host "${API_HOST}"; then
-        warn "$(ui_text "Invalid API host. Enter an IPv4 address or FQDN, for example 10.10.10.10 or webadmin.domain.ru." "Некорректный адрес API. Введите IPv4-адрес или FQDN, например 10.10.10.10 или webadmin.domain.ru.")"
-        continue
-      fi
-      if api_host_resolution_ok "${API_HOST}"; then
-        if valid_ipv4_address "${API_HOST}"; then
-          log "API host is an IPv4 address; DNS resolution skipped: ${API_HOST}"
-        else
-          log "DNS resolution OK: ${API_HOST}"
-        fi
-        break
-      else
-        warn "$(ui_text "DNS resolution failed for ${API_HOST}. Please check the address." "Не удалось разрешить ${API_HOST} через DNS. Проверьте адрес.")"
-        show_dns_failure_summary
-
-        while true; do
-          tty_echo "${YELLOW}$(ui_text "What do you want to do?" "Что вы хотите сделать?")${NC}"
-          tty_echo "1. $(ui_text "Enter another server address" "Ввести другой адрес сервера")"
-          tty_echo "2. $(ui_text "Configure DNS servers" "Настроить DNS-серверы")"
-          tty_echo "3. $(ui_text "Cancel domain join" "Отменить присоединение к домену")"
-          read_tty dns_failure_choice "$(ui_text "Select (1/2/3) [1]:" "Выберите (1/2/3) [1]:")"
-          dns_failure_choice="${dns_failure_choice:-1}"
-
-          case "$dns_failure_choice" in
-            1)
-              break
-              ;;
-            2)
-              prompt_configure_dns
-
-              if api_host_resolution_ok "${API_HOST}"; then
-                if valid_ipv4_address "${API_HOST}"; then
-                  log "API host is an IPv4 address; DNS resolution skipped: ${API_HOST}"
-                else
-                  log "DNS resolution OK after DNS configuration: ${API_HOST}"
-                fi
-                break 2
-              fi
-
-              warn "$(ui_text "DNS resolution still fails for ${API_HOST}." "${API_HOST} по-прежнему не разрешается через DNS.")"
-              show_dns_failure_summary
-              ;;
-            3)
-              warn "$(ui_text "Domain join cancelled" "Присоединение к домену отменено")"
-              return 1
-              ;;
-            *)
-              warn "$(ui_text "Enter 1, 2 or 3." "Введите 1, 2 или 3.")"
-              ;;
-          esac
-        done
-      fi
-    done
-  fi
+  prompt_api_address || {
+    warn "$(ui_text "Domain join cancelled" "Присоединение к домену отменено")"
+    return 1
+  }
 
   install_md_server_certificate
   ok "$(ui_text "Connected to MultiDirectory server" "Соединение с сервером MultiDirectory установлено")"
@@ -181,7 +173,6 @@ join_domain() {
     fi
   done
   discover_and_validate_domain
-  info "$(ui_text "Domain detected: ${DOMAIN}" "Обнаружен домен: ${DOMAIN}")"
 
   if [[ "$JOIN_MODE" == "rejoin" ]]; then
     select_rejoin_hostname

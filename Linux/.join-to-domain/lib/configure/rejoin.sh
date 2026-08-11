@@ -2,6 +2,8 @@ existing_domain_configuration_valid() {
   [[ -s /etc/krb5.conf && -s /etc/sssd/sssd.conf ]] || return 1
   grep -Fqi "$REALM" /etc/krb5.conf || return 1
   grep -Fqi "$DOMAIN" /etc/sssd/sssd.conf || return 1
+  grep -Fqi "$CONTROLLER_FQDN" /etc/krb5.conf || return 1
+  grep -Fqi "$LDAP_GSSAPI_HOST" /etc/sssd/sssd.conf || return 1
   if grep -Eq 'ldap_default_bind_dn|ldap_default_authtok|ldap_default_authtok_type|__SSSD_|__BIND_DN__|__PASSWORD__' /etc/sssd/sssd.conf; then
     return 1
   fi
@@ -49,19 +51,25 @@ rollback_recovery_changes() {
 }
 
 start_rejoin_transaction() {
-  info "$(ui_text "Creating backup of current local configuration" "Создание резервной копии текущей локальной конфигурации")"
+  log "Creating backup of current local configuration before Rejoin"
   create_recovery_backup || die "$(ui_text "Failed to create the Rejoin safety backup" "Не удалось создать страховочную резервную копию Rejoin")"
-  ok "$(ui_text "Rejoin safety backup created" "Страховочная резервная копия Rejoin создана")"
+  log "Rejoin safety backup created"
 
   MD_ROLLBACK_HANDLER=rollback_recovery_changes
   MD_JOIN_ROLLBACK_ACTIVE=1
-  trap on_recovery_rejoin_error ERR
+  trap 'on_recovery_rejoin_error "$?" "${BASH_SOURCE[0]}" "${FUNCNAME[0]:-main}" "$LINENO" "$BASH_COMMAND"' ERR
   trap on_recovery_rejoin_signal INT TERM
 }
 
 on_recovery_rejoin_error() {
-  local code=$?
+  local code="$1"
+  local source_file="${2:-unknown}"
+  local function_name="${3:-main}"
+  local line="${4:-unknown}"
+  local command="${5:-unknown}"
+
   trap - ERR INT TERM
+  report_command_failure "$code" "$source_file" "$function_name" "$line" "$command"
   MD_JOIN_ROLLBACK_ACTIVE=0
   rollback_recovery_changes "$code"
   exit "$code"
@@ -111,7 +119,8 @@ recovery_rejoin_domain() {
   unset MD_ROLLBACK_HANDLER
   trap - ERR INT TERM
   ok "$(ui_text "Computer successfully rejoined the domain" "Компьютер успешно повторно присоединён к домену")"
-  info "$(ui_text "The original pre-join backup was preserved for an explicit Leave" "Исходная резервная копия до Join сохранена для явного выхода из домена")"
+  log "$(ui_text "The original pre-join backup was preserved for an explicit Leave" "Исходная резервная копия до Join сохранена для явного выхода из домена")"
+  info "$(ui_text "System reboot is recommended" "Рекомендуется перезагрузить компьютер")"
 }
 
 infer_rejoin_edition() {
@@ -133,38 +142,20 @@ infer_rejoin_edition() {
 }
 
 prompt_rejoin_api_host() {
-  local entered default_host
-
-  if env_has_key API_HOST; then
-    [[ -n "${API_HOST:-}" ]] || die "API_HOST is empty in environment"
-    valid_join_domain "$API_HOST" \
-      || die "$(ui_text "API_HOST must be a valid server FQDN" "API_HOST должен содержать корректный FQDN сервера")"
-    return 0
-  fi
-
-  default_host="${API_HOST:-${SAVED_API_HOST:-}}"
-  while true; do
-    entered=""
-    if [[ -n "$default_host" ]]; then
-      read_tty entered "$(ui_text "Enter MULTIDIRECTORY server FQDN [${default_host}]:" "Введите FQDN сервера MULTIDIRECTORY [${default_host}]:")"
-      entered="${entered:-$default_host}"
-    else
-      read_tty entered "$(ui_text "Enter MULTIDIRECTORY server FQDN:" "Введите FQDN сервера MULTIDIRECTORY:")"
-    fi
-    entered="$(printf '%s' "$entered" | tr '[:upper:]' '[:lower:]')"
-    if valid_join_domain "$entered"; then
-      API_HOST="$entered"
-      return 0
-    fi
-    warn "$(ui_text "Enter a valid server FQDN" "Введите корректный FQDN сервера")"
-  done
+  prompt_api_address \
+    || die "$(ui_text "Rejoin cancelled" "Повторное присоединение отменено")"
 }
 
 rejoin_domain_configure() {
-  local supplied_api_host=""
+  local supplied_api_address=""
+  local supplied_api_address_set=0
 
-  if env_has_key API_HOST; then
-    supplied_api_host="${API_HOST:-}"
+  if env_has_key API_ADDRESS; then
+    supplied_api_address="${API_ADDRESS:-}"
+    supplied_api_address_set=1
+  elif env_has_key API_HOST; then
+    supplied_api_address="${API_HOST:-}"
+    supplied_api_address_set=1
   fi
 
   need_root
@@ -189,8 +180,9 @@ rejoin_domain_configure() {
   info "$(ui_text "Rejoin mode started" "Запущен режим Rejoin")"
 
   load_join_env
-  if env_has_key API_HOST; then
-    API_HOST="$supplied_api_host"
+  if [[ "$supplied_api_address_set" -eq 1 ]]; then
+    API_ADDRESS="$supplied_api_address"
+    API_HOST="$supplied_api_address"
   fi
   infer_rejoin_edition
   validate_files_structure
@@ -209,9 +201,8 @@ rejoin_domain_configure() {
   fi
   prompt_rejoin_api_host
   validate_directory_credentials state-loaded
-  discover_and_validate_domain
   ok "$(ui_text "Administrator authentication succeeded" "Аутентификация администратора выполнена")"
-  info "$(ui_text "Domain detected: ${DOMAIN}" "Обнаружен домен: ${DOMAIN}")"
+  discover_and_validate_domain
   select_rejoin_hostname
   info "$(ui_text "Refreshing computer domain membership" "Обновление членства компьютера в домене")"
   recovery_rejoin_domain

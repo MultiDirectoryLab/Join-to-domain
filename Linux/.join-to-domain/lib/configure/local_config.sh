@@ -448,7 +448,7 @@ create_computer_object_if_needed() {
     curl -sS -w "\n%{http_code}" \
       --connect-timeout "${API_CONNECT_TIMEOUT}" \
       --max-time "${API_MAX_TIME}" \
-      -X POST "https://${API_HOST}/api/entry/add" \
+      -X POST "https://${API_ADDRESS}/api/entry/add" \
       -H 'accept: application/json' \
       -H 'Content-Type: application/json' \
       -H "Cookie: id=${access_token}" \
@@ -520,36 +520,63 @@ validate_ldap_uri_uses_fqdn() {
     die "LDAP URI must use FQDN, not IP address: ${URI}. IP-based Kerberos SPNs such as ldap/${host}@${REALM} are not supported."
   fi
 
-  if [[ "$host" != "${DOMAIN}" && "$host" != "${FQDN}" ]]; then
-    warn "LDAP URI host is ${host}; expected ${DOMAIN} or ${FQDN} to avoid Kerberos SPN mismatch"
+  [[ -n "${LDAP_GSSAPI_HOST:-}" ]] \
+    || die "LDAP GSSAPI host is not configured"
+
+  if [[ "${host,,}" != "${LDAP_GSSAPI_HOST,,}" ]]; then
+    die "LDAP URI host ${host} does not match the provisioned GSSAPI host ${LDAP_GSSAPI_HOST}"
   fi
 }
 
 validate_ldap_gssapi_auth() {
-  local ldap_client_conf="/tmp/md-ldap-gssapi.conf"
+  local ldap_client_conf="" ldap_host="" client_principal="" expected_spn=""
+  local kvno_output="" ldap_output=""
 
   log "Checking LDAP GSSAPI authentication"
 
   validate_ldap_uri_uses_fqdn
 
-  if ! kinit -k "host/${FQDN}@${REALM}"; then
-    die "Kerberos GSSAPI initialization failed: host/${FQDN}@${REALM}"
+  ldap_host="$(ldap_uri_host "${URI}")"
+  client_principal="host/${FQDN}@${REALM}"
+  expected_spn="${LDAP_SERVICE_PRINCIPAL:-ldap/${ldap_host}@${REALM}}"
+
+  detail "LDAP URI: ${URI}"
+  detail "LDAP hostname: ${ldap_host}"
+  detail "Kerberos realm: ${REALM}"
+  detail "Client principal: ${client_principal}"
+  detail "Expected LDAP SPN: ${expected_spn}"
+
+  if ! kinit -k "$client_principal"; then
+    die "Kerberos GSSAPI initialization failed: ${client_principal}"
   fi
 
+  if ! kvno_output="$(kvno "$expected_spn" 2>&1)"; then
+    log "LDAP service principal preflight failed: ${kvno_output}"
+    kdestroy || true
+    die "LDAP Kerberos service principal is unavailable: ${expected_spn}"
+  fi
+  log "LDAP service principal preflight succeeded: ${kvno_output}"
+
+  ldap_client_conf="$(mktemp /tmp/md-ldap-gssapi.XXXXXX)" \
+    || {
+      kdestroy || true
+      die "Failed to create temporary LDAP client configuration"
+    }
+  chmod 600 "$ldap_client_conf"
   cat > "$ldap_client_conf" <<EOF
 SASL_NOCANON on
 URI ${URI}
 BASE ${LDAP_BASE_DN}
 EOF
 
-  LDAPCONF="$ldap_client_conf" ldapwhoami -Y GSSAPI -H "${URI}" >/dev/null \
-    || {
-      rm -f "$ldap_client_conf"
-      kdestroy || true
-      die "LDAP GSSAPI authentication failed"
-    }
+  if ! ldap_output="$(LDAPCONF="$ldap_client_conf" ldapwhoami -Y GSSAPI -H "${URI}" 2>&1)"; then
+    log "LDAP GSSAPI bind failed for ${expected_spn}: ${ldap_output}"
+    rm -f "$ldap_client_conf"
+    kdestroy || true
+    die "LDAP GSSAPI authentication failed for ${expected_spn}"
+  fi
 
-  log "LDAP GSSAPI authentication succeeded"
+  log "LDAP GSSAPI authentication succeeded for ${expected_spn}: ${ldap_output}"
 
   rm -f "$ldap_client_conf"
   kdestroy || true
@@ -693,7 +720,7 @@ configure_astra_parsec_mswitch() {
 restart_astra_parsec_sssd_or_rollback() {
   sss_cache -E 2>/dev/null || true
 
-  if systemctl restart sssd; then
+  if systemctl restart sssd >> "$LOG_FILE" 2>&1; then
     log "SSSD restarted"
     return 0
   fi
@@ -720,8 +747,7 @@ validate_astra_parsec_sssd_config_or_rollback() {
 configure_astra_se_parsec_sssd() {
   is_astra_se || return 0
 
-  info "Astra Linux SE detected: preserving existing SSSD snippets"
-  log "Astra Linux SE detected: checking PARSEC/SSSD integration"
+  log "Astra Linux SE detected: preserving existing SSSD snippets and checking PARSEC/SSSD integration"
 
   if ! astra_parsec_mswitch_available; then
     return 0

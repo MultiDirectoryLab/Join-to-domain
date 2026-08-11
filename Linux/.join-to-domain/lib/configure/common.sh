@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 
 export DEBIAN_FRONTEND=noninteractive
 
@@ -59,6 +59,12 @@ log() {
   printf '[DETAIL] %s\n' "$*" >> "$LOG_FILE" 2>/dev/null || true
 }
 
+detail() {
+  # Technical diagnostics belong in the join log and must not clutter the
+  # administrator-facing progress output.
+  log "$*"
+}
+
 info() {
   local message="$(runtime_text "$*")"
   printf '%b\n' "${BLUE}[INFO]${NC} ${message}" > /dev/tty
@@ -78,9 +84,13 @@ warn() {
 }
 
 die() {
-  local message="$(runtime_text "$*")"
+  local raw_message="$*"
+  local message="$(runtime_text "$raw_message")"
   printf '%b\n' "${RED}[ERROR]${NC} ${message}" > /dev/tty
   printf '[ERROR] %s\n' "$message" >> "$LOG_FILE" 2>/dev/null || true
+  if [[ "$message" != "$raw_message" ]]; then
+    printf '[DETAIL] Raw error: %s\n' "$raw_message" >> "$LOG_FILE" 2>/dev/null || true
+  fi
   printf '%b\n' "${BLUE}[INFO]${NC} Full log: ${LOG_FILE}" > /dev/tty
   printf '[INFO] Full log: %s\n' "$LOG_FILE" >> "$LOG_FILE" 2>/dev/null || true
 
@@ -92,6 +102,28 @@ die() {
   fi
 
   exit 1
+}
+
+report_command_failure() {
+  local code="$1"
+  local source_file="$2"
+  local function_name="$3"
+  local line="$4"
+  local command="$5"
+  local console=/dev/stderr
+
+  if [[ -w /dev/tty ]]; then
+    console=/dev/tty
+  fi
+
+  printf '[ERROR] Command failed\n' >> "$LOG_FILE" 2>/dev/null || true
+  printf '[DETAIL] file: %s\n' "$source_file" >> "$LOG_FILE" 2>/dev/null || true
+  printf '[DETAIL] function: %s\n' "$function_name" >> "$LOG_FILE" 2>/dev/null || true
+  printf '[DETAIL] line: %s\n' "$line" >> "$LOG_FILE" 2>/dev/null || true
+  printf '[DETAIL] exit_code: %s\n' "$code" >> "$LOG_FILE" 2>/dev/null || true
+  printf '[DETAIL] command: %s\n' "$command" >> "$LOG_FILE" 2>/dev/null || true
+  printf '%b\n' "${RED}[ERROR]${NC} $(ui_text "Command failed in ${function_name} at ${source_file}:${line} (exit ${code})" "Ошибка команды в ${function_name}, ${source_file}:${line} (код ${code})")" > "$console"
+  printf '%b\n' "${BLUE}[INFO]${NC} Full log: ${LOG_FILE}" > "$console"
 }
 
 tty_echo() {

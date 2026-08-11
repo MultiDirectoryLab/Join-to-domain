@@ -1,3 +1,4 @@
+# User-facing English/Russian translations shared by install and configure.
 tr_text() {
   local key="$1"
 
@@ -128,7 +129,8 @@ runtime_text() {
     "Failed to back up: "*) printf 'Не удалось создать резервную копию: %s' "${text#Failed to back up: }" ;;
     "Invalid keytab") printf 'Некорректный keytab' ;;
     "Kerberos keytab authentication failed") printf 'Аутентификация Kerberos по keytab завершилась ошибкой' ;;
-    "LDAP GSSAPI authentication failed") printf 'Аутентификация LDAP GSSAPI завершилась ошибкой' ;;
+    "LDAP GSSAPI authentication failed"*) printf 'Аутентификация LDAP GSSAPI завершилась ошибкой%s' "${text#LDAP GSSAPI authentication failed}" ;;
+    "LDAP Kerberos service principal is unavailable: "*) printf 'Недоступен Kerberos principal службы LDAP: %s' "${text#LDAP Kerberos service principal is unavailable: }" ;;
     "Failed to check whether computer object exists in LDAP") printf 'Не удалось проверить наличие объекта компьютера в LDAP' ;;
     "Computer already exists in LDAP, creation skipped") printf 'Компьютер уже существует в LDAP, создание пропущено' ;;
     "Failed to create computer object "*) printf 'Не удалось создать объект компьютера %s' "${text#Failed to create computer object }" ;;

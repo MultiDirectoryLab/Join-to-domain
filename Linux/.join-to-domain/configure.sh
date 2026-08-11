@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 CONFIGURE_LIB_DIR="${SCRIPT_DIR}/lib/configure"
@@ -23,7 +23,7 @@ source_configure_module() {
 export JOIN_TO_DOMAIN_INTERNAL_DIR="$SCRIPT_DIR"
 
 source_configure_module common
-. "${SCRIPT_DIR}/lib/i18n.sh"
+. "${SCRIPT_DIR}/lib/translations.sh"
 . "${SCRIPT_DIR}/lib/domain_state.sh"
 source_configure_module templates
 source_configure_module identity_dns

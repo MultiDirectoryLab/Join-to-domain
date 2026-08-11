@@ -9,7 +9,7 @@ api_auth_cookie() {
 
   set +e
   http_code="$(
-    curl -sS -X POST "https://${API_HOST}/api/auth/" \
+    curl -sS -X POST "https://${API_ADDRESS}/api/auth/" \
       --connect-timeout "${API_CONNECT_TIMEOUT}" \
       --max-time "${API_MAX_TIME}" \
       -H "accept: application/json" \
@@ -66,7 +66,7 @@ api_validate_session() {
 
   set +e
   http_code="$(
-    curl -sS -X GET "https://${API_HOST}/api/auth/me" \
+    curl -sS -X GET "https://${API_ADDRESS}/api/auth/me" \
       --connect-timeout "${API_CONNECT_TIMEOUT}" \
       --max-time "${API_MAX_TIME}" \
       -H "accept: application/json" \
@@ -107,7 +107,7 @@ api_search() {
 
   set +e
   http_code="$(
-    curl -sS -X POST "https://${API_HOST}/api/entry/search" \
+    curl -sS -X POST "https://${API_ADDRESS}/api/entry/search" \
       --connect-timeout "${API_CONNECT_TIMEOUT}" \
       --max-time "${API_MAX_TIME}" \
       -H "accept: application/json" \
@@ -174,6 +174,73 @@ api_response_attribute() {
   '
 }
 
+api_get_json() {
+  local cookie="$1"
+  local path="$2"
+  local tmp_body http_code curl_rc detail
+
+  tmp_body="$(mktemp "${TMPDIR:-/tmp}/md-api-get.XXXXXX")"
+  chmod 600 "$tmp_body"
+
+  set +e
+  http_code="$(
+    curl -sS -X GET "https://${API_ADDRESS}/api${path}" \
+      --connect-timeout "${API_CONNECT_TIMEOUT}" \
+      --max-time "${API_MAX_TIME}" \
+      -H "accept: application/json" \
+      -H "Cookie: id=${cookie}" \
+      -o "$tmp_body" \
+      -w '%{http_code}'
+  )"
+  curl_rc=$?
+  set -e
+
+  if [[ "$curl_rc" -ne 0 || ! "$http_code" =~ ^2[0-9][0-9]$ ]]; then
+    detail="$(tr '\r\n' ' ' < "$tmp_body" | cut -c1-1000)"
+    log "API GET ${path} failed: curl exit ${curl_rc}, HTTP ${http_code:-000}; response=${detail:-empty}"
+    rm -f "$tmp_body"
+    return 1
+  fi
+
+  if ! jq -e . "$tmp_body" >/dev/null 2>&1; then
+    detail="$(tr '\r\n' ' ' < "$tmp_body" | cut -c1-1000)"
+    log "API GET ${path} returned invalid JSON: ${detail:-empty}"
+    rm -f "$tmp_body"
+    return 1
+  fi
+
+  cat "$tmp_body"
+  rm -f "$tmp_body"
+}
+
+api_controller_fqdn_from_dns() {
+  local cookie="$1"
+  local address="$2"
+  local domain="$3"
+  local zones
+
+  if ! zones="$(api_get_json "$cookie" "/dns/zone")"; then
+    return 1
+  fi
+
+  printf '%s' "$zones" | jq -r --arg address "$address" --arg domain "$domain" '
+    [
+      .[]?
+      | (.rrsets // [])[]?
+      | select(((.type // "") | ascii_upcase) == "A")
+      | . as $rrset
+      | (.records // [])[]?
+      | select((.disabled // false) == false)
+      | select((((.content // "") | split(" ")[0])) == $address)
+      | (($rrset.name // "") | sub("[.]$"; "") | ascii_downcase)
+      | select(. == $domain or endswith("." + $domain))
+    ]
+    | unique
+    | (map(select(. != $domain)) + map(select(. == $domain)))
+    | .[0] // empty
+  '
+}
+
 api_rootdse_default_nc() {
   local cookie="$1"
   local resp nc
@@ -209,7 +276,7 @@ api_rootdse_response() {
   local cookie="${1:-}"
 
   api_search "$cookie" "" 0 "(objectClass=*)" \
-    '["dnsHostName","rootDomainNamingContext","defaultNamingContext","namingContexts","subschemaSubentry","supportedLDAPVersion","supportedSASLMechanisms","supportedExtension","supportedControl","supportedFeatures","vendorName","name","vendorVersion","objectClass"]' \
+    '["dnsHostName","dnsDomainName","dnsForestName","rootDomainNamingContext","defaultNamingContext","namingContexts","subschemaSubentry","supportedLDAPVersion","supportedSASLMechanisms","supportedExtension","supportedControl","supportedFeatures","vendorName","name","vendorVersion","objectClass"]' \
     0
 }
 
@@ -221,18 +288,14 @@ api_rootdse_domain() {
     return 1
   fi
 
-  dom="$(printf '%s' "$resp" | api_response_attribute "dnsHostName")"
+  nc="$(printf '%s' "$resp" | api_response_attribute "defaultNamingContext")"
+  [[ -n "$nc" ]] || nc="$(printf '%s' "$resp" | api_response_attribute "rootDomainNamingContext")"
+  [[ -n "$nc" ]] || nc="$(printf '%s' "$resp" | api_response_attribute "namingContexts")"
+  [[ -n "$nc" ]] && dom="$(printf '%s' "$nc" | dn_to_domain)"
 
   [[ -n "$dom" ]] || dom="$(printf '%s' "$resp" | api_response_attribute "dnsDomainName")"
-
   [[ -n "$dom" ]] || dom="$(printf '%s' "$resp" | api_response_attribute "dnsForestName")"
-
-  if [[ -z "$dom" ]]; then
-    nc="$(printf '%s' "$resp" | api_response_attribute "defaultNamingContext")"
-    [[ -n "$nc" ]] || nc="$(printf '%s' "$resp" | api_response_attribute "rootDomainNamingContext")"
-    [[ -n "$nc" ]] || nc="$(printf '%s' "$resp" | api_response_attribute "namingContexts")"
-    [[ -n "$nc" ]] && dom="$(printf '%s' "$nc" | dn_to_domain)"
-  fi
+  [[ -n "$dom" ]] || dom="$(printf '%s' "$resp" | api_response_attribute "dnsHostName")"
 
   if [[ -z "$dom" ]]; then
     log "RootDSE response contains no usable domain attributes: $(printf '%s' "$resp" | tr '\r\n' ' ' | cut -c1-1500)"
@@ -247,7 +310,7 @@ api_principal_add() {
   local primary="${spn%%/*}"
   local instance="${spn#*/}"
 
-  curl -sS -X POST "https://${API_HOST}/api/kerberos/principal/add" \
+  curl -sS -X POST "https://${API_ADDRESS}/api/kerberos/principal/add" \
     --connect-timeout "${API_CONNECT_TIMEOUT}" \
     --max-time "${API_MAX_TIME}" \
     -H "accept: application/json" \
@@ -308,7 +371,7 @@ api_ktadd_download() {
     body="${body}],\"is_rand_key\":true}"
   fi
 
-  log "Keytab API endpoint: https://${API_HOST}/api/kerberos/ktadd"
+  log "Keytab API endpoint: https://${API_ADDRESS}/api/kerberos/ktadd"
   log "Keytab principals: $*"
 
   http_code="$(
@@ -317,7 +380,7 @@ api_ktadd_download() {
       --max-time "${API_MAX_TIME}" \
       -D "$tmp_headers" \
       -o "$tmp_body" \
-      -X POST "https://${API_HOST}/api/kerberos/ktadd" \
+      -X POST "https://${API_ADDRESS}/api/kerberos/ktadd" \
       -H "accept: application/octet-stream" \
       -H "Content-Type: application/json" \
       -H "Cookie: id=${cookie}" \
@@ -402,7 +465,7 @@ api_update_many_replace_uac() {
     curl -sS -w "\n%{http_code}" \
       --connect-timeout "${API_CONNECT_TIMEOUT}" \
       --max-time "${API_MAX_TIME}" \
-      -X PATCH "https://${API_HOST}/api/entry/update_many" \
+      -X PATCH "https://${API_ADDRESS}/api/entry/update_many" \
       -H 'accept: application/json' \
       -H 'Content-Type: application/json' \
       -H "Cookie: id=${cookie}" \

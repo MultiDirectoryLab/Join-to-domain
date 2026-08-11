@@ -50,7 +50,7 @@ package_binaries() {
       printf '%s\n' sudo
       ;;
     krb5-user|krb5-workstation)
-      printf '%s\n' kinit klist
+      printf '%s\n' kinit klist kvno
       ;;
     sssd)
       printf '%s\n' sssd

@@ -5,9 +5,12 @@ load_join_env() {
   REALM="${SAVED_REALM:-}"
   LDAP_BASE_DN="${SAVED_LDAP_BASE_DN:-}"
   LDAP_COMPUTER_OU="${SAVED_LDAP_COMPUTER_OU:-}"
+  LDAP_GSSAPI_HOST="${SAVED_LDAP_GSSAPI_HOST:-${SAVED_DOMAIN:-}}"
   HOSTNAME="${SAVED_HOSTNAME:-}"
   FQDN="${SAVED_FQDN:-}"
-  API_HOST="${SAVED_API_HOST:-}"
+  API_ADDRESS="${SAVED_API_ADDRESS:-${SAVED_API_HOST:-}}"
+  API_HOST="$API_ADDRESS"
+  CONTROLLER_FQDN="${SAVED_CONTROLLER_FQDN:-}"
   WITH_SALT="${SAVED_WITH_SALT:-0}"
   EDITION="${SAVED_EDITION:-community}"
   SALT_MASTER="${SAVED_SALT_MASTER:-}"
@@ -20,58 +23,36 @@ load_join_env() {
     warn "Saved domain is unavailable; it will be detected after authentication"
   fi
 
-  if [[ -n "${SAVED_API_HOST:-}" ]]; then
-    log "Saved API host: ${SAVED_API_HOST}"
+  if [[ -n "${SAVED_API_ADDRESS:-${SAVED_API_HOST:-}}" ]]; then
+    log "Saved API address: ${SAVED_API_ADDRESS:-${SAVED_API_HOST:-}}"
   else
     warn "Saved API host is unavailable; asking interactively"
   fi
 }
 
 validate_directory_credentials() {
-  local leave_login leave_password leave_token detected_domain dns_input dns_servers
+  local leave_login leave_password leave_token detected_domain
 
   if [[ "${1:-load-state}" != "state-loaded" ]]; then
     load_join_env
   fi
 
-  # TLS certificate validation requires the server FQDN. Do not use a saved
-  # IPv4 API address for authenticated directory operations.
-  if valid_ipv4_address "${API_HOST:-}"; then
-    API_HOST="${DOMAIN:-}"
+  if [[ -n "${API_ADDRESS:-${API_HOST:-}}" ]]; then
+    set_api_address "${API_ADDRESS:-${API_HOST:-}}" \
+      || die "Invalid saved API address: ${API_ADDRESS:-${API_HOST:-}}"
+  else
+    prompt_api_address \
+      || die "$(ui_text "Directory operation cancelled" "Операция с каталогом отменена")"
   fi
-
-  while [[ -z "${API_HOST:-}" ]]; do
-    read_tty API_HOST "$(ui_text "Enter MULTIDIRECTORY domain/server FQDN:" "Введите FQDN домена/сервера MULTIDIRECTORY:")"
-    if [[ -z "${API_HOST}" ]]; then
-      warn "$(ui_text "API host must be filled." "Адрес API не может быть пустым.")"
-      continue
-    fi
-    if valid_ipv4_address "${API_HOST}" || ! valid_api_host "${API_HOST}"; then
-      warn "$(ui_text "Invalid server name. Enter an FQDN; IPv4 addresses are not accepted here." "Некорректное имя сервера. Введите FQDN; IP-адрес здесь не принимается.")"
-      API_HOST=""
-    fi
-  done
 
   read_tty leave_login "$(ui_text "Enter domain administrator login:" "Введите логин администратора домена:")"
   read_secret_tty leave_password "$(ui_text "Enter domain administrator password:" "Введите пароль администратора домена:")"
 
   [[ -n "$leave_login" && -n "$leave_password" ]] || die "Login and password must be filled"
 
-  log "Checking API host address: ${API_HOST}"
-  while ! api_host_resolution_ok "${API_HOST}"; do
-    warn "$(ui_text "DNS resolution failed: ${API_HOST}" "Не удалось разрешить имя через DNS: ${API_HOST}")"
-    read_tty dns_input "$(ui_text "Enter DNS server IP address:" "Введите IP-адрес DNS-сервера:")"
-    dns_servers="$(normalize_dns_servers "${dns_input}" 2>/dev/null || true)"
-    if [[ -z "${dns_servers}" ]]; then
-      warn "$(ui_text "Invalid DNS server address." "Некорректный адрес DNS-сервера.")"
-      continue
-    fi
-    md_set_resolv_first "${dns_servers}" || {
-      warn "$(ui_text "Failed to configure DNS servers." "Не удалось настроить DNS-серверы.")"
-      continue
-    }
-    log "DNS servers configured: $(dns_servers_csv "${dns_servers}")"
-  done
+  log "Checking API address: ${API_ADDRESS}"
+  api_host_resolution_ok "$API_ADDRESS" \
+    || die "$(ui_text "DNS resolution failed: ${API_ADDRESS}" "Не удалось разрешить имя через DNS: ${API_ADDRESS}")"
 
   install_md_server_certificate
 
@@ -355,9 +336,14 @@ rollback_local_changes() {
 }
 
 on_join_error() {
-  local code=$?
+  local code="$1"
+  local source_file="${2:-unknown}"
+  local function_name="${3:-main}"
+  local line="${4:-unknown}"
+  local command="${5:-unknown}"
 
   trap - ERR INT TERM
+  report_command_failure "$code" "$source_file" "$function_name" "$line" "$command"
   MD_JOIN_ROLLBACK_ACTIVE=0
 
   rollback_local_changes "$code"

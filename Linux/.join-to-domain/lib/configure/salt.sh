@@ -13,7 +13,7 @@ api_delete_salt_minion_key() {
     curl -sS -w "\n%{http_code}" \
       --connect-timeout "${API_CONNECT_TIMEOUT}" \
       --max-time "${API_MAX_TIME}" \
-      -X DELETE "https://${API_HOST}/api/salt/minion/${minion_id}" \
+      -X DELETE "https://${API_ADDRESS}/api/salt/minion/${minion_id}" \
       -H "Cookie: id=${cookie}" \
       -H 'accept: application/json' 2>&1
   )" || {
@@ -88,7 +88,8 @@ delete_salt_minion_key_on_leave() {
     return 0
   fi
 
-  warn "Deleting Salt key on master for minion id: ${guid}"
+  info "$(ui_text "Deleting Salt key ${guid} from the master" "Удаление ключа Salt ${guid} с мастера")"
+  log "Deleting Salt key on master for minion id: ${guid}"
   api_delete_salt_minion_key "${access_token}" "${guid}"
 }
 
@@ -208,8 +209,19 @@ build_salt_master_fqdns() {
 
   SALT_MASTER_FQDNS=()
 
-  [[ -n "$raw_nodes" ]] \
-    || die "MD_NODES is missing in ${JOIN_TO_DOMAIN_ENV_FILE:-the join environment file}"
+  if [[ -z "$raw_nodes" ]]; then
+    # Legacy and current single-node join environments do not publish
+    # MD_NODES.  Preserve the established single-node Salt DNS name instead
+    # of aborting immediately after controller discovery.
+    fqdn="salt.${DOMAIN}"
+    valid_join_domain "$fqdn" \
+      || die "Invalid fallback Salt master FQDN: ${fqdn}"
+    SALT_MASTER_FQDNS=("$fqdn")
+    SALT_MASTER="$fqdn"
+    SALT_MASTERS_DISPLAY="$fqdn"
+    log "MD_NODES is not published; using single-node Salt master fallback: ${fqdn}"
+    return 0
+  fi
 
   IFS=',' read -r -a nodes <<< "$raw_nodes"
   for item in "${nodes[@]}"; do
@@ -255,6 +267,7 @@ build_salt_master_fqdns() {
   SALT_MASTER="${SALT_MASTER_FQDNS[0]}"
   SALT_MASTERS_DISPLAY="$(IFS=,; printf '%s' "${SALT_MASTER_FQDNS[*]}")"
   log "Salt masters from MD_NODES: ${SALT_MASTERS_DISPLAY}"
+  return 0
 }
 
 validate_salt_master_fqdns() {
@@ -358,7 +371,7 @@ prepare_salt_minion_identity() {
       log "Deleting the previous Salt minion id before publishing the new one: ${existing_minion_id}"
       api_delete_salt_minion_key "${access_token}" "${existing_minion_id}"
     else
-      info "Previous Salt minion id is not a UUID (${existing_minion_id}); deletion via the UUID endpoint is not required"
+      log "Previous Salt minion id is not a UUID (${existing_minion_id}); deletion via the UUID endpoint is not required"
       log "Skipped deletion of incompatible legacy Salt minion id: ${existing_minion_id}"
     fi
   fi
@@ -460,6 +473,8 @@ accept_salt_minion_key() {
   local delay=3
   local attempt=1
 
+  info "$(ui_text "Registering Salt key ${guid} on the master" "Регистрация ключа Salt ${guid} на мастере")"
+
   while [[ $attempt -le $retries ]]; do
     log "Attempt ${attempt}/${retries}: accepting Salt minion key"
 
@@ -467,7 +482,7 @@ accept_salt_minion_key() {
       curl -sS -w "\n%{http_code}" \
         --connect-timeout "${SALT_ACCEPT_CONNECT_TIMEOUT}" \
         --max-time "${SALT_ACCEPT_MAX_TIME}" \
-        -X POST "https://${API_HOST}/api/salt/minion" \
+        -X POST "https://${API_ADDRESS}/api/salt/minion" \
         -H 'accept: application/json' \
         -H "Cookie: id=${access_token}" \
         -H 'Content-Type: application/json' \
@@ -556,7 +571,7 @@ configure_salt() {
   refresh_api_token_for_salt
 
   gpo_token="$(
-    curl -sS -X GET "https://${API_HOST}/api/salt/master/key" \
+    curl -sS -X GET "https://${API_ADDRESS}/api/salt/master/key" \
       --connect-timeout "${API_CONNECT_TIMEOUT}" \
       --max-time "${API_MAX_TIME}" \
       -H "Cookie: id=${access_token}" \

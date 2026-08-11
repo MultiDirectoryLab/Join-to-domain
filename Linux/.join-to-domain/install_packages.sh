@@ -49,7 +49,7 @@ source_install_module() {
 
 export JOIN_TO_DOMAIN_INTERNAL_DIR="$SCRIPT_DIR"
 
-. "${SCRIPT_DIR}/lib/i18n.sh"
+. "${SCRIPT_DIR}/lib/translations.sh"
 
 validate_install_modules
 

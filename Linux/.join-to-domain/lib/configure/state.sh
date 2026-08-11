@@ -52,6 +52,19 @@ valid_api_host() {
   valid_ipv4_address "$value" || valid_join_domain "$value"
 }
 
+set_api_address() {
+  local value="$1"
+
+  value="$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]')"
+  valid_api_host "$value" || return 1
+
+  API_ADDRESS="$value"
+  # Compatibility for callers and old environment files that still use
+  # API_HOST.  New code must use API_ADDRESS for transport and
+  # CONTROLLER_FQDN for Kerberos/LDAP identities.
+  API_HOST="$value"
+}
+
 api_host_resolution_ok() {
   local value="$1"
 
@@ -152,9 +165,12 @@ load_join_state() {
   SAVED_REALM=""
   SAVED_LDAP_BASE_DN=""
   SAVED_LDAP_COMPUTER_OU=""
+  SAVED_LDAP_GSSAPI_HOST=""
   SAVED_HOSTNAME=""
   SAVED_FQDN=""
+  SAVED_API_ADDRESS=""
   SAVED_API_HOST=""
+  SAVED_CONTROLLER_FQDN=""
   SAVED_DNS_SERVERS=""
   SAVED_EDITION=""
   SAVED_WITH_SALT=""
@@ -172,7 +188,14 @@ load_join_state() {
   load_join_state_field REALM SAVED_REALM valid_join_realm || true
   load_join_state_field LDAP_BASE_DN SAVED_LDAP_BASE_DN valid_join_ldap_dn || true
   load_join_state_field LDAP_COMPUTER_OU SAVED_LDAP_COMPUTER_OU valid_join_ldap_dn || true
-  load_join_state_field API_HOST SAVED_API_HOST valid_join_domain || true
+  if ! load_join_state_field LDAP_GSSAPI_HOST SAVED_LDAP_GSSAPI_HOST valid_join_domain; then
+    SAVED_LDAP_GSSAPI_HOST="$SAVED_DOMAIN"
+  fi
+  if ! load_join_state_field API_ADDRESS SAVED_API_ADDRESS valid_api_host; then
+    load_join_state_field API_HOST SAVED_API_ADDRESS valid_api_host || true
+  fi
+  SAVED_API_HOST="$SAVED_API_ADDRESS"
+  load_join_state_field CONTROLLER_FQDN SAVED_CONTROLLER_FQDN valid_join_domain || true
   load_join_state_field HOSTNAME SAVED_HOSTNAME valid_hostname || true
   load_join_state_field SALT_MASTER SAVED_SALT_MASTER valid_join_domain || true
   load_join_state_field SALT_MINION_ID SAVED_SALT_MINION_ID || true
@@ -214,7 +237,7 @@ write_join_state_var() {
 }
 
 save_join_env() {
-  local tmp computer_dn joined_at dns_servers backup_dir
+  local tmp computer_dn joined_at dns_servers backup_dir api_address
 
   mkdir -p "$MD_STATE_DIR"
   chmod 700 "$MD_STATE_DIR"
@@ -231,14 +254,22 @@ save_join_env() {
   else
     backup_dir="$MD_BACKUP_DIR"
   fi
+  api_address="${API_ADDRESS:-${API_HOST:-}}"
+  valid_api_host "$api_address" || die "Cannot save join state: API_ADDRESS is invalid"
+  valid_join_domain "${CONTROLLER_FQDN:-}" || die "Cannot save join state: CONTROLLER_FQDN is invalid"
+  valid_join_domain "${LDAP_GSSAPI_HOST:-}" || die "Cannot save join state: LDAP_GSSAPI_HOST is invalid"
 
   {
     write_join_state_var DOMAIN "${DOMAIN}"
     write_join_state_var REALM "${REALM}"
     write_join_state_var LDAP_BASE_DN "${LDAP_BASE_DN}"
+    write_join_state_var LDAP_GSSAPI_HOST "${LDAP_GSSAPI_HOST}"
     write_join_state_var HOSTNAME "${HOSTNAME}"
     write_join_state_var FQDN "${FQDN}"
-    write_join_state_var API_HOST "${API_HOST}"
+    write_join_state_var API_ADDRESS "${api_address}"
+    write_join_state_var CONTROLLER_FQDN "${CONTROLLER_FQDN}"
+    # Keep the legacy key so older cleanup/leave versions can read new state.
+    write_join_state_var API_HOST "${api_address}"
     write_join_state_var DNS_SERVERS "${dns_servers}"
     write_join_state_var EDITION "${EDITION}"
     write_join_state_var WITH_SALT "${WITH_SALT}"
