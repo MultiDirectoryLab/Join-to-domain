@@ -97,6 +97,58 @@ prompt_change_hostname() {
   done
 }
 
+select_rejoin_hostname() {
+  local current preferred candidate
+
+  current="$(hostname -s | tr '[:upper:]' '[:lower:]')"
+  EXISTING_COMPUTER_FOUND=0
+
+  preferred="${SAVED_HOSTNAME:-$current}"
+  preferred="$(printf '%s' "$preferred" | tr '[:upper:]' '[:lower:]')"
+  if ! valid_hostname "$preferred"; then
+    if valid_hostname "$current"; then
+      preferred="$current"
+    else
+      die "$(ui_text "Rejoin cannot determine a valid computer name from join state or the current hostname" "Не удалось определить допустимое имя компьютера для Rejoin из состояния Join или текущего hostname")"
+    fi
+  fi
+
+  HOSTNAME="$preferred"
+  FQDN="${HOSTNAME}.${DOMAIN}"
+  info "$(ui_text "Using computer name: ${HOSTNAME}" "Используется имя компьютера: ${HOSTNAME}")"
+  info "$(ui_text "Rejoin: searching LDAP for computer ${HOSTNAME}" "Повторное присоединение: поиск компьютера ${HOSTNAME} в LDAP")"
+
+  if [[ -n "${SAVED_COMPUTER_DN:-}" ]] && lookup_computer_by_dn "$SAVED_COMPUTER_DN"; then
+    use_computer_lookup_result
+  elif lookup_computer_by_name "$preferred"; then
+    use_computer_lookup_result
+  elif [[ "$preferred" != "$current" ]] && valid_hostname "$current" \
+      && lookup_computer_by_name "$current"; then
+    use_computer_lookup_result
+  fi
+
+  if [[ "${EXISTING_COMPUTER_FOUND:-0}" == "1" ]]; then
+    candidate="${COMPUTER_LOOKUP_CN:-$preferred}"
+    candidate="$(printf '%s' "$candidate" | tr '[:upper:]' '[:lower:]')"
+    valid_hostname "$candidate" \
+      || die "$(ui_text "The existing LDAP computer has an invalid cn: ${candidate}" "У существующего объекта компьютера в LDAP некорректный cn: ${candidate}")"
+    if [[ "$candidate" != "$current" ]]; then
+      apply_hostname "$candidate"
+    else
+      HOSTNAME="$current"
+      FQDN="${HOSTNAME}.${DOMAIN}"
+    fi
+    info "$(ui_text "Existing computer found; hostname prompt skipped: ${HOSTNAME}" "Существующий компьютер найден; запрос имени пропущен: ${HOSTNAME}")"
+    log "Rejoin will reuse exact computer DN: ${COMPUTER_DN}"
+    return 0
+  fi
+
+  if [[ "$preferred" != "$current" ]]; then
+    apply_hostname "$preferred"
+  fi
+  info "$(ui_text "No existing computer object was found; the known hostname will be used: ${HOSTNAME}" "Существующий объект компьютера не найден; будет использовано известное имя: ${HOSTNAME}")"
+}
+
 prompt_edition() {
   local choice default_choice default_label
 
@@ -182,7 +234,16 @@ configure_dns_systemd_resolved() {
   local resolv_target=""
 
   have_cmd systemctl || return 1
-  systemctl list-unit-files systemd-resolved.service >/dev/null 2>&1 || return 1
+  systemctl is-active --quiet systemd-resolved.service 2>/dev/null || return 1
+
+  # An installed/running resolved is not necessarily the system resolver.  Only
+  # use it when resolv.conf is actually connected to one of its managed files.
+  [[ -L /etc/resolv.conf ]] || return 1
+  resolv_target="$(readlink -f /etc/resolv.conf 2>/dev/null || true)"
+  case "$resolv_target" in
+    /run/systemd/resolve/resolv.conf|/run/systemd/resolve/stub-resolv.conf) ;;
+    *) return 1 ;;
+  esac
 
   mkdir -p "$resolved_dir"
   md_backup_once "$resolved_file"
@@ -195,24 +256,8 @@ EOF
   chmod 0644 "$resolved_file"
   md_track "$resolved_file"
 
-  systemctl enable systemd-resolved.service >/dev/null 2>&1 || true
-  systemctl restart systemd-resolved.service || true
-
-  if [[ -e /run/systemd/resolve/resolv.conf ]]; then
-    resolv_target="/run/systemd/resolve/resolv.conf"
-  elif [[ -e /run/systemd/resolve/stub-resolv.conf ]]; then
-    resolv_target="/run/systemd/resolve/stub-resolv.conf"
-  fi
-
-  if [[ -n "$resolv_target" ]]; then
-    if [[ -L /etc/resolv.conf ]]; then
-      log "resolv.conf is a symlink; direct replacement skipped"
-    else
-      warn "/etc/resolv.conf is not a symlink; systemd-resolved was configured without replacing the file"
-    fi
-  else
-    warn "systemd-resolved resolv.conf target not found; /etc/resolv.conf symlink was not changed"
-  fi
+  systemctl restart systemd-resolved.service || return 1
+  log "Resolver backend: systemd-resolved (${resolv_target})"
 
   log "Persistent DNS configured via systemd-resolved: ${ns}"
   return 0
@@ -223,7 +268,7 @@ configure_dns_networkmanager() {
   local nm_dns="$1"
   local iface conn_uuid previous_dns previous_ignore_auto_dns
   local previous_dns_priority previous_ipv6_ignore_auto_dns
-  local applied_dns applied_ignore_auto_dns
+  local applied_dns applied_ignore_auto_dns attempt
 
   have_cmd nmcli || return 1
   LC_ALL=C nmcli -t -f RUNNING general 2>/dev/null | grep -qx 'running' || return 1
@@ -261,7 +306,9 @@ configure_dns_networkmanager() {
     ipv6.ignore-auto-dns yes \
     || return 1
 
-  LC_ALL=C nmcli connection up uuid "$conn_uuid" >/dev/null 2>&1 || return 1
+  if ! LC_ALL=C nmcli device reapply "$iface" >/dev/null 2>&1; then
+    LC_ALL=C nmcli connection up uuid "$conn_uuid" >/dev/null 2>&1 || return 1
+  fi
 
   applied_ignore_auto_dns="$(LC_ALL=C nmcli -g ipv4.ignore-auto-dns connection show uuid "$conn_uuid" 2>/dev/null | head -n1)"
   [[ "$applied_ignore_auto_dns" == "yes" ]] || {
@@ -269,8 +316,17 @@ configure_dns_networkmanager() {
     return 1
   }
 
-  applied_dns="$(LC_ALL=C nmcli -g IP4.DNS device show "$iface" 2>/dev/null | paste -sd' ' -)"
-  log "Active NetworkManager DNS on ${iface}: ${applied_dns:-not reported}"
+  for attempt in 1 2 3 4 5; do
+    applied_dns="$(LC_ALL=C nmcli -g IP4.DNS device show "$iface" 2>/dev/null | paste -sd' ' -)"
+    log "NetworkManager DNS readiness ${attempt}/5 on ${iface}: ${applied_dns:-not reported}"
+    dns_server_lists_match "$ns" "$applied_dns" && break
+    (( attempt < 5 )) && sleep 1
+  done
+  dns_server_lists_match "$ns" "$applied_dns" || {
+    warn "NetworkManager effective DNS does not contain all requested servers on ${iface}"
+    log_dns_diagnostics "$ns" "$iface" "$conn_uuid"
+    return 1
+  }
 
   if have_cmd resolvectl; then
     resolvectl flush-caches >/dev/null 2>&1 || true
@@ -315,7 +371,10 @@ restore_networkmanager_dns_state() {
       return 1
     }
 
-  LC_ALL=C nmcli connection up uuid "$CONNECTION_UUID" >/dev/null 2>&1 || true
+  LC_ALL=C nmcli connection up uuid "$CONNECTION_UUID" >/dev/null 2>&1 || {
+    warn "Failed to activate restored NetworkManager DNS state for ${CONNECTION_UUID}"
+    return 1
+  }
   rm -f "$MD_NM_DNS_STATE"
   log "Restored NetworkManager DNS state for connection ${CONNECTION_UUID}"
   info "$(ui_text "Original NetworkManager DNS settings were restored" "Исходные настройки DNS NetworkManager восстановлены")"
@@ -368,11 +427,13 @@ configure_dns_static_resolv_conf() {
 md_set_resolv_first() {
   local ns="$1"
 
-  if configure_dns_systemd_resolved "$ns"; then
+  # NetworkManager owns the active connection on the common Astra setup, even
+  # when it delegates lookups to systemd-resolved.  Configure that owner first.
+  if configure_dns_networkmanager "$ns"; then
     return 0
   fi
 
-  if configure_dns_networkmanager "$ns"; then
+  if configure_dns_systemd_resolved "$ns"; then
     return 0
   fi
 
@@ -411,7 +472,9 @@ normalize_dns_servers() {
   [[ "$cleaned" != *, ]] || return 1
   [[ "$cleaned" != ,* ]] || return 1
 
-  IFS=',' read -r -a parts <<< "$cleaned"
+  # Accept the interactive CSV form and the legacy space-separated state form.
+  cleaned="${cleaned//,/ }"
+  read -r -a parts <<< "$cleaned"
   [[ "${#parts[@]}" -ge 1 && "${#parts[@]}" -le "$MAX_DNS_SERVERS" ]] || return 1
 
   for item in "${parts[@]}"; do
@@ -429,6 +492,75 @@ dns_servers_csv() {
   local ns="$1"
 
   printf '%s\n' "${ns// /,}"
+}
+
+dns_server_lists_match() {
+  local requested="$1" effective="$2" server
+
+  for server in $requested; do
+    [[ " $effective " == *" $server "* ]] || return 1
+  done
+}
+
+log_dns_diagnostics() {
+  local requested="${1:-${MD_DNS_SERVER:-}}"
+  local iface="${2:-$(detect_default_iface)}"
+  local conn_uuid="${3:-}"
+
+  log "Requested DNS servers: ${requested:-not configured}"
+  log "Active NetworkManager interface: ${iface:-not detected}"
+  [[ -n "$conn_uuid" ]] && log "Active NetworkManager connection UUID: ${conn_uuid}"
+  if have_cmd nmcli && [[ -n "$iface" ]]; then
+    log "NetworkManager effective DNS: $(LC_ALL=C nmcli -g IP4.DNS device show "$iface" 2>/dev/null | paste -sd' ' -)"
+  fi
+  if have_cmd resolvectl; then
+    log "resolvectl DNS: $(resolvectl dns "$iface" 2>/dev/null | tr '\n' ' ')"
+  fi
+  log "/etc/resolv.conf target: $(readlink -f /etc/resolv.conf 2>/dev/null || printf '%s' /etc/resolv.conf)"
+  while IFS= read -r line; do log "/etc/resolv.conf: ${line}"; done < /etc/resolv.conf
+}
+
+log_direct_dns_queries() {
+  local fqdn="$1" server result
+
+  for server in ${MD_DNS_SERVER:-}; do
+    if have_cmd dig; then
+      result="$(dig +time=2 +tries=1 +short @"$server" "$fqdn" A 2>/dev/null | paste -sd, -)"
+      log "Direct DNS query ${server} for ${fqdn}: ${result:-no answer}"
+    elif have_cmd nslookup; then
+      result="$(nslookup "$fqdn" "$server" 2>/dev/null | awk '/^Address: / {print $2}' | paste -sd, -)"
+      log "Direct DNS query ${server} for ${fqdn}: ${result:-no answer}"
+    fi
+  done
+}
+
+show_dns_failure_summary() {
+  local iface configured
+
+  iface="$(detect_default_iface)"
+  configured="not configured"
+  [[ -n "${MD_DNS_SERVER:-}" ]] && configured="$(dns_servers_csv "$MD_DNS_SERVER")"
+  info "$(ui_text "Configured DNS servers: ${configured}" "Настроенные DNS-серверы: ${configured}")"
+  info "$(ui_text "Active NetworkManager interface: ${iface:-not detected}" "Активный интерфейс NetworkManager: ${iface:-не определён}")"
+  info "$(ui_text "See the detailed resolver diagnostics in the log." "Подробная диагностика резолвера записана в журнал.")"
+}
+
+wait_for_dns_resolution() {
+  local fqdn="$1" attempt address
+
+  for attempt in 1 2 3 4 5; do
+    address="$(getent ahostsv4 "$fqdn" 2>/dev/null | awk 'NR == 1 {print $1}')"
+    if [[ -n "$address" ]]; then
+      log "DNS resolution succeeded on attempt ${attempt}/5: ${fqdn} -> ${address}"
+      return 0
+    fi
+    log "DNS resolution pending ${attempt}/5: ${fqdn}"
+    (( attempt < 5 )) && sleep 1
+  done
+
+  log_dns_diagnostics
+  log_direct_dns_queries "$fqdn"
+  return 1
 }
 
 prompt_configure_dns() {

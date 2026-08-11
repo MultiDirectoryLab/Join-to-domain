@@ -60,7 +60,7 @@ api_host_resolution_ok() {
     return 0
   fi
 
-  getent hosts "$value" >/dev/null
+  wait_for_dns_resolution "$value"
 }
 
 valid_join_realm() {
@@ -214,7 +214,7 @@ write_join_state_var() {
 }
 
 save_join_env() {
-  local tmp computer_dn joined_at dns_servers
+  local tmp computer_dn joined_at dns_servers backup_dir
 
   mkdir -p "$MD_STATE_DIR"
   chmod 700 "$MD_STATE_DIR"
@@ -222,7 +222,15 @@ save_join_env() {
   tmp="$(mktemp "${MD_STATE_DIR}/join.env.tmp.XXXXXX")"
   joined_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date '+%Y-%m-%dT%H:%M:%SZ')"
   computer_dn="${COMPUTER_DN:-cn=${HOSTNAME},${LDAP_COMPUTER_OU}}"
-  dns_servers="${MD_DNS_SERVER:-}"
+  dns_servers=""
+  if [[ -n "${MD_DNS_SERVER:-}" ]]; then
+    dns_servers="$(dns_servers_csv "$(normalize_dns_servers "$MD_DNS_SERVER")")"
+  fi
+  if [[ "${JOIN_STATE_BACKUP_DIR+x}" == "x" ]]; then
+    backup_dir="$JOIN_STATE_BACKUP_DIR"
+  else
+    backup_dir="$MD_BACKUP_DIR"
+  fi
 
   {
     write_join_state_var DOMAIN "${DOMAIN}"
@@ -238,7 +246,7 @@ save_join_env() {
     write_join_state_var COMPUTER_DN "${computer_dn}"
     write_join_state_var SALT_MASTER "${SALT_MASTER:-}"
     write_join_state_var SALT_MINION_ID "${SALT_MINION_ID:-}"
-    write_join_state_var BACKUP_DIR "${MD_BACKUP_DIR}"
+    write_join_state_var BACKUP_DIR "${backup_dir}"
     write_join_state_var JOINED_AT "${joined_at}"
   } > "$tmp"
 

@@ -35,7 +35,7 @@ api_delete_salt_minion_key() {
 }
 
 delete_salt_minion_key_on_leave() {
-  local guid lookup_resp
+  local guid lookup_resp lookup_base lookup_scope lookup_filter
 
   [[ "${WITH_SALT:-0}" -eq 1 ]] || {
     log "Community edition: Salt key cleanup skipped"
@@ -50,14 +50,23 @@ delete_salt_minion_key_on_leave() {
   guid="${SALT_MINION_ID:-}"
 
   if [[ -z "$guid" ]]; then
-    [[ -n "${LDAP_COMPUTER_OU:-}" && -n "${HOSTNAME:-}" ]] || {
+    [[ -n "${COMPUTER_DN:-}" || ( -n "${LDAP_BASE_DN:-}" && -n "${HOSTNAME:-}" ) ]] || {
       warn "Computer LDAP path is unknown, Salt key cleanup skipped"
       return 0
     }
 
     log "Getting Salt minion id from computer objectGUID"
+    if [[ -n "${COMPUTER_DN:-}" ]]; then
+      lookup_base="$COMPUTER_DN"
+      lookup_scope=0
+      lookup_filter='(objectClass=computer)'
+    else
+      lookup_base="$LDAP_BASE_DN"
+      lookup_scope=2
+      lookup_filter="(&(objectClass=computer)(cn=${HOSTNAME}))"
+    fi
     lookup_resp="$(
-      api_search "${access_token}" "${LDAP_COMPUTER_OU}" 2 "(&(objectClass=*)(cn=${HOSTNAME}))" "[\"objectGUID\"]"
+      api_search "${access_token}" "$lookup_base" "$lookup_scope" "$lookup_filter" "[\"objectGUID\"]"
     )" || {
       warn "Failed to get computer objectGUID, Salt key cleanup skipped"
       return 0
@@ -214,15 +223,21 @@ prepare_salt_minion_identity() {
 
   if [[ -f /etc/salt/minion_id ]]; then
     existing_minion_id="$(tr -d '\r\n' < /etc/salt/minion_id 2>/dev/null || true)"
-    if [[ -n "$existing_minion_id" && "$existing_minion_id" != "$guid" ]]; then
-      info "$(ui_text "Updating Salt minion id from ${existing_minion_id} to ${guid}; keeping the existing minion key pair" "Идентификатор Salt minion меняется с ${existing_minion_id} на ${guid}; существующая пара ключей сохраняется")"
-      if [[ "$existing_minion_id" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$ ]]; then
-        log "Deleting the previous Salt minion id before publishing the new one: ${existing_minion_id}"
-        api_delete_salt_minion_key "${access_token}" "${existing_minion_id}"
-      else
-        info "Previous Salt minion id is not a UUID (${existing_minion_id}); deletion via the UUID endpoint is not required"
-        log "Skipped deletion of incompatible legacy Salt minion id: ${existing_minion_id}"
-      fi
+  elif [[ -n "${SALT_MINION_ID:-}" ]]; then
+    existing_minion_id="$SALT_MINION_ID"
+  fi
+
+  if [[ -n "$existing_minion_id" && "$existing_minion_id" == "$guid" ]]; then
+    info "$(ui_text "The computer objectGUID is unchanged; reusing the existing Salt minion identity" "objectGUID компьютера не изменился; используется существующая идентичность Salt minion")"
+  elif [[ -n "$existing_minion_id" ]]; then
+    info "$(ui_text "The computer identifier changed; updating the Salt minion identity" "Идентификатор компьютера изменился; обновляется идентичность Salt minion")"
+    log "Salt minion id changes from ${existing_minion_id} to ${guid}; keeping the existing minion key pair"
+    if [[ "$existing_minion_id" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$ ]]; then
+      log "Deleting the previous Salt minion id before publishing the new one: ${existing_minion_id}"
+      api_delete_salt_minion_key "${access_token}" "${existing_minion_id}"
+    else
+      info "Previous Salt minion id is not a UUID (${existing_minion_id}); deletion via the UUID endpoint is not required"
+      log "Skipped deletion of incompatible legacy Salt minion id: ${existing_minion_id}"
     fi
   fi
 
@@ -411,7 +426,7 @@ configure_salt() {
     return 0
   }
 
-  local gpo_token guid
+  local gpo_token guid guid_lookup_base guid_lookup_scope guid_lookup_filter
 
   SALT_MASTER="salt.${DOMAIN}"
 
@@ -435,8 +450,17 @@ configure_salt() {
   [[ -n "${gpo_token}" ]] || die "Failed to get Salt master_finger"
 
   log "Getting computer objectGUID"
+  if [[ -n "${COMPUTER_DN:-}" ]]; then
+    guid_lookup_base="$COMPUTER_DN"
+    guid_lookup_scope=0
+    guid_lookup_filter='(objectClass=computer)'
+  else
+    guid_lookup_base="$LDAP_BASE_DN"
+    guid_lookup_scope=2
+    guid_lookup_filter="(&(objectClass=computer)(cn=${HOSTNAME}))"
+  fi
   guid="$(
-    api_search "${access_token}" "${LDAP_COMPUTER_OU}" 2 "(&(objectClass=*)(cn=${HOSTNAME}))" "[\"objectGUID\"]" \
+    api_search "${access_token}" "$guid_lookup_base" "$guid_lookup_scope" "$guid_lookup_filter" "[\"objectGUID\"]" \
       | jq -r '.search_result[0].partial_attributes[]? | select(.type=="objectGUID") | .vals[0] // empty'
   )"
 

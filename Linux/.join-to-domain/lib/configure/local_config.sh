@@ -361,34 +361,87 @@ install_static_configs() {
   fi
 }
 
+reset_computer_lookup() {
+  COMPUTER_LOOKUP_DN=""
+  COMPUTER_LOOKUP_CN=""
+  COMPUTER_LOOKUP_UAC=""
+  COMPUTER_LOOKUP_GUID=""
+}
+
+parse_computer_lookup_response() {
+  local response="$1" count
+
+  count="$(printf '%s' "$response" | jq -r '[.search_result[]? | select(.object_name != null)] | length' 2>/dev/null)" \
+    || die "$(ui_text "Invalid computer search response from the directory" "Каталог вернул некорректный ответ при поиске компьютера")"
+  [[ "$count" =~ ^[0-9]+$ ]] \
+    || die "$(ui_text "Invalid computer search response from the directory" "Каталог вернул некорректный ответ при поиске компьютера")"
+
+  if (( count > 1 )); then
+    log "Ambiguous computer search returned ${count} objects"
+    printf '%s' "$response" | jq -r '.search_result[]?.object_name // empty' 2>/dev/null \
+      | while IFS= read -r dn; do log "Ambiguous computer candidate: ${dn}"; done
+    die "$(ui_text "Several matching computer objects were found in LDAP. No changes were made; resolve the duplicate objects and retry." "В LDAP найдено несколько подходящих объектов компьютера. Изменения не внесены; устраните дубликаты и повторите попытку.")"
+  fi
+
+  (( count == 1 )) || return 1
+  COMPUTER_LOOKUP_DN="$(printf '%s' "$response" | jq -r '.search_result[0].object_name // empty')"
+  COMPUTER_LOOKUP_CN="$(printf '%s' "$response" | jq -r '.search_result[0].partial_attributes[]? | select((.type | ascii_downcase)=="cn") | .vals[0] // empty' 2>/dev/null || true)"
+  COMPUTER_LOOKUP_UAC="$(printf '%s' "$response" | jq -r '.search_result[0].partial_attributes[]? | select((.type | ascii_downcase)=="useraccountcontrol") | .vals[0] // empty' 2>/dev/null || true)"
+  COMPUTER_LOOKUP_GUID="$(printf '%s' "$response" | jq -r '.search_result[0].partial_attributes[]? | select((.type | ascii_downcase)=="objectguid") | .vals[0] // empty' 2>/dev/null || true)"
+  [[ -n "$COMPUTER_LOOKUP_DN" ]]
+}
+
+lookup_computer_by_dn() {
+  local object_dn="$1" response
+
+  reset_computer_lookup
+  response="$(api_search "${access_token}" "$object_dn" 0 '(objectClass=computer)' '["cn","objectGUID","userAccountControl"]' 2)" \
+    || die "$(ui_text "Failed to search for the saved computer object in LDAP" "Не удалось найти сохранённый объект компьютера в LDAP")"
+  parse_computer_lookup_response "$response"
+}
+
+lookup_computer_by_name() {
+  local computer_name="$1" computer_fqdn response filter
+
+  reset_computer_lookup
+  valid_hostname "$computer_name" \
+    || die "$(ui_text "Invalid computer name used for LDAP search: ${computer_name}" "Для поиска в LDAP указано некорректное имя компьютера: ${computer_name}")"
+  [[ -n "${LDAP_BASE_DN:-}" ]] \
+    || die "$(ui_text "LDAP domain base is unavailable" "Не определена корневая запись домена LDAP")"
+
+  computer_fqdn="${computer_name}.${DOMAIN}"
+  filter="(&(objectClass=computer)(|(cn=${computer_name})(sAMAccountName=${computer_name})(sAMAccountName=${computer_name}\$)(servicePrincipalName=host/${computer_fqdn})))"
+  response="$(api_search "${access_token}" "${LDAP_BASE_DN}" 2 "$filter" '["cn","objectGUID","userAccountControl"]' 10)" \
+    || die "$(ui_text "Failed to search for computer ${computer_name} in LDAP" "Не удалось выполнить поиск компьютера ${computer_name} в LDAP")"
+  parse_computer_lookup_response "$response"
+}
+
+use_computer_lookup_result() {
+  COMPUTER_DN="$COMPUTER_LOOKUP_DN"
+  EXISTING_COMPUTER_UAC="$COMPUTER_LOOKUP_UAC"
+  EXISTING_COMPUTER_GUID="$COMPUTER_LOOKUP_GUID"
+  EXISTING_COMPUTER_FOUND=1
+}
+
 create_computer_object_if_needed() {
-  local computer_dn exists_dn exists_uac search_resp add_resp add_http add_body
+  local computer_dn add_resp add_http add_body
 
   computer_dn="cn=${HOSTNAME},${LDAP_COMPUTER_OU}"
-  COMPUTER_DN="$computer_dn"
 
-  log "Checking whether computer cn=${HOSTNAME} exists"
+  if [[ "${EXISTING_COMPUTER_FOUND:-0}" != "1" ]]; then
+    log "Searching the whole domain for computer ${HOSTNAME}"
+    if lookup_computer_by_name "$HOSTNAME"; then
+      use_computer_lookup_result
+    fi
+  fi
 
-  search_resp="$(
-    api_search "${access_token}" "${LDAP_COMPUTER_OU}" 2 "(&(objectClass=computer)(cn=${HOSTNAME}))" "[\"cn\",\"userAccountControl\"]"
-  )" || die "Failed to check whether computer object exists in LDAP"
-
-  exists_dn="$(
-    printf '%s' "$search_resp" \
-      | jq -r '.search_result[0].object_name // empty' 2>/dev/null || true
-  )"
-  exists_uac="$(
-    printf '%s' "$search_resp" \
-      | jq -r '.search_result[0].partial_attributes[]? | select(.type=="userAccountControl") | .vals[0] // empty' 2>/dev/null || true
-  )"
-
-  if [[ -n "${exists_dn}" ]]; then
-    info "Computer already exists in LDAP, creation skipped"
-    COMPUTER_DN="$exists_dn"
-    enable_computer_account_if_disabled "${exists_dn}" "${exists_uac}"
+  if [[ "${EXISTING_COMPUTER_FOUND:-0}" == "1" ]]; then
+    info "$(ui_text "Existing computer object found and will be reused: ${COMPUTER_DN}" "Найден существующий объект компьютера, он будет использован повторно: ${COMPUTER_DN}")"
+    enable_computer_account_if_disabled "${COMPUTER_DN}" "${EXISTING_COMPUTER_UAC:-}"
     return 0
   fi
 
+  COMPUTER_DN="$computer_dn"
   log "Creating computer object: ${computer_dn}"
 
   add_resp="$(

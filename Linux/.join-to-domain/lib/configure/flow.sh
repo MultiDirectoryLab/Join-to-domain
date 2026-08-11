@@ -1,5 +1,54 @@
+refresh_domain_membership() {
+  local mode="${1:-normal}"
+  local update_parsec="${2:-1}"
+
+  info "$(ui_text "Configuring computer account" "Настройка учётной записи компьютера")"
+  create_computer_object_if_needed
+  ok "$(ui_text "Computer account ready" "Учётная запись компьютера готова")"
+
+  if [[ "$mode" == "rejoin" ]]; then
+    info "$(ui_text "Refreshing Kerberos keytab" "Обновление Kerberos keytab")"
+  else
+    info "$(ui_text "Configuring Kerberos" "Настройка Kerberos")"
+  fi
+  log "Getting a fresh keytab (${mode})"
+  api_ktadd_download "${access_token}" "host/${HOSTNAME}" "host/${FQDN}"
+  if [[ "$mode" == "rejoin" ]]; then
+    ok "$(ui_text "New Kerberos keytab installed" "Новый Kerberos keytab установлен")"
+  fi
+
+  validate_keytab
+  ok "$(ui_text "Kerberos authentication succeeded" "Аутентификация Kerberos выполнена")"
+  info "$(ui_text "Checking LDAP GSSAPI authentication" "Проверка аутентификации LDAP GSSAPI")"
+  validate_ldap_gssapi_auth
+  ok "$(ui_text "LDAP GSSAPI authentication succeeded" "Аутентификация LDAP GSSAPI выполнена")"
+
+  if [[ "$update_parsec" -eq 1 ]]; then
+    configure_astra_se_parsec_sssd
+  fi
+
+  if [[ "${WITH_SALT:-0}" -eq 1 ]]; then
+    if [[ "$mode" == "rejoin" ]]; then
+      info "$(ui_text "Refreshing Salt minion" "Обновление Salt minion")"
+    else
+      info "$(ui_text "Configuring Salt minion" "Настройка Salt minion")"
+    fi
+  fi
+  configure_salt
+  if [[ "${WITH_SALT:-0}" -eq 1 ]]; then
+    if [[ "$mode" == "rejoin" ]]; then
+      ok "$(ui_text "Salt minion refreshed" "Salt minion обновлён")"
+    else
+      ok "$(ui_text "Salt minion configured" "Salt minion настроен")"
+    fi
+  fi
+
+  start_services
+}
+
 join_domain() {
   local dns_failure_choice
+  local JOIN_MODE="${JOIN_MODE:-normal}"
 
   preflight
   info "$(ui_text "Starting domain join" "Начинается присоединение к домену")"
@@ -47,17 +96,18 @@ join_domain() {
   else
     while true; do
       if [[ -n "${SAVED_API_HOST:-}" ]]; then
-        read_tty API_HOST "$(ui_text "Enter MULTIDIRECTORY server FQDN [${SAVED_API_HOST}]:" "Введите FQDN сервера MULTIDIRECTORY [${SAVED_API_HOST}]:")"
+        read_tty API_HOST "$(ui_text "Enter MULTIDIRECTORY server address (IPv4 or FQDN) [${SAVED_API_HOST}]:" "Введите адрес сервера MULTIDIRECTORY (IPv4 или FQDN) [${SAVED_API_HOST}]:")"
         API_HOST="${API_HOST:-$SAVED_API_HOST}"
       else
-        read_tty API_HOST "$(ui_text "Enter MULTIDIRECTORY server FQDN, for example webadmin.domain.ru:" "Введите FQDN сервера MULTIDIRECTORY, например webadmin.domain.ru:")"
+        read_tty API_HOST "$(ui_text "Enter MULTIDIRECTORY server address (IPv4 or FQDN), for example 10.10.10.10
+         or webadmin.domain.ru:" "Введите адрес сервера MULTIDIRECTORY (IPv4 или FQDN), например 10.10.10.10 или webadmin.domain.ru:")"
       fi
       if [[ -z "${API_HOST}" ]]; then
         warn "$(ui_text "API host must be filled." "Адрес API не может быть пустым.")"
         continue
       fi
-      if valid_ipv4_address "${API_HOST}" || ! valid_join_domain "${API_HOST}"; then
-        warn "$(ui_text "Invalid API host. Enter a server FQDN, for example webadmin.domain.ru." "Некорректный адрес API. Введите FQDN сервера, например webadmin.domain.ru.")"
+      if ! valid_api_host "${API_HOST}"; then
+        warn "$(ui_text "Invalid API host. Enter an IPv4 address or FQDN, for example 10.10.10.10 or webadmin.domain.ru." "Некорректный адрес API. Введите IPv4-адрес или FQDN, например 10.10.10.10 или webadmin.domain.ru.")"
         continue
       fi
       if api_host_resolution_ok "${API_HOST}"; then
@@ -69,6 +119,7 @@ join_domain() {
         break
       else
         warn "$(ui_text "DNS resolution failed for ${API_HOST}. Please check the address." "Не удалось разрешить ${API_HOST} через DNS. Проверьте адрес.")"
+        show_dns_failure_summary
 
         while true; do
           tty_echo "${YELLOW}$(ui_text "What do you want to do?" "Что вы хотите сделать?")${NC}"
@@ -95,6 +146,7 @@ join_domain() {
               fi
 
               warn "$(ui_text "DNS resolution still fails for ${API_HOST}." "${API_HOST} по-прежнему не разрешается через DNS.")"
+              show_dns_failure_summary
               ;;
             3)
               warn "$(ui_text "Domain join cancelled" "Присоединение к домену отменено")"
@@ -131,7 +183,11 @@ join_domain() {
   discover_and_validate_domain
   info "$(ui_text "Domain detected: ${DOMAIN}" "Обнаружен домен: ${DOMAIN}")"
 
-  prompt_change_hostname
+  if [[ "$JOIN_MODE" == "rejoin" ]]; then
+    select_rejoin_hostname
+  else
+    prompt_change_hostname
+  fi
 
   log "DOMAIN=${DOMAIN}"
   log "REALM=${REALM}"
@@ -147,32 +203,10 @@ join_domain() {
   validate_sssd_config
   ok "$(ui_text "System configuration completed" "Настройка системы завершена")"
 
-  info "$(ui_text "Configuring computer account" "Настройка учётной записи компьютера")"
-  create_computer_object_if_needed
-  ok "$(ui_text "Computer account ready" "Учётная запись компьютера готова")"
-
-  info "$(ui_text "Configuring Kerberos" "Настройка Kerberos")"
-  log "Getting keytab"
-  api_ktadd_download "${access_token}" "host/${HOSTNAME}" "host/${FQDN}"
-
-  validate_keytab
-  ok "$(ui_text "Kerberos authentication succeeded" "Аутентификация Kerberos выполнена")"
-  info "$(ui_text "Checking LDAP GSSAPI authentication" "Проверка аутентификации LDAP GSSAPI")"
-  validate_ldap_gssapi_auth
-  ok "$(ui_text "LDAP GSSAPI authentication succeeded" "Аутентификация LDAP GSSAPI выполнена")"
-  configure_astra_se_parsec_sssd
-
-  if [[ "${WITH_SALT}" == "1" ]]; then
-    info "$(ui_text "Configuring Salt minion" "Настройка Salt minion")"
-  fi
-  configure_salt
-  if [[ "${WITH_SALT}" == "1" ]]; then
-    ok "$(ui_text "Salt minion configured" "Salt minion настроен")"
-  fi
+  refresh_domain_membership normal 1
 
   unset PASSWORD
 
-  start_services
   save_join_env
   rm -f "${MD_ROLLBACK_MARKER}" "${MD_PENDING_BACKUP}"
 
@@ -199,7 +233,7 @@ main() {
 
   case "${1:-}" in
     join)
-      join_domain
+      JOIN_MODE=normal join_domain
       ;;
     leave)
       leave_domain

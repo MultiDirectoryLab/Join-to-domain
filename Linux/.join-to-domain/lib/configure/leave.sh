@@ -27,13 +27,15 @@ load_join_env() {
   fi
 }
 
-validate_leave_credentials() {
+validate_directory_credentials() {
   local leave_login leave_password leave_token detected_domain dns_input dns_servers
 
-  load_join_env
+  if [[ "${1:-load-state}" != "state-loaded" ]]; then
+    load_join_env
+  fi
 
-  # TLS certificate validation requires the server FQDN.  Do not use a saved
-  # IPv4 API address during leave; use the saved domain name instead.
+  # TLS certificate validation requires the server FQDN. Do not use a saved
+  # IPv4 API address for authenticated directory operations.
   if valid_ipv4_address "${API_HOST:-}"; then
     API_HOST="${DOMAIN:-}"
   fi
@@ -45,7 +47,7 @@ validate_leave_credentials() {
       continue
     fi
     if valid_ipv4_address "${API_HOST}" || ! valid_api_host "${API_HOST}"; then
-      warn "$(ui_text "Invalid server name. Enter an FQDN; IPv4 addresses are not accepted during leave." "Некорректное имя сервера. Введите FQDN; IP-адрес при выходе из домена не принимается.")"
+      warn "$(ui_text "Invalid server name. Enter an FQDN; IPv4 addresses are not accepted here." "Некорректное имя сервера. Введите FQDN; IP-адрес здесь не принимается.")"
       API_HOST=""
     fi
   done
@@ -101,7 +103,12 @@ validate_leave_credentials() {
 
   unset leave_password
 
-  log "Leave credentials validated"
+  log "Directory administrator credentials validated"
+}
+
+validate_leave_credentials() {
+  validate_directory_credentials
+  log "Credentials approved for explicit domain leave"
 }
 
 start_services() {

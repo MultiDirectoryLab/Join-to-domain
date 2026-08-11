@@ -1,43 +1,13 @@
-resolve_computer_object() {
-  local response filter base successful_search=0
-
-  REMOTE_COMPUTER_DN=""
-  REMOTE_COMPUTER_STATE="unknown"
-
-  if [[ -n "${COMPUTER_DN:-}" ]]; then
-    if response="$(api_search "$access_token" "$COMPUTER_DN" 0 '(objectClass=computer)' '["cn"]' 1 2>/dev/null)"; then
-      successful_search=1
-      REMOTE_COMPUTER_DN="$(printf '%s' "$response" | jq -r '.search_result[0].object_name // empty')"
-    fi
-  fi
-
-  base="${LDAP_BASE_DN:-${LDAP_COMPUTER_OU:-}}"
-  if [[ -z "$REMOTE_COMPUTER_DN" && -n "$base" ]]; then
-    for filter in \
-      "(&(objectClass=computer)(sAMAccountName=${HOSTNAME}\$))" \
-      "(&(objectClass=computer)(sAMAccountName=${HOSTNAME}))" \
-      "(&(objectClass=computer)(cn=${HOSTNAME}))" \
-      "(&(objectClass=computer)(servicePrincipalName=host/${FQDN}))"; do
-      if response="$(api_search "$access_token" "$base" 2 "$filter" '["cn","objectGUID","userAccountControl"]' 1 2>/dev/null)"; then
-        successful_search=1
-        REMOTE_COMPUTER_DN="$(printf '%s' "$response" | jq -r '.search_result[0].object_name // empty')"
-      fi
-      [[ -z "$REMOTE_COMPUTER_DN" ]] || break
-    done
-  fi
-
-  if [[ -n "$REMOTE_COMPUTER_DN" ]]; then
-    REMOTE_COMPUTER_STATE="exists"
-    COMPUTER_DN="$REMOTE_COMPUTER_DN"
-  elif [[ "$successful_search" -eq 1 ]]; then
-    REMOTE_COMPUTER_STATE="missing"
-  fi
-}
-
 existing_domain_configuration_valid() {
   [[ -s /etc/krb5.conf && -s /etc/sssd/sssd.conf ]] || return 1
   grep -Fqi "$REALM" /etc/krb5.conf || return 1
   grep -Fqi "$DOMAIN" /etc/sssd/sssd.conf || return 1
+  if grep -Eq 'ldap_default_bind_dn|ldap_default_authtok|ldap_default_authtok_type|__SSSD_|__BIND_DN__|__PASSWORD__' /etc/sssd/sssd.conf; then
+    return 1
+  fi
+  if have_cmd sssctl; then
+    sssctl config-check >> "$LOG_FILE" 2>&1 || return 1
+  fi
   [[ -n "$HOSTNAME" && -n "$FQDN" && -n "$LDAP_BASE_DN" ]]
 }
 
@@ -49,9 +19,10 @@ classify_prejoin_backup() {
   reference="$(join_state_value BACKUP_DIR 2>/dev/null || true)"
 
   if [[ -z "$reference" ]]; then
-    warn "Existing join state was created without a pre-join backup reference"
+    warn "$(ui_text "Existing join state has no pre-join backup reference" "В состоянии предыдущего Join отсутствует ссылка на исходную резервную копию")"
     return 0
   fi
+  PREJOIN_BACKUP_DIR="$reference"
   case "$reference" in "$MD_BACKUPS_ROOT"/join-*) ;; *) PREJOIN_BACKUP_STATE="corrupted"; return 0 ;; esac
   if ! load_prejoin_backup || ! validate_join_backup; then
     PREJOIN_BACKUP_STATE="corrupted"
@@ -63,17 +34,9 @@ classify_prejoin_backup() {
   info "$(ui_text "Previous join state and pre-join backup loaded" "Состояние предыдущего присоединения и исходная резервная копия загружены")"
 }
 
-require_valid_prejoin_backup() {
-  case "${PREJOIN_BACKUP_STATE:-legacy}" in
-    valid) return 0 ;;
-    legacy) die "Existing join state has no pre-join backup; local recovery rejoin is disabled to preserve a safe future leave" ;;
-    corrupted) die "Existing join state contains an invalid pre-join backup reference. join.env: ${MD_JOIN_ENV}" ;;
-  esac
-}
-
 rollback_recovery_changes() {
   local code="$1"
-  warn "Recovery rejoin failed with exit code ${code}; restoring the pre-rejoin configuration"
+  warn "$(ui_text "Rejoin failed with exit code ${code}; restoring the configuration saved immediately before Rejoin" "Rejoin завершился с кодом ${code}; восстанавливается конфигурация, сохранённая непосредственно перед Rejoin")"
   MD_RESTORE_OPERATION_ONLY=1
   perform_local_rollback_cleanup
   MD_RESTORE_OPERATION_ONLY=0
@@ -82,7 +45,18 @@ rollback_recovery_changes() {
   MD_MANIFEST="$PREJOIN_MANIFEST"
   rm -f "$MD_PENDING_BACKUP" "$MD_ROLLBACK_MARKER"
   unset MD_ROLLBACK_HANDLER
-  ok "Pre-rejoin configuration restored; the original pre-join backup was preserved"
+  ok "$(ui_text "The pre-Rejoin configuration was restored; the original pre-join backup was preserved" "Конфигурация до Rejoin восстановлена; исходная резервная копия до Join сохранена")"
+}
+
+start_rejoin_transaction() {
+  info "$(ui_text "Creating backup of current local configuration" "Создание резервной копии текущей локальной конфигурации")"
+  create_recovery_backup || die "$(ui_text "Failed to create the Rejoin safety backup" "Не удалось создать страховочную резервную копию Rejoin")"
+  ok "$(ui_text "Rejoin safety backup created" "Страховочная резервная копия Rejoin создана")"
+
+  MD_ROLLBACK_HANDLER=rollback_recovery_changes
+  MD_JOIN_ROLLBACK_ACTIVE=1
+  trap on_recovery_rejoin_error ERR
+  trap on_recovery_rejoin_signal INT TERM
 }
 
 on_recovery_rejoin_error() {
@@ -101,93 +75,146 @@ on_recovery_rejoin_signal() {
 }
 
 recovery_rejoin_domain() {
-  require_valid_prejoin_backup
-  existing_domain_configuration_valid \
-    || die "Existing domain configuration is incomplete or does not match the saved domain"
+  local system_config_updated=0
 
-  info "$(ui_text "Existing domain configuration is valid and will be reused" "Существующая доменная конфигурация корректна и будет использована повторно")"
-  info "$(ui_text "Creating backup of current local configuration" "Создание резервной копии текущей локальной конфигурации")"
-  create_recovery_backup || die "Failed to create the recovery rejoin operation backup"
-  ok "$(ui_text "Recovery backup created" "Резервная копия для восстановления создана")"
+  if existing_domain_configuration_valid; then
+    info "$(ui_text "Existing SSSD and Kerberos configuration is current and will be reused" "Существующая конфигурация SSSD и Kerberos актуальна и будет использована повторно")"
+    validate_no_password_based_sssd_auth
+    validate_sssd_config
+  else
+    info "$(ui_text "Domain configuration is incomplete; updating the required system files" "Доменная конфигурация неполна; обновляются необходимые системные файлы")"
+    install_static_configs
+    validate_no_password_based_sssd_auth
+    validate_sssd_config
+    system_config_updated=1
+    ok "$(ui_text "Domain system configuration updated" "Системная конфигурация домена обновлена")"
+  fi
 
-  MD_ROLLBACK_HANDLER=rollback_recovery_changes
-  MD_JOIN_ROLLBACK_ACTIVE=1
-  trap on_recovery_rejoin_error ERR
-  trap on_recovery_rejoin_signal INT TERM
-
-  info "$(ui_text "Recreating computer account" "Повторное создание учётной записи компьютера")"
-  create_computer_object_if_needed
-  ok "$(ui_text "Computer account created" "Учётная запись компьютера создана")"
-
-  info "$(ui_text "Requesting new Kerberos keytab" "Запрос нового Kerberos keytab")"
-  api_ktadd_download "$access_token" "host/${HOSTNAME}" "host/${FQDN}"
-  validate_keytab
-  ok "$(ui_text "Kerberos authentication succeeded" "Аутентификация Kerberos выполнена")"
-  validate_ldap_gssapi_auth
-  ok "$(ui_text "LDAP GSSAPI authentication succeeded" "Аутентификация LDAP GSSAPI выполнена")"
-
-  configure_salt
-  start_services
+  if [[ "${EXISTING_COMPUTER_FOUND:-0}" == "1" ]]; then
+    if [[ "${EXISTING_COMPUTER_UAC:-}" =~ ^[0-9]+$ ]] && (( (EXISTING_COMPUTER_UAC & 2) != 0 )); then
+      info "$(ui_text "Computer account is disabled; enabling it" "Учётная запись компьютера отключена; выполняется включение")"
+    else
+      info "$(ui_text "Computer account was found and is active" "Учётная запись компьютера найдена и активна")"
+    fi
+  else
+    info "$(ui_text "Computer account was not found" "Учётная запись компьютера не найдена")"
+    info "$(ui_text "Creating computer account" "Создание учётной записи компьютера")"
+  fi
+  refresh_domain_membership rejoin "$system_config_updated"
   printf 'COMPLETED_AT=%q\n' "$(date --iso-8601=seconds)" >> "$MD_MANIFEST"
-  MD_BACKUP_DIR="$PREJOIN_BACKUP_DIR"
-  MD_MANIFEST="$PREJOIN_MANIFEST"
+  JOIN_STATE_BACKUP_DIR="$PREJOIN_BACKUP_DIR"
   save_join_env
+  unset JOIN_STATE_BACKUP_DIR
   rm -f "$MD_PENDING_BACKUP" "$MD_ROLLBACK_MARKER"
 
   MD_JOIN_ROLLBACK_ACTIVE=0
   unset MD_ROLLBACK_HANDLER
   trap - ERR INT TERM
   ok "$(ui_text "Computer successfully rejoined the domain" "Компьютер успешно повторно присоединён к домену")"
+  info "$(ui_text "The original pre-join backup was preserved for an explicit Leave" "Исходная резервная копия до Join сохранена для явного выхода из домена")"
+}
+
+infer_rejoin_edition() {
+  if [[ "${SAVED_EDITION:-}" == "enterprise" && "${SAVED_WITH_SALT:-}" == "1" ]]; then
+    EDITION=enterprise
+    WITH_SALT=1
+  elif [[ "${SAVED_EDITION:-}" == "community" && "${SAVED_WITH_SALT:-}" == "0" ]]; then
+    EDITION=community
+    WITH_SALT=0
+  elif [[ -f /etc/salt/minion || -f /etc/salt/minion_id ]]; then
+    EDITION=enterprise
+    WITH_SALT=1
+    log "Enterprise edition inferred from existing Salt configuration"
+  else
+    EDITION=community
+    WITH_SALT=0
+    log "Community edition inferred because no saved edition or Salt configuration exists"
+  fi
+}
+
+prompt_rejoin_api_host() {
+  local entered default_host
+
+  if env_has_key API_HOST; then
+    [[ -n "${API_HOST:-}" ]] || die "API_HOST is empty in environment"
+    valid_join_domain "$API_HOST" \
+      || die "$(ui_text "API_HOST must be a valid server FQDN" "API_HOST должен содержать корректный FQDN сервера")"
+    return 0
+  fi
+
+  default_host="${API_HOST:-${SAVED_API_HOST:-}}"
+  while true; do
+    entered=""
+    if [[ -n "$default_host" ]]; then
+      read_tty entered "$(ui_text "Enter MULTIDIRECTORY server FQDN [${default_host}]:" "Введите FQDN сервера MULTIDIRECTORY [${default_host}]:")"
+      entered="${entered:-$default_host}"
+    else
+      read_tty entered "$(ui_text "Enter MULTIDIRECTORY server FQDN:" "Введите FQDN сервера MULTIDIRECTORY:")"
+    fi
+    entered="$(printf '%s' "$entered" | tr '[:upper:]' '[:lower:]')"
+    if valid_join_domain "$entered"; then
+      API_HOST="$entered"
+      return 0
+    fi
+    warn "$(ui_text "Enter a valid server FQDN" "Введите корректный FQDN сервера")"
+  done
 }
 
 rejoin_domain_configure() {
+  local supplied_api_host=""
+
+  if env_has_key API_HOST; then
+    supplied_api_host="${API_HOST:-}"
+  fi
+
   need_root
   setup_logging
   load_os_release
   detect_domain_state
 
   if [[ "$DETECTED_DOMAIN_STATE" == "not_joined" ]]; then
-    info "$(ui_text "Domain configuration not found; starting normal domain join" "Конфигурация домена не обнаружена; запускается обычное присоединение")"
-    join_domain
+    info "$(ui_text "No previous join was detected; starting the Join engine in Rejoin mode" "Предыдущее присоединение не обнаружено; запускается механизм Join в режиме Rejoin")"
+    JOIN_MODE=rejoin join_domain
     return $?
   fi
 
+  preflight
+
   LOCAL_JOIN_STATE="$DETECTED_DOMAIN_STATE"
   if [[ "$LOCAL_JOIN_STATE" == "managed_join" ]]; then
-    info "$(ui_text "Existing local domain configuration found" "Обнаружена локальная конфигурация домена")"
+    info "$(ui_text "Previous local join configuration detected" "Обнаружена локальная конфигурация предыдущего присоединения")"
   else
     warn "$(ui_text "Partial MultiDirectory configuration detected" "Обнаружена частичная конфигурация MultiDirectory")"
-    info "$(ui_text "Remote computer state must be verified" "Необходимо проверить состояние компьютера в каталоге")"
   fi
+  info "$(ui_text "Rejoin mode started" "Запущен режим Rejoin")"
 
+  load_join_env
+  if env_has_key API_HOST; then
+    API_HOST="$supplied_api_host"
+  fi
+  infer_rejoin_edition
+  validate_files_structure
   classify_prejoin_backup
   case "$PREJOIN_BACKUP_STATE" in
     valid) ;;
-    legacy) warn "$(ui_text "Existing join state has no pre-join backup; only non-destructive LDAP inspection is available" "В существующем состоянии нет исходной резервной копии; доступна только безопасная проверка LDAP")" ;;
-    corrupted) warn "$(ui_text "The pre-join backup reference is corrupted; local changes are disabled" "Ссылка на исходную резервную копию повреждена; локальные изменения запрещены")" ;;
+    legacy) warn "$(ui_text "No original pre-join backup reference is available; Rejoin can continue, but a future Leave cannot restore the original configuration" "Ссылка на исходную резервную копию до Join отсутствует; Rejoin продолжится, но будущий Leave не сможет восстановить исходную конфигурацию")" ;;
+    corrupted) warn "$(ui_text "The original pre-join backup reference is invalid; it will not be replaced by the Rejoin safety backup" "Ссылка на исходную резервную копию до Join некорректна; страховочная копия Rejoin не заменит её")" ;;
   esac
 
-  validate_leave_credentials
+  start_rejoin_transaction
+  prompt_configure_dns
+  if [[ -z "${MD_DNS_SERVER:-}" && -n "${SAVED_DNS_SERVERS:-}" ]]; then
+    MD_DNS_SERVER="$SAVED_DNS_SERVERS"
+    log "Preserving saved DNS servers in the refreshed join state"
+  fi
+  prompt_rejoin_api_host
+  validate_directory_credentials state-loaded
   discover_and_validate_domain
-  if [[ -z "${HOSTNAME:-}" ]]; then
-    HOSTNAME="$(hostname -s | tr '[:upper:]' '[:lower:]')"
-  fi
-  [[ -n "${FQDN:-}" ]] || FQDN="${HOSTNAME}.${DOMAIN}"
-  ok "$(ui_text "Directory administrator authentication succeeded" "Аутентификация администратора каталога выполнена")"
-  resolve_computer_object
-
-  if [[ "$REMOTE_COMPUTER_STATE" == "exists" ]]; then
-    info "$(ui_text "Computer object exists in LDAP" "Учётная запись компьютера найдена в LDAP")"
-    info "$(ui_text "Leaving the domain" "Выполняется выход из домена")"
-    require_valid_prejoin_backup
-    perform_authenticated_leave
-  elif [[ "$REMOTE_COMPUTER_STATE" == "missing" ]]; then
-    warn "$(ui_text "Computer object is missing from LDAP" "Учётная запись компьютера отсутствует в LDAP")"
-    info "$(ui_text "Starting computer membership recovery" "Запускается восстановление членства компьютера в домене")"
-    recovery_rejoin_domain
-  else
-    die "Failed to determine the computer object state in LDAP"
-  fi
+  ok "$(ui_text "Administrator authentication succeeded" "Аутентификация администратора выполнена")"
+  info "$(ui_text "Domain detected: ${DOMAIN}" "Обнаружен домен: ${DOMAIN}")"
+  select_rejoin_hostname
+  info "$(ui_text "Refreshing computer domain membership" "Обновление членства компьютера в домене")"
+  recovery_rejoin_domain
 
   if [[ -n "${MD_EPHEMERAL_CA_BUNDLE:-}" ]]; then
     rm -f "$MD_EPHEMERAL_CA_BUNDLE"
