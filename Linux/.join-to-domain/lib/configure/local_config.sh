@@ -363,15 +363,26 @@ install_static_configs() {
 
 create_computer_object_if_needed() {
   local computer_dn exists_dn exists_uac search_resp add_resp add_http add_body
+  local search_count search_filter
 
   computer_dn="cn=${HOSTNAME},${LDAP_COMPUTER_OU}"
   COMPUTER_DN="$computer_dn"
 
-  log "Checking whether computer cn=${HOSTNAME} exists"
+  log "Checking whether computer ${HOSTNAME} exists in the domain"
 
+  search_filter="(&(objectClass=computer)(|(cn=${HOSTNAME})(sAMAccountName=${HOSTNAME})(sAMAccountName=${HOSTNAME}\$)(servicePrincipalName=host/${FQDN})))"
   search_resp="$(
-    api_search "${access_token}" "${LDAP_COMPUTER_OU}" 2 "(&(objectClass=computer)(cn=${HOSTNAME}))" "[\"cn\",\"userAccountControl\"]"
+    api_search "${access_token}" "${LDAP_BASE_DN}" 2 "$search_filter" '["cn","userAccountControl"]' 10
   )" || die "Failed to check whether computer object exists in LDAP"
+
+  search_count="$(printf '%s' "$search_resp" | jq -r '[.search_result[]? | select(.object_name != null)] | length' 2>/dev/null)" \
+    || die "Invalid computer search response from LDAP"
+  [[ "$search_count" =~ ^[0-9]+$ ]] || die "Invalid computer search response from LDAP"
+  if (( search_count > 1 )); then
+    printf '%s' "$search_resp" | jq -r '.search_result[]?.object_name // empty' 2>/dev/null \
+      | while IFS= read -r candidate_dn; do log "Duplicate computer candidate: ${candidate_dn}"; done
+    die "Several matching computer objects were found in LDAP; resolve duplicates before continuing"
+  fi
 
   exists_dn="$(
     printf '%s' "$search_resp" \

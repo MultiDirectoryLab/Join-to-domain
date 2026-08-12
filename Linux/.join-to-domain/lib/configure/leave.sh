@@ -29,25 +29,32 @@ load_join_env() {
 
 validate_leave_credentials() {
   local leave_login leave_password leave_token detected_domain dns_input dns_servers
+  local supplied_api_host=""
 
-  load_join_env
-
-  # TLS certificate validation requires the server FQDN.  Do not use a saved
-  # IPv4 API address during leave; use the saved domain name instead.
-  if valid_ipv4_address "${API_HOST:-}"; then
-    API_HOST="${DOMAIN:-}"
+  if env_has_key API_HOST; then
+    supplied_api_host="${API_HOST:-}"
+    [[ -n "$supplied_api_host" ]] || die "API_HOST is empty in environment"
   fi
 
-  while [[ -z "${API_HOST:-}" ]]; do
-    read_tty API_HOST "$(ui_text "Enter MULTIDIRECTORY domain/server FQDN:" "Введите FQDN домена/сервера MULTIDIRECTORY:")"
+  if [[ "${1:-load-state}" != "state-loaded" ]]; then
+    load_join_env
+  fi
+  [[ -z "$supplied_api_host" ]] || API_HOST="$supplied_api_host"
+
+  while true; do
+    if [[ -z "${API_HOST:-}" ]]; then
+      read_tty API_HOST "$(ui_text "Enter MULTIDIRECTORY server IPv4 address or FQDN:" "Введите IPv4-адрес или FQDN сервера MULTIDIRECTORY:")"
+    fi
     if [[ -z "${API_HOST}" ]]; then
       warn "$(ui_text "API host must be filled." "Адрес API не может быть пустым.")"
       continue
     fi
-    if valid_ipv4_address "${API_HOST}" || ! valid_api_host "${API_HOST}"; then
-      warn "$(ui_text "Invalid server name. Enter an FQDN; IPv4 addresses are not accepted during leave." "Некорректное имя сервера. Введите FQDN; IP-адрес при выходе из домена не принимается.")"
+    if ! valid_api_host "${API_HOST}"; then
+      warn "$(ui_text "Invalid server address. Enter an IPv4 address or FQDN." "Некорректный адрес сервера. Введите IPv4-адрес или FQDN.")"
       API_HOST=""
+      continue
     fi
+    break
   done
 
   read_tty leave_login "$(ui_text "Enter domain administrator login:" "Введите логин администратора домена:")"
@@ -68,6 +75,7 @@ validate_leave_credentials() {
       warn "$(ui_text "Failed to configure DNS servers." "Не удалось настроить DNS-серверы.")"
       continue
     }
+    MD_DNS_SERVER="$dns_servers"
     log "DNS servers configured: $(dns_servers_csv "${dns_servers}")"
   done
 
@@ -154,8 +162,13 @@ restore_backups() {
   done < <(grep '^FILE_.*_PATH=' "$MD_MANIFEST")
   [[ "$failed" -eq 0 ]] || return 1
 
-  if [[ "${MD_RESTORE_OPERATION_ONLY:-0}" -ne 1 ]]; then
-    restore_networkmanager_dns_state || warn "NetworkManager DNS state was not fully restored"
+  if [[ "${MD_RESTORE_OPERATION_ONLY:-0}" -eq 1 ]]; then
+    if [[ -n "${MD_OPERATION_NM_DNS_STATE:-}" ]]; then
+      restore_networkmanager_dns_state "$MD_OPERATION_NM_DNS_STATE" \
+        || warn "NetworkManager DNS state was not fully restored"
+    fi
+  else
+    restore_networkmanager_dns_state "$MD_NM_DNS_STATE" || warn "NetworkManager DNS state was not fully restored"
     restore_authselect_state || warn "authselect state was not fully restored"
     restore_sssd_socket_state || warn "SSSD socket state was not fully restored"
   fi
@@ -250,6 +263,8 @@ perform_local_rollback_cleanup() {
 }
 
 recover_incomplete_join_state() {
+  local backup_kind
+
   warn "$(ui_text "The previous join did not finish. Completing local rollback before retrying." "Предыдущее присоединение не завершилось. Перед новой попыткой завершается локальный откат.")"
 
   mkdir -p "${MD_STATE_DIR}"
@@ -258,6 +273,23 @@ recover_incomplete_join_state() {
   if ! load_active_backup || ! validate_join_backup; then
     die "Active join backup is missing or corrupted"
   fi
+
+  backup_kind="$(sed -n 's/^BACKUP_KIND=//p' "$MD_MANIFEST" | tail -n1)"
+  case "$backup_kind" in
+    rejoin)
+      warn "$(ui_text "An interrupted Rejoin was found; restoring the configuration from immediately before Rejoin." "Обнаружен прерванный Rejoin; восстанавливается конфигурация непосредственно перед Rejoin.")"
+      MD_RESTORE_OPERATION_ONLY=1
+      perform_local_rollback_cleanup
+      MD_RESTORE_OPERATION_ONLY=0
+      printf 'RESTORED_AT=%q\n' "$(date --iso-8601=seconds)" >> "$MD_MANIFEST"
+      rm -f "$MD_PENDING_BACKUP" "$MD_ROLLBACK_MARKER"
+      MD_OPERATION_NM_DNS_STATE=""
+      ok "$(ui_text "Interrupted Rejoin state was recovered" "Состояние прерванного Rejoin восстановлено")"
+      return 0
+      ;;
+    join) ;;
+    *) die "Active backup has an invalid BACKUP_KIND: ${backup_kind:-empty}" ;;
+  esac
 
   perform_local_rollback_cleanup
 
@@ -307,6 +339,10 @@ leave_domain() {
   info "$(ui_text "Leaving MultiDirectory domain" "Выход из домена MultiDirectory")"
 
   load_os_release
+
+  if recoverable_incomplete_join_detected; then
+    recover_incomplete_join_state
+  fi
 
   need_cmd curl
   need_cmd jq

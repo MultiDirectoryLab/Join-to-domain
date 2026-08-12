@@ -47,17 +47,17 @@ join_domain() {
   else
     while true; do
       if [[ -n "${SAVED_API_HOST:-}" ]]; then
-        read_tty API_HOST "$(ui_text "Enter MULTIDIRECTORY server FQDN [${SAVED_API_HOST}]:" "Введите FQDN сервера MULTIDIRECTORY [${SAVED_API_HOST}]:")"
+        read_tty API_HOST "$(ui_text "Enter MULTIDIRECTORY server IPv4 address or FQDN [${SAVED_API_HOST}]:" "Введите IPv4-адрес или FQDN сервера MULTIDIRECTORY [${SAVED_API_HOST}]:")"
         API_HOST="${API_HOST:-$SAVED_API_HOST}"
       else
-        read_tty API_HOST "$(ui_text "Enter MULTIDIRECTORY server FQDN, for example webadmin.domain.ru:" "Введите FQDN сервера MULTIDIRECTORY, например webadmin.domain.ru:")"
+        read_tty API_HOST "$(ui_text "Enter MULTIDIRECTORY server IPv4 address or FQDN, for example 192.168.1.10 or webadmin.domain.ru:" "Введите IPv4-адрес или FQDN сервера MULTIDIRECTORY, например 192.168.1.10 или webadmin.domain.ru:")"
       fi
       if [[ -z "${API_HOST}" ]]; then
         warn "$(ui_text "API host must be filled." "Адрес API не может быть пустым.")"
         continue
       fi
-      if valid_ipv4_address "${API_HOST}" || ! valid_join_domain "${API_HOST}"; then
-        warn "$(ui_text "Invalid API host. Enter a server FQDN, for example webadmin.domain.ru." "Некорректный адрес API. Введите FQDN сервера, например webadmin.domain.ru.")"
+      if ! valid_api_host "${API_HOST}"; then
+        warn "$(ui_text "Invalid API host. Enter an IPv4 address or FQDN, for example 192.168.1.10 or webadmin.domain.ru." "Некорректный адрес API. Введите IPv4-адрес или FQDN, например 192.168.1.10 или webadmin.domain.ru.")"
         continue
       fi
       if api_host_resolution_ok "${API_HOST}"; then
@@ -98,6 +98,9 @@ join_domain() {
               ;;
             3)
               warn "$(ui_text "Domain join cancelled" "Присоединение к домену отменено")"
+              trap - ERR INT TERM
+              MD_JOIN_ROLLBACK_ACTIVE=0
+              rollback_local_changes 1
               return 1
               ;;
             *)

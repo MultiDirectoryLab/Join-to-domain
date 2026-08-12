@@ -473,15 +473,16 @@ enable_computer_account_if_disabled() {
 }
 
 disable_computer_account_on_leave() {
-  local object_dn expected_dn lookup_rc
+  local object_dn expected_dn lookup_rc search_resp current_uac disabled_uac
+  local lookup_base lookup_scope lookup_filter
 
   [[ -n "${HOSTNAME:-}" ]] || {
     warn "HOSTNAME is unknown, computer account disable skipped"
     return 0
   }
 
-  [[ -n "${LDAP_COMPUTER_OU:-}" ]] || {
-    warn "LDAP_COMPUTER_OU is unknown, computer account disable skipped"
+  [[ -n "${COMPUTER_DN:-}" || -n "${LDAP_BASE_DN:-${LDAP_COMPUTER_OU:-}}" ]] || {
+    warn "Computer LDAP path is unknown, computer account disable skipped"
     return 0
   }
 
@@ -490,12 +491,27 @@ disable_computer_account_on_leave() {
     return 0
   }
 
-  expected_dn="cn=${HOSTNAME},${LDAP_COMPUTER_OU}"
+  expected_dn="${COMPUTER_DN:-cn=${HOSTNAME},${LDAP_COMPUTER_OU:-${LDAP_BASE_DN}}}"
+  if [[ -n "${COMPUTER_DN:-}" ]]; then
+    lookup_base="$COMPUTER_DN"
+    lookup_scope=0
+    lookup_filter='(objectClass=computer)'
+  else
+    lookup_base="${LDAP_BASE_DN:-$LDAP_COMPUTER_OU}"
+    lookup_scope=2
+    lookup_filter="(&(objectClass=computer)(cn=${HOSTNAME}))"
+  fi
 
-  if object_dn="$(api_find_computer_object_dn "${access_token}" "${LDAP_COMPUTER_OU}" "${HOSTNAME}")"; then
+  if search_resp="$(api_search "${access_token}" "$lookup_base" "$lookup_scope" "$lookup_filter" '["cn","userAccountControl"]')"; then
     lookup_rc=0
   else
-    lookup_rc=$?
+    lookup_rc=2
+  fi
+
+  if [[ "$lookup_rc" -eq 0 ]]; then
+    object_dn="$(printf '%s' "$search_resp" | jq -r '.search_result[0].object_name // empty' 2>/dev/null || true)"
+    current_uac="$(printf '%s' "$search_resp" | jq -r '.search_result[0].partial_attributes[]? | select((.type | ascii_downcase)=="useraccountcontrol") | .vals[0] // empty' 2>/dev/null || true)"
+    [[ -n "$object_dn" ]] || lookup_rc=1
   fi
 
   case "$lookup_rc" in
@@ -516,8 +532,19 @@ disable_computer_account_on_leave() {
       ;;
   esac
 
+  if [[ ! "$current_uac" =~ ^[0-9]+$ ]]; then
+    warn "Cannot determine userAccountControl for ${object_dn}; remote computer disable skipped"
+    return 0
+  fi
+
+  disabled_uac=$((10#$current_uac | 2))
+  if (( (10#$current_uac & 2) != 0 )); then
+    log "Computer account is already disabled: ${object_dn}"
+    return 0
+  fi
+
   info "Disabling computer account"
-  if api_update_many_replace_uac "${access_token}" "${object_dn}" "4098"; then
+  if api_update_many_replace_uac "${access_token}" "${object_dn}" "${disabled_uac}"; then
     log "Computer account disabled: ${object_dn}"
   else
     warn "Computer account was not disabled on server side; local leave will continue"

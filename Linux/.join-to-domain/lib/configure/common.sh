@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 
 export DEBIAN_FRONTEND=noninteractive
 
@@ -43,6 +43,7 @@ MD_JOIN_ENV="${MD_STATE_DIR}/join.env"
 MD_PENDING_BACKUP="${MD_STATE_DIR}/active-backup"
 MD_ROLLBACK_MARKER="${MD_STATE_DIR}/rollback-in-progress"
 MD_NM_DNS_STATE="${MD_STATE_DIR}/networkmanager-dns.env"
+MD_OPERATION_NM_DNS_STATE=""
 MD_AUTHSELECT_STATE="${MD_STATE_DIR}/authselect.profile"
 MD_SSSD_SOCKET_STATE="${MD_STATE_DIR}/sssd-sockets.state"
 
@@ -485,11 +486,17 @@ create_backup_set() {
 }
 
 create_join_backup() {
+  MD_OPERATION_NM_DNS_STATE=""
   create_backup_set join
 }
 
 create_recovery_backup() {
-  create_backup_set rejoin
+  create_backup_set rejoin || return 1
+  MD_OPERATION_NM_DNS_STATE="${MD_BACKUP_DIR}/networkmanager-dns.env"
+  # join.env is not part of the static managed-path list because older
+  # pre-Join backups must remain valid. Capture it dynamically for Rejoin so
+  # an interrupted/failed refresh restores the previous saved state as well.
+  md_backup_once "$MD_JOIN_ENV"
 }
 
 load_prejoin_backup() {
@@ -510,8 +517,17 @@ load_active_backup() {
     [[ -d "$backup" && -r "$backup/manifest.env" ]] || return 1
     MD_BACKUP_DIR="$backup"
     MD_MANIFEST="$backup/manifest.env"
+    case "$backup" in
+      "$MD_BACKUPS_ROOT"/rejoin-*)
+        MD_OPERATION_NM_DNS_STATE="${backup}/networkmanager-dns.env"
+        ;;
+      *)
+        MD_OPERATION_NM_DNS_STATE=""
+        ;;
+    esac
     return 0
   fi
+  MD_OPERATION_NM_DNS_STATE=""
   load_prejoin_backup
 }
 

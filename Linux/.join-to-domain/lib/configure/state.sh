@@ -172,7 +172,7 @@ load_join_state() {
   load_join_state_field REALM SAVED_REALM valid_join_realm || true
   load_join_state_field LDAP_BASE_DN SAVED_LDAP_BASE_DN valid_join_ldap_dn || true
   load_join_state_field LDAP_COMPUTER_OU SAVED_LDAP_COMPUTER_OU valid_join_ldap_dn || true
-  load_join_state_field API_HOST SAVED_API_HOST valid_join_domain || true
+  load_join_state_field API_HOST SAVED_API_HOST valid_api_host || true
   load_join_state_field HOSTNAME SAVED_HOSTNAME valid_hostname || true
   load_join_state_field SALT_MASTER SAVED_SALT_MASTER valid_join_domain || true
   load_join_state_field SALT_MINION_ID SAVED_SALT_MINION_ID || true
@@ -214,7 +214,7 @@ write_join_state_var() {
 }
 
 save_join_env() {
-  local tmp computer_dn joined_at dns_servers
+  local tmp computer_dn joined_at dns_servers backup_dir
 
   mkdir -p "$MD_STATE_DIR"
   chmod 700 "$MD_STATE_DIR"
@@ -223,6 +223,7 @@ save_join_env() {
   joined_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date '+%Y-%m-%dT%H:%M:%SZ')"
   computer_dn="${COMPUTER_DN:-cn=${HOSTNAME},${LDAP_COMPUTER_OU}}"
   dns_servers="${MD_DNS_SERVER:-}"
+  backup_dir="${JOIN_STATE_BACKUP_DIR:-$MD_BACKUP_DIR}"
 
   {
     write_join_state_var DOMAIN "${DOMAIN}"
@@ -238,7 +239,7 @@ save_join_env() {
     write_join_state_var COMPUTER_DN "${computer_dn}"
     write_join_state_var SALT_MASTER "${SALT_MASTER:-}"
     write_join_state_var SALT_MINION_ID "${SALT_MINION_ID:-}"
-    write_join_state_var BACKUP_DIR "${MD_BACKUP_DIR}"
+    write_join_state_var BACKUP_DIR "${backup_dir}"
     write_join_state_var JOINED_AT "${joined_at}"
   } > "$tmp"
 
