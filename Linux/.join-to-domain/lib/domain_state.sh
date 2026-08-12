@@ -24,13 +24,36 @@ pending_transaction_manifest() {
   printf '%s\n' "$backup/manifest.env"
 }
 
+authoritative_domain_manifest() {
+  local manifest=""
+  local legacy_manifest="${MD_STATE_DIR}/manifest"
+
+  # A manifest stored under backups is active only while active-backup points
+  # to it. After a successful rollback MD_MANIFEST can still contain that path
+  # in the current shell, but the orphaned backup must not be treated as an
+  # existing domain join.
+  manifest="$(pending_transaction_manifest 2>/dev/null || true)"
+  if [[ -n "$manifest" ]]; then
+    printf '%s\n' "$manifest"
+    return 0
+  fi
+
+  # Compatibility with state created by versions that kept the manifest
+  # directly in the state directory.
+  if [[ -r "$legacy_manifest" ]]; then
+    printf '%s\n' "$legacy_manifest"
+    return 0
+  fi
+
+  return 1
+}
+
 manifest_has_tracked_paths() {
   local manifest="${1:-}"
 
   if [[ -z "$manifest" ]]; then
-    manifest="$(pending_transaction_manifest 2>/dev/null || true)"
+    manifest="$(authoritative_domain_manifest 2>/dev/null || true)"
   fi
-  [[ -n "$manifest" ]] || manifest="${MD_MANIFEST:-}"
   [[ -f "$manifest" ]] || return 1
 
   # Support both the old path-per-line manifest and BACKUP_VERSION=1, where
@@ -39,9 +62,12 @@ manifest_has_tracked_paths() {
 }
 
 krb5_conf_looks_domain_managed() {
+  local manifest=""
+
   [[ -f /etc/krb5.conf ]] || return 1
 
-  if [[ -f "$MD_MANIFEST" ]] && grep -Fxq /etc/krb5.conf "$MD_MANIFEST" 2>/dev/null; then
+  manifest="$(authoritative_domain_manifest 2>/dev/null || true)"
+  if [[ -n "$manifest" ]] && grep -Fxq /etc/krb5.conf "$manifest" 2>/dev/null; then
     return 0
   fi
 
@@ -113,8 +139,7 @@ detect_domain_state() {
     add_domain_state_reason "MultiDirectory join state found: ${MD_JOIN_ENV}"
   fi
 
-  detected_manifest="$(pending_transaction_manifest 2>/dev/null || true)"
-  [[ -n "$detected_manifest" ]] || detected_manifest="${MD_MANIFEST:-}"
+  detected_manifest="$(authoritative_domain_manifest 2>/dev/null || true)"
   if manifest_has_tracked_paths "$detected_manifest"; then
     managed=1
     add_domain_state_reason "MultiDirectory manifest found: ${detected_manifest}"
