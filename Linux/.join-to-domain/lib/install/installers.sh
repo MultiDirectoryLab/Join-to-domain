@@ -3,7 +3,7 @@ install_deb_packages() {
 
   log "Detected DEB-based system: ${OS_NAME}"
 
-  apt-get update
+  apt-get update >> "$LOG_FILE" 2>&1
 
   if is_astra_se; then
     packages+=(
@@ -16,7 +16,7 @@ install_deb_packages() {
     )
   fi
 
-  apt-get install -y "${packages[@]}"
+  apt-get install -y "${packages[@]}" >> "$LOG_FILE" 2>&1
 
   install_local_deb_packages
 }
@@ -27,13 +27,13 @@ install_rpm_packages() {
   detect_package_manager
 
   if [[ "${PM}" == "apt-get" ]]; then
-    apt-get update || true
+    apt-get update >> "$LOG_FILE" 2>&1 || true
 
-    apt-get install -y "${RPM_APT_REQUIRED_PACKAGES[@]}"
+    apt-get install -y "${RPM_APT_REQUIRED_PACKAGES[@]}" >> "$LOG_FILE" 2>&1
   else
-    "${PM}" install -y "${RPM_REQUIRED_PACKAGES[@]}"
+    "${PM}" install -y "${RPM_REQUIRED_PACKAGES[@]}" >> "$LOG_FILE" 2>&1
 
-    "${PM}" install -y authselect || warn "Optional package authselect was not installed"
+    "${PM}" install -y authselect >> "$LOG_FILE" 2>&1 || warn "Optional package authselect was not installed"
   fi
 
   install_local_rpm_packages

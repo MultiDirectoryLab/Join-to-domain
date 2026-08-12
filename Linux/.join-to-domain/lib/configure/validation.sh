@@ -84,7 +84,7 @@ discover_and_validate_domain() {
 
 validate_sudoers() {
   if have_cmd visudo; then
-    visudo -cf /etc/sudoers || die "sudoers validation failed"
+    visudo -cf /etc/sudoers >> "$LOG_FILE" 2>&1 || die "sudoers validation failed"
   else
     warn "visudo not found, sudoers validation skipped"
   fi

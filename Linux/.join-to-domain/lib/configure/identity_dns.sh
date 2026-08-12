@@ -34,9 +34,15 @@ apply_hostname() {
 }
 
 prompt_change_hostname() {
-  local current default_name choice new_name
+  local actual_current current default_name choice new_name
 
-  current="$(hostname -s | tr '[:upper:]' '[:lower:]')"
+  actual_current="$(hostname -s | tr '[:upper:]' '[:lower:]')"
+  current="$actual_current"
+  if [[ -n "${MD_SWITCH_HOSTNAME:-}" ]]; then
+    valid_hostname "$MD_SWITCH_HOSTNAME" || die "Invalid preserved hostname: ${MD_SWITCH_HOSTNAME}"
+    current="$MD_SWITCH_HOSTNAME"
+    log "Preserving computer name across domain switch: ${current}"
+  fi
   default_name="$current"
   if [[ -n "${SAVED_HOSTNAME:-}" ]]; then
     default_name="$SAVED_HOSTNAME"
@@ -51,14 +57,15 @@ prompt_change_hostname() {
     fi
 
     if [[ "$new_name" == "$current" ]]; then
-      HOSTNAME="$current"
-      FQDN="${HOSTNAME}.${DOMAIN}"
-      log "Using current hostname from environment: ${HOSTNAME}"
+      log "Using current short hostname from environment and applying the new domain suffix: ${current}.${DOMAIN}"
+      apply_hostname "$current"
+      unset MD_SWITCH_HOSTNAME
       return 0
     fi
 
     log "Using hostname from environment: ${new_name}"
     apply_hostname "$new_name"
+    unset MD_SWITCH_HOSTNAME
     return 0
   fi
 
@@ -72,8 +79,11 @@ prompt_change_hostname() {
 
     case "$choice" in
       1)
-        HOSTNAME="$current"
-        FQDN="${HOSTNAME}.${DOMAIN}"
+        # Keep the short computer name, but always apply the detected domain
+        # suffix to the system hostname. Otherwise hostnamectl and new shells
+        # continue to report the previous/short-only hostname after Join.
+        apply_hostname "$current"
+        unset MD_SWITCH_HOSTNAME
         return 0
         ;;
       2)
@@ -84,6 +94,7 @@ prompt_change_hostname() {
 
           if valid_hostname "$new_name"; then
             apply_hostname "$new_name"
+            unset MD_SWITCH_HOSTNAME
             return 0
           fi
 
@@ -412,8 +423,13 @@ normalize_dns_servers() {
   [[ -n "$cleaned" ]] || return 1
   [[ "$cleaned" != *, ]] || return 1
   [[ "$cleaned" != ,* ]] || return 1
+  [[ "$cleaned" != *,,* ]] || return 1
 
-  IFS=',' read -r -a parts <<< "$cleaned"
+  # .env uses comma-separated values, while join.env stores the normalized
+  # space-separated form. Accept both so a successful Join can always be
+  # loaded by Rejoin and Leave.
+  cleaned="${cleaned//,/ }"
+  read -r -a parts <<< "$cleaned"
   [[ "${#parts[@]}" -ge 1 && "${#parts[@]}" -le "$MAX_DNS_SERVERS" ]] || return 1
 
   for item in "${parts[@]}"; do

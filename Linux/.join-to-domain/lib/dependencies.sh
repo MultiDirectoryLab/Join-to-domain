@@ -232,7 +232,7 @@ check_dependencies() {
   done
 
   if [[ "${#MISSING_PACKAGES[@]}" -eq 0 && "${#MISSING_BINARIES[@]}" -eq 0 ]]; then
-    info "All required dependencies are installed"
+    log "INFO" "All required dependencies are installed"
     return 0
   fi
 

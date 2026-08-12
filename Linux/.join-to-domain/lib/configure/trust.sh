@@ -135,7 +135,9 @@ renew_md_server_certificate() {
   log "Checking API host address: ${API_HOST}"
   api_host_resolution_ok "${API_HOST}" || die "DNS resolution failed: ${API_HOST}"
 
+  activity_start "$(ui_text "Renewing the MultiDirectory certificate" "Обновление сертификата MultiDirectory")"
   install_md_server_certificate
+  activity_stop
   log "MultiDirectory TLS certificate renewed successfully"
-  ok "$(ui_text "MultiDirectory TLS certificate renewed successfully" "TLS-сертификат MultiDirectory успешно обновлён")"
+  user_ok "$(ui_text "MultiDirectory TLS certificate renewed successfully" "TLS-сертификат MultiDirectory успешно обновлён")"
 }

@@ -8,13 +8,56 @@ BLUE='\033[0;34m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
 NC='\033[0m'
+MD_ACTIVITY_PID=""
 
-log()  { echo -e "${GREEN}[OK]${NC} $(runtime_text "$*")"; }
-info() { echo -e "${BLUE}[INFO]${NC} $(runtime_text "$*")"; }
-warn() { echo -e "${YELLOW}[WARN]${NC} $(runtime_text "$*")"; }
-die()  { echo -e "${RED}[ERR]${NC} $(runtime_text "$*")" >&2; exit 1; }
+log()  {
+  local message
+  message="$(runtime_text "$*")"
+  printf '[DETAIL] %s\n' "$message" >> "$LOG_FILE" 2>/dev/null || true
+}
+activity_clear_line() {
+  if [[ -n "${MD_ACTIVITY_PID:-}" ]]; then
+    printf '\r\033[K' > /dev/tty 2>/dev/null || true
+  fi
+}
+
+activity_stop() {
+  if [[ -n "${MD_ACTIVITY_PID:-}" ]]; then
+    kill "$MD_ACTIVITY_PID" 2>/dev/null || true
+    wait "$MD_ACTIVITY_PID" 2>/dev/null || true
+    printf '\r\033[K' > /dev/tty 2>/dev/null || true
+    MD_ACTIVITY_PID=""
+  fi
+  return 0
+}
+
+activity_start() {
+  local message
+
+  activity_stop
+  message="$(runtime_text "$*")"
+  printf '[INFO] %s\n' "$message" >> "$LOG_FILE" 2>/dev/null || true
+  [[ -t 0 && -w /dev/tty ]] || return 0
+
+  (
+    local frame=0
+    local -a frames=('|' '/' '-' "\\")
+    trap 'exit 0' INT TERM
+    while true; do
+      printf '\r%b[%s]%b %s' "$BLUE" "${frames[$frame]}" "$NC" "$message" > /dev/tty
+      frame=$(( (frame + 1) % ${#frames[@]} ))
+      sleep 0.2
+    done
+  ) &
+  MD_ACTIVITY_PID=$!
+}
+
+info() { activity_stop; echo -e "${BLUE}[INFO]${NC} $(runtime_text "$*")"; }
+warn() { activity_clear_line; echo -e "${YELLOW}[WARN]${NC} $(runtime_text "$*")"; }
+die()  { activity_stop; echo -e "${RED}[ERR]${NC} $(runtime_text "$*")" >&2; exit 1; }
 
 tty_echo() {
+  activity_stop
   echo -e "$*" > /dev/tty
 }
 
@@ -163,6 +206,7 @@ read_tty() {
   local var="$1"
   local prompt="$2"
 
+  activity_stop
   echo -ne "${YELLOW}${prompt}${NC} " > /dev/tty
   if ! read_clean_input "$var" < /dev/tty; then
     warn "Input contains invalid characters. Please enter the value again."

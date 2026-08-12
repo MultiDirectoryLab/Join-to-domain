@@ -54,7 +54,15 @@ classify_prejoin_backup() {
   reference="$(join_state_value BACKUP_DIR 2>/dev/null || true)"
 
   if [[ -z "$reference" ]]; then
-    warn "Existing join state was created without a pre-join backup reference"
+    info "$(ui_text "Migrating legacy pre-join backup" "Перенос резервной копии старого формата")"
+    if load_prejoin_backup && validate_join_backup; then
+      PREJOIN_BACKUP_STATE="valid"
+      PREJOIN_BACKUP_DIR="$MD_BACKUP_DIR"
+      PREJOIN_MANIFEST="$MD_MANIFEST"
+      ok "$(ui_text "Legacy backup migrated successfully" "Резервная копия старого формата успешно перенесена")"
+      return 0
+    fi
+    warn "$(ui_text "The legacy pre-join backup is missing or corrupted; the computer remains joined, but Rejoin cannot continue safely" "Резервная копия старого формата отсутствует или повреждена; компьютер остаётся в домене, но безопасный Rejoin невозможен")"
     return 0
   fi
   case "$reference" in "$MD_BACKUPS_ROOT"/join-*) ;; *) PREJOIN_BACKUP_STATE="corrupted"; return 0 ;; esac
@@ -78,7 +86,9 @@ require_valid_prejoin_backup() {
 
 rollback_recovery_changes() {
   local code="$1"
+  activity_stop
   warn "Recovery rejoin failed with exit code ${code}; restoring the pre-rejoin configuration"
+  activity_start "$(ui_text "Restoring the pre-rejoin configuration" "Восстановление конфигурации до повторного присоединения")"
   MD_RESTORE_OPERATION_ONLY=1
   perform_local_rollback_cleanup
   MD_RESTORE_OPERATION_ONLY=0
@@ -88,7 +98,8 @@ rollback_recovery_changes() {
   rm -f "$MD_PENDING_BACKUP" "$MD_ROLLBACK_MARKER"
   MD_OPERATION_NM_DNS_STATE=""
   unset MD_ROLLBACK_HANDLER
-  ok "Pre-rejoin configuration restored; the original pre-join backup was preserved"
+  activity_stop
+  user_ok "Pre-rejoin configuration restored; the original pre-join backup was preserved"
 }
 
 on_recovery_rejoin_error() {
@@ -107,6 +118,7 @@ on_recovery_rejoin_signal() {
 }
 
 recovery_rejoin_domain() {
+  activity_start "$(ui_text "Refreshing computer domain membership" "Обновление членства компьютера в домене")"
   case "${REMOTE_COMPUTER_STATE:-unknown}" in
     exists)
       info "$(ui_text "Existing computer account will be reused" "Существующая учётная запись компьютера будет использована повторно")"
@@ -145,13 +157,15 @@ recovery_rejoin_domain() {
   MD_OPERATION_NM_DNS_STATE=""
   MD_BACKUP_DIR="$PREJOIN_BACKUP_DIR"
   MD_MANIFEST="$PREJOIN_MANIFEST"
-  ok "$(ui_text "Computer successfully rejoined the domain" "Компьютер успешно повторно присоединён к домену")"
-  info "$(ui_text "System reboot is recommended" "Рекомендуется перезагрузить компьютер")"
+  activity_stop
+  user_ok "$(ui_text "Computer successfully rejoined the domain" "Компьютер успешно повторно присоединён к домену")"
+  user_info "$(ui_text "System reboot is recommended" "Рекомендуется перезагрузить компьютер")"
 }
 
 start_rejoin_transaction() {
-  info "$(ui_text "Creating backup of current local configuration" "Создание резервной копии текущей локальной конфигурации")"
+  activity_start "$(ui_text "Creating a recovery backup" "Создание резервной копии для восстановления")"
   create_recovery_backup || die "Failed to create the recovery rejoin operation backup"
+  activity_stop
   ok "$(ui_text "Recovery backup created" "Резервная копия для восстановления создана")"
 
   MD_ROLLBACK_HANDLER=rollback_recovery_changes
@@ -172,6 +186,7 @@ rejoin_domain_configure() {
   need_root
   setup_logging
   load_os_release
+  user_info "$(ui_text "Starting domain rejoin" "Начинается повторное присоединение к домену")"
 
   if recoverable_incomplete_join_detected; then
     recover_incomplete_join_state
@@ -205,7 +220,7 @@ rejoin_domain_configure() {
   classify_prejoin_backup
   case "$PREJOIN_BACKUP_STATE" in
     valid) ;;
-    legacy) warn "$(ui_text "Existing join state has no pre-join backup; Rejoin is disabled to preserve a safe future Leave" "В существующем состоянии нет исходной резервной копии; Rejoin отключён, чтобы сохранить возможность безопасного Leave")" ;;
+    legacy) warn "$(ui_text "The legacy backup could not be migrated; Rejoin is disabled to avoid damaging the current domain configuration" "Не удалось перенести резервную копию старого формата; Rejoin отключён, чтобы не повредить текущую доменную конфигурацию")" ;;
     corrupted) warn "$(ui_text "The pre-join backup reference is corrupted; Rejoin is disabled" "Ссылка на исходную резервную копию повреждена; Rejoin отключён")" ;;
   esac
   require_valid_prejoin_backup
@@ -222,7 +237,6 @@ rejoin_domain_configure() {
   [[ -n "${FQDN:-}" ]] || FQDN="${HOSTNAME}.${DOMAIN}"
   ok "$(ui_text "Directory administrator authentication succeeded" "Аутентификация администратора каталога выполнена")"
   resolve_computer_object
-  info "$(ui_text "Refreshing computer domain membership" "Обновление членства компьютера в домене")"
   recovery_rejoin_domain
 
   if [[ -n "${MD_EPHEMERAL_CA_BUNDLE:-}" ]]; then

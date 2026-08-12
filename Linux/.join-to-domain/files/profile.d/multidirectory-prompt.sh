@@ -14,7 +14,7 @@ if [ -n "${BASH_VERSION:-}" ]; then
 
     md_prompt_user="${md_prompt_user%%@*}"
     if [ -n "$md_prompt_user" ]; then
-      PS1='\[\033[01;32m\]'"${md_prompt_user}"'@\h\[\033[00m\]:\[\033[01;34m\]\w\[\033[00m\]\$ '
+      PS1='\[\033[01;32m\]'"${md_prompt_user}"'@\H\[\033[00m\]:\[\033[01;34m\]\w\[\033[00m\]\$ '
     fi
 
     return "$md_status"

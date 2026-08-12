@@ -79,6 +79,7 @@ validate_leave_credentials() {
     log "DNS servers configured: $(dns_servers_csv "${dns_servers}")"
   done
 
+  activity_start "$(ui_text "Checking connection to the domain" "Проверка подключения к домену")"
   install_md_server_certificate
 
   log "Authenticating domain administrator"
@@ -108,6 +109,7 @@ validate_leave_credentials() {
   LOGIN="$leave_login"
 
   unset leave_password
+  activity_stop
 
   log "Leave credentials validated"
 }
@@ -266,6 +268,7 @@ recover_incomplete_join_state() {
   local backup_kind
 
   warn "$(ui_text "The previous join did not finish. Completing local rollback before retrying." "Предыдущее присоединение не завершилось. Перед новой попыткой завершается локальный откат.")"
+  activity_start "$(ui_text "Restoring local configuration" "Восстановление локальной конфигурации")"
 
   mkdir -p "${MD_STATE_DIR}"
   touch "${MD_ROLLBACK_MARKER}"
@@ -284,6 +287,7 @@ recover_incomplete_join_state() {
       printf 'RESTORED_AT=%q\n' "$(date --iso-8601=seconds)" >> "$MD_MANIFEST"
       rm -f "$MD_PENDING_BACKUP" "$MD_ROLLBACK_MARKER"
       MD_OPERATION_NM_DNS_STATE=""
+      activity_stop
       ok "$(ui_text "Interrupted Rejoin state was recovered" "Состояние прерванного Rejoin восстановлено")"
       return 0
       ;;
@@ -296,6 +300,7 @@ recover_incomplete_join_state() {
   # Keep the marker and backups if the process is interrupted. Remove the
   # transaction directory only after all local recovery steps have returned.
   rm -rf "${MD_STATE_DIR}"
+  activity_stop
   ok "$(ui_text "Incomplete join state was recovered" "Состояние незавершённого присоединения восстановлено")"
 }
 
@@ -306,17 +311,9 @@ restart_after_leave() {
   systemctl restart sshd.service 2>/dev/null || true
 }
 
-perform_authenticated_leave() {
-  if ! load_active_backup || ! validate_join_backup; then
-    die "Active join backup is missing or corrupted"
-  fi
-
-  log "Starting remote domain cleanup"
-  delete_salt_minion_key_on_leave
-  disable_computer_account_on_leave
-  log "Remote domain cleanup step completed"
-
+perform_local_leave_cleanup() {
   log "Starting local leave cleanup"
+  activity_start "$(ui_text "Restoring local configuration" "Восстановление локальной конфигурации")"
   stop_domain_services
   remove_managed_files
   restore_backups || die "Original configuration could not be fully restored"
@@ -329,14 +326,56 @@ perform_authenticated_leave() {
   restart_after_leave
 
   log "Local leave cleanup completed"
-  ok "$(ui_text "MultiDirectory leave completed" "Выход из MultiDirectory завершён")"
-  info "$(ui_text "System reboot is recommended" "Рекомендуется перезагрузить компьютер")"
+  activity_stop
+  if [[ "${MD_DOMAIN_SWITCH_ACTIVE:-0}" == "1" ]]; then
+    ok "$(ui_text "Old local domain membership removed" "Локальное членство в старом домене удалено")"
+  else
+    user_ok "$(ui_text "MultiDirectory leave completed" "Выход из MultiDirectory завершён")"
+    user_info "$(ui_text "System reboot is recommended" "Рекомендуется перезагрузить компьютер")"
+  fi
+}
+
+perform_authenticated_leave() {
+  if ! load_active_backup || ! validate_join_backup; then
+    die "Active join backup is missing or corrupted"
+  fi
+
+  activity_start "$(ui_text "Removing the computer from the domain" "Удаление компьютера из домена")"
+  log "Starting remote domain cleanup"
+  delete_salt_minion_key_on_leave
+  disable_computer_account_on_leave
+  log "Remote domain cleanup step completed"
+
+  perform_local_leave_cleanup
+}
+
+leave_domain_locally_for_switch() {
+  need_root
+  setup_logging
+  info "$(ui_text "Removing local membership in the unavailable old domain" "Удаление локального членства в недоступном старом домене")"
+  load_os_release
+
+  if recoverable_incomplete_join_detected; then
+    recover_incomplete_join_state
+  fi
+
+  need_cmd awk
+  need_cmd sed
+  need_cmd tr
+
+  if ! load_active_backup || ! validate_join_backup; then
+    die "$(ui_text "The pre-join backup is missing or corrupted; local domain switch cannot continue safely" "Исходная резервная копия отсутствует или повреждена; безопасный локальный переход в другой домен невозможен")"
+  fi
+  ok "$(ui_text "Backup validated" "Резервная копия проверена")"
+  log "Old-domain LDAP computer and Salt objects remain on the old server"
+
+  perform_local_leave_cleanup
 }
 
 leave_domain() {
   need_root
   setup_logging
-  info "$(ui_text "Leaving MultiDirectory domain" "Выход из домена MultiDirectory")"
+  user_info "$(ui_text "Leaving MultiDirectory domain" "Выход из домена MultiDirectory")"
 
   load_os_release
 
@@ -351,7 +390,7 @@ leave_domain() {
   need_cmd tr
 
   if ! load_active_backup || ! validate_join_backup; then
-    die "Active join backup is missing or corrupted"
+    die "$(ui_text "The pre-join backup is missing or corrupted; safe Leave cannot continue" "Исходная резервная копия отсутствует или повреждена; безопасный выход из домена невозможен")"
   fi
   ok "$(ui_text "Backup validated" "Резервная копия проверена")"
 
@@ -368,6 +407,7 @@ rollback_local_changes() {
   warn "$(ui_text "Join failed with exit code ${code}" "Присоединение завершилось ошибкой с кодом ${code}")"
   warn "$(ui_text "Rolling back local configuration changes" "Выполняется откат локальных изменений")"
   warn "$(ui_text "Server-side objects created via API are not removed by local rollback" "Объекты, созданные на сервере через API, не удаляются локальным откатом")"
+  activity_start "$(ui_text "Restoring local configuration" "Восстановление локальной конфигурации")"
 
   mkdir -p "${MD_STATE_DIR}"
   touch "${MD_ROLLBACK_MARKER}"
@@ -380,7 +420,8 @@ rollback_local_changes() {
   printf 'RESTORED_AT=%q\n' "$(date --iso-8601=seconds)" >> "$MD_MANIFEST"
   rm -rf "${MD_STATE_DIR}"
 
-  info "$(ui_text "Rollback completed" "Откат завершён")"
+  activity_stop
+  user_ok "$(ui_text "Rollback completed" "Откат завершён")"
 }
 
 on_join_error() {

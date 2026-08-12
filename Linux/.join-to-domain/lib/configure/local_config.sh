@@ -148,7 +148,7 @@ install_pam_config() {
           warn "Current authselect profile could not be saved"
         fi
       fi
-      authselect select sssd with-mkhomedir --force || true
+      authselect select sssd with-mkhomedir --force >> "$LOG_FILE" 2>&1 || true
     fi
 
     systemctl enable --now oddjobd.service 2>/dev/null || true
@@ -182,7 +182,7 @@ install_pam_config() {
       [[ -f "${PAM_D_SRC}/common-session" ]] && install_local_file "${PAM_D_SRC}/common-session" /etc/pam.d/common-session 0644
       [[ -f "${PAM_D_SRC}/common-password" ]] && install_local_file "${PAM_D_SRC}/common-password" /etc/pam.d/common-password 0644
     else
-      pam-auth-update --enable mkhomedir || true
+    pam-auth-update --enable mkhomedir >> "$LOG_FILE" 2>&1 || true
     fi
   fi
 }
@@ -205,7 +205,7 @@ restore_authselect_state() {
     return 1
   }
 
-  authselect select "${authselect_args[@]}" --force || {
+  authselect select "${authselect_args[@]}" --force >> "$LOG_FILE" 2>&1 || {
     warn "Failed to restore authselect profile: ${authselect_args[*]}"
     return 1
   }
@@ -433,7 +433,7 @@ create_computer_object_if_needed() {
 validate_keytab() {
   log "Checking keytab"
 
-  klist -k /etc/krb5.keytab || die "Invalid keytab"
+  klist -k /etc/krb5.keytab >> "$LOG_FILE" 2>&1 || die "Invalid keytab"
 
   if kinit -k "host/${FQDN}@${REALM}"; then
     log "Kerberos authentication succeeded: host/${FQDN}@${REALM}"
@@ -582,8 +582,8 @@ install_astra_parsec_sssd_packages() {
   fi
 
   log "Installing Astra SE PARSEC/SSSD packages: ${missing[*]}"
-  apt-get update || die "Failed to update package index before installing Astra SE PARSEC/SSSD packages"
-  apt-get install -y "${missing[@]}" || die "Failed to install Astra SE PARSEC/SSSD packages"
+  apt-get update >> "$LOG_FILE" 2>&1 || die "Failed to update package index before installing Astra SE PARSEC/SSSD packages"
+  apt-get install -y "${missing[@]}" >> "$LOG_FILE" 2>&1 || die "Failed to install Astra SE PARSEC/SSSD packages"
 
   astra_parsec_sssd_packages_installed || die "Astra SE PARSEC/SSSD packages are still missing after installation"
 }
@@ -651,7 +651,7 @@ configure_astra_parsec_mswitch() {
 restart_astra_parsec_sssd_or_rollback() {
   sss_cache -E 2>/dev/null || true
 
-  if systemctl restart sssd; then
+  if systemctl restart sssd >> "$LOG_FILE" 2>&1; then
     log "SSSD restarted"
     return 0
   fi

@@ -92,8 +92,8 @@ remove_packages_deb() {
   warn "Packages to purge:"
   printf '  - %s\n' "${packages[@]}"
 
-  apt-get purge -y "${packages[@]}"
-  apt-get autoremove --purge -y
+  apt-get purge -y "${packages[@]}" >> "$LOG_FILE" 2>&1
+  apt-get autoremove --purge -y >> "$LOG_FILE" 2>&1
 }
 
 remove_packages_rpm() {
@@ -110,14 +110,14 @@ remove_packages_rpm() {
   detect_package_manager
 
   if [[ "${PM}" == "dnf" ]]; then
-    dnf remove -y "${packages[@]}"
-    dnf autoremove -y || true
+    dnf remove -y "${packages[@]}" >> "$LOG_FILE" 2>&1
+    dnf autoremove -y >> "$LOG_FILE" 2>&1 || true
   elif [[ "${PM}" == "yum" ]]; then
-    yum remove -y "${packages[@]}"
-    yum autoremove -y || true
+    yum remove -y "${packages[@]}" >> "$LOG_FILE" 2>&1
+    yum autoremove -y >> "$LOG_FILE" 2>&1 || true
   elif [[ "${PM}" == "apt-get" ]]; then
-    apt-get purge -y "${packages[@]}"
-    apt-get autoremove --purge -y
+    apt-get purge -y "${packages[@]}" >> "$LOG_FILE" 2>&1
+    apt-get autoremove --purge -y >> "$LOG_FILE" 2>&1
   else
     die "No supported package manager found"
   fi
