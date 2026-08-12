@@ -1,27 +1,84 @@
-# Join-to-domain
-# [# Script for MultiDirectory domain join](https://multidirectory.ru/docs/vvod-v-domennoe-prostranstvo/)
+# Join-to-domain для MultiDirectory
 
-## Usage
+Интерактивный Bash-скрипт для подключения Linux-компьютера к домену MultiDirectory (MD), повторного присоединения, безопасного выхода из домена и обслуживания установленной конфигурации.
 
-Run the interactive launcher from this directory:
+Документация по вводу компьютера в доменное пространство также доступна на [сайте MultiDirectory](https://multidirectory.ru/docs/vvod-v-domennoe-prostranstvo/).
 
-```bash
-sudo ./join-to-domain.sh
+## Что делает скрипт
+
+Скрипт проверяет и устанавливает системные зависимости, предлагает настроить DNS, подключается к серверу MD по HTTPS, определяет домен и контроллер, создаёт или обновляет учётную запись компьютера и настраивает Kerberos, SSSD, PAM/NSS и SSH. Для Enterprise-редакции также настраивается Salt minion.
+
+Перед изменением системных файлов создаётся резервная копия. Если Join или Rejoin завершается ошибкой, скрипт пытается восстановить предыдущее локальное состояние.
+
+Главное меню содержит следующие операции:
+
+1. Установить необходимые пакеты.
+2. Присоединиться к домену (Join).
+3. Выйти из домена (Leave).
+4. Повторно присоединиться к домену (Rejoin).
+5. Обновить TLS-сертификат сервера MD.
+6. Перезагрузить компьютер.
+7. Выйти из программы.
+
+Join и Rejoin принимают адрес сервера MD в одном из трёх форматов:
+
+```text
+10.1.1.1
+domain.ru
+dc1.domain.ru
 ```
 
-Menu options:
+DNS-серверы можно указать одним IPv4-адресом или списком через запятую, например `8.8.8.8,1.1.1.1`.
 
-1. Install required packages
-2. Join domain
-3. Rejoin domain
-4. Leave domain
-5. Renew certificate
-6. Reboot system
-7. Exit
+## Поддерживаемые системы
 
-Optional flags:
+В коде предусмотрена работа с DEB- и RPM-системами, включая Debian, Ubuntu, Astra Linux, RHEL, CentOS, Rocky Linux, AlmaLinux, Fedora, РЕД ОС и ALT Linux. Нужны права `root`, доступ к репозиториям пакетов и сетевая доступность сервера MD.
+
+## Запуск
+
+Доступные параметры:
 
 ```bash
-./join-to-domain.sh --debug
-./join-to-domain.sh --dry-run
+sudo ./join-to-domain.sh --debug
+sudo ./join-to-domain.sh --dry-run
+./join-to-domain.sh --help
+```
+
+- `--debug` выводит дополнительную диагностику.
+- `--dry-run` показывает предполагаемые действия без изменения системы.
+- `--help` выводит краткую справку.
+
+Рекомендуемый порядок первого подключения: установить пакеты пунктом 1, затем выполнить Join пунктом 2. Rejoin предназначен для восстановления или обновления уже существующего членства компьютера в домене.
+
+## Журналы
+
+Скрипт записывает диагностическую информацию в следующие файлы:
+
+| Файл | Содержимое |
+| --- | --- |
+| `/var/log/join-to-domain.log` | Запуск главного меню, проверка зависимостей и выбранные операции. |
+| `/var/log/multidirectory-install-packages.log` | Установка и проверка системных пакетов. |
+| `/var/log/multidirectory-join.log` | Подробный ход Join, Rejoin, Leave и обновления сертификата, включая диагностику ошибок и отката. |
+| `/var/log/multidirectory-rejoin.log` | События запуска Rejoin из главного меню. |
+
+Просмотр последних записей:
+
+```bash
+sudo tail -n 200 /var/log/multidirectory-join.log
+sudo tail -n 200 /var/log/join-to-domain.log
+```
+
+Для чтения системных журналов могут потребоваться права `root`. Перед передачей журналов третьим лицам проверьте их: они могут содержать имена хостов, доменов, IP-адреса и технические сведения об инфраструктуре.
+
+## Состояние и резервные копии
+
+Резервные копии изменяемых системных файлов хранятся в `/etc/MultiDirectory/backups`. Они используются для автоматического отката и безопасного Leave, поэтому не удаляйте каталоги `/etc/MultiDirectory/state` и `/etc/MultiDirectory/backups`, пока компьютер состоит в домене.
+
+При диагностике полезно проверить:
+
+```bash
+sudo ls -la /etc/MultiDirectory/state
+sudo ls -la /etc/MultiDirectory/backups
+sudo sssctl config-check
+klist -k /etc/krb5.keytab
 ```

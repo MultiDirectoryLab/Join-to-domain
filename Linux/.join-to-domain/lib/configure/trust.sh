@@ -120,7 +120,7 @@ renew_md_server_certificate() {
   set_api_address "${SAVED_API_ADDRESS:-${SAVED_API_HOST:-}}" 2>/dev/null || true
 
   while [[ -z "${API_ADDRESS:-}" ]]; do
-    read_tty API_ADDRESS "$(ui_text "Enter MULTIDIRECTORY server address (IPv4 or FQDN):" "Введите адрес сервера MULTIDIRECTORY (IPv4 или FQDN):")"
+    read_tty API_ADDRESS "$(tr_text prompt.md_server)"
     API_ADDRESS="$(sanitize_input "${API_ADDRESS}")"
 
     if [[ -z "${API_ADDRESS}" ]]; then

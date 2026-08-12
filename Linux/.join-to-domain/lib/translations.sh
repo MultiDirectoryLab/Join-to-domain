@@ -15,6 +15,9 @@ tr_text() {
     ru:menu.reboot) printf 'Перезагрузить компьютер' ;;
     ru:menu.exit) printf 'Выход' ;;
     ru:prompt.select) printf 'Выберите пункт' ;;
+    ru:prompt.md_server) printf 'Введите адрес сервера MD (IPv4/DOMAIN/FQDN), например 10.1.1.1/domain.ru/dc1.domain.ru:' ;;
+    ru:prompt.md_server_fqdn) printf 'Введите FQDN домена/сервера MD:' ;;
+    ru:prompt.dns_servers) printf 'Введите IP-адреса DNS-серверов через запятую [пример: 8.8.8.8 или 8.8.8.8,1.1.1.1]:' ;;
     ru:prompt.press_enter) printf 'Нажмите Enter, чтобы вернуться в главное меню...' ;;
     ru:prompt.reboot) printf 'Вы уверены, что хотите перезагрузить компьютер?' ;;
     ru:answer.yes) printf 'Да' ;;
@@ -43,6 +46,9 @@ tr_text() {
     *:menu.reboot) printf 'Reboot PC' ;;
     *:menu.exit) printf 'Exit' ;;
     *:prompt.select) printf 'Select an option' ;;
+    *:prompt.md_server) printf 'Enter MD server address (IPv4/DOMAIN/FQDN), for example 10.1.1.1/domain.ru/dc1.domain.ru:' ;;
+    *:prompt.md_server_fqdn) printf 'Enter MD domain/server FQDN:' ;;
+    *:prompt.dns_servers) printf 'Enter DNS server IP addresses separated by commas [example: 8.8.8.8 or 8.8.8.8,1.1.1.1]:' ;;
     *:prompt.press_enter) printf 'Press Enter to return to the main menu...' ;;
     *:prompt.reboot) printf 'Are you sure you want to reboot this PC?' ;;
     *:answer.yes) printf 'Yes' ;;

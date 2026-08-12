@@ -580,7 +580,7 @@ prompt_configure_dns() {
         ;;
       *)
         if ! dns_servers="$(normalize_dns_servers "$dns_input")"; then
-          die "Invalid MD_DNS_SERVER in environment. Example: 8.8.8.8,1.1.1.1 or 192.168.69.51,8.8.8.8,1.1.1.1"
+          die "Invalid MD_DNS_SERVER in environment. Example: 8.8.8.8 or 8.8.8.8,1.1.1.1"
         fi
 
         log "DNS input validated: $(dns_servers_csv "$dns_servers")"
@@ -619,7 +619,7 @@ prompt_configure_dns() {
             read_tty dns_input "$(ui_text "Enter DNS server IPs, separated by comma [${default_dns_csv}]:" "Введите IP-адреса DNS-серверов через запятую [${default_dns_csv}]:")"
             dns_input="${dns_input:-$default_dns_csv}"
           else
-            read_tty dns_input "$(ui_text "Enter DNS server IPs, separated by comma [example: 8.8.8.8 or 192.168.69.51,8.8.8.8,1.1.1.1]:" "Введите IP-адреса DNS-серверов через запятую [пример: 8.8.8.8 или 192.168.69.51,8.8.8.8,1.1.1.1]:")"
+            read_tty dns_input "$(tr_text prompt.dns_servers)"
           fi
           if dns_servers="$(normalize_dns_servers "$dns_input")"; then
             log "DNS input validated: $(dns_servers_csv "$dns_servers")"
@@ -630,7 +630,7 @@ prompt_configure_dns() {
               warn "$(ui_text "Failed to set DNS. Please check the IP addresses and network." "Не удалось настроить DNS. Проверьте IP-адреса и сеть.")"
             fi
           else
-            warn "$(ui_text "Invalid DNS input. Example: 8.8.8.8,1.1.1.1 or 192.168.69.51,8.8.8.8,1.1.1.1" "Некорректные DNS-адреса. Пример: 8.8.8.8,1.1.1.1 или 192.168.69.51,8.8.8.8,1.1.1.1")"
+            warn "$(ui_text "Invalid DNS input. Example: 8.8.8.8 or 8.8.8.8,1.1.1.1" "Некорректные DNS-адреса. Пример: 8.8.8.8 или 8.8.8.8,1.1.1.1")"
           fi
         done
         ;;

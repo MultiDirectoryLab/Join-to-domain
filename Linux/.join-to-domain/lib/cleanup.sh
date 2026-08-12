@@ -568,13 +568,13 @@ cleanup_validate_remote_credentials() {
   [[ -n "$saved_domain" ]] || warn "DOMAIN is missing in ${MD_JOIN_ENV}; it will be detected after authentication"
 
   while [[ -z "$saved_api_host" ]]; do
-    cleanup_read_tty saved_api_host "Enter MULTIDIRECTORY domain/server FQDN:"
+    cleanup_read_tty saved_api_host "$(tr_text prompt.md_server_fqdn)"
     if [[ -z "$saved_api_host" ]]; then
       warn "API host must be filled."
       continue
     fi
     if cleanup_valid_ipv4_address "$saved_api_host" || ! cleanup_valid_api_host "$saved_api_host"; then
-      warn "Invalid server name. Enter an FQDN; IPv4 addresses are not accepted during domain leave."
+      warn "$(ui_text "Invalid MD server name. Enter an FQDN; IPv4 addresses are not accepted during domain leave." "Некорректное имя сервера MD. Введите FQDN; IPv4-адреса не принимаются при выходе из домена.")"
       saved_api_host=""
     fi
   done

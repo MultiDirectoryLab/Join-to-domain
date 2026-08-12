@@ -21,14 +21,14 @@ prompt_api_address() {
   while true; do
     entered=""
     if [[ -n "$default_address" ]]; then
-      read_tty entered "$(ui_text "Enter MULTIDIRECTORY server address (IPv4 or FQDN) [${default_address}]:" "Введите адрес сервера MULTIDIRECTORY (IPv4 или FQDN) [${default_address}]:")"
+      read_tty entered "$(tr_text prompt.md_server)"
       entered="${entered:-$default_address}"
     else
-      read_tty entered "$(ui_text "Enter MULTIDIRECTORY server address (IPv4 or FQDN), for example 10.10.10.10 or dc1.domain.ru:" "Введите адрес сервера MULTIDIRECTORY (IPv4 или FQDN), например 10.10.10.10 или dc1.domain.ru:")"
+      read_tty entered "$(tr_text prompt.md_server)"
     fi
 
     if ! set_api_address "$entered"; then
-      warn "$(ui_text "Invalid API address. Enter an IPv4 address or FQDN." "Некорректный адрес API. Введите IPv4-адрес или FQDN.")"
+      warn "$(ui_text "Invalid API address. Enter an IPv4 address, domain, or FQDN." "Некорректный адрес API. Введите IPv4-адрес, домен или FQDN.")"
       continue
     fi
 
