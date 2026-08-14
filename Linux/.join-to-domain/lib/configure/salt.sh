@@ -191,6 +191,11 @@ configure_salt_master_health() {
   log "Configured Salt master health checks: ${health_file}"
 }
 
+configure_salt_systemd_override() {
+  install_local_file "$SALT_SYSTEMD_OVERRIDE_SRC" "$SALT_SYSTEMD_OVERRIDE_DST" 0644
+  log "Configured Salt minion systemd override: ${SALT_SYSTEMD_OVERRIDE_DST}"
+}
+
 build_salt_master_fqdns() {
   local raw_nodes="${MD_NODES:-}"
   local item node_ip node_name fqdn configured_master existing
@@ -366,6 +371,7 @@ EOF
 
   configure_salt_pkg_provider
   configure_salt_master_health
+  configure_salt_systemd_override
 
   systemctl daemon-reload || true
   systemctl enable salt-minion.service >/dev/null 2>&1 || true

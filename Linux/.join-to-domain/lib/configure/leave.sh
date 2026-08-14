@@ -131,7 +131,6 @@ start_services() {
   done
 
   if [[ "${WITH_SALT:-0}" -eq 1 ]]; then
-    restart_salt_minion_or_die
     services+=(salt-minion)
   fi
 

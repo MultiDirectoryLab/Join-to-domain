@@ -30,6 +30,8 @@ SALT_MODULES_SRC="${FILES_DIR}/_modules"
 SALT_MINION_EXTMODS_MODULES_DIR="/var/cache/salt/minion/extmods/modules"
 SALT_PKG_MODULE_SRC="${SALT_MODULES_SRC}/pkg.py"
 SALT_PKG_MODULE_DST="${SALT_MINION_EXTMODS_MODULES_DIR}/pkg.py"
+SALT_SYSTEMD_OVERRIDE_SRC="${FILES_DIR}/systemd/salt-minion.service.d/override.conf"
+SALT_SYSTEMD_OVERRIDE_DST="/etc/systemd/system/salt-minion.service.d/override.conf"
 MD_GPUPDATE_SRC="${FILES_DIR}/md-gpupdate"
 MD_GPUPDATE_DST="/usr/local/libexec/multidirectory/md-gpupdate"
 MD_GPUPDATE_LINK="/usr/local/bin/md-gpupdate"
@@ -490,6 +492,7 @@ managed_join_paths() {
     /etc/pam.d/common-session /etc/pam.d/common-password \
     /etc/ssh/sshd_config.d/ssh_md.conf /etc/sudoers.d/domain-admins \
     /etc/systemd/resolved.conf.d/MultiDirectory.conf \
+    "$SALT_SYSTEMD_OVERRIDE_DST" \
     /etc/salt/minion /etc/salt/minion.append /etc/salt/minion_id \
     /etc/salt/pki/minion /etc/profile.d/multidirectory-prompt.sh \
     /usr/local/sbin/md-cache-accountsservice-user /usr/bin/sudo \
