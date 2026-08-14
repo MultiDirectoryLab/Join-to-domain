@@ -361,6 +361,7 @@ prepare_salt_minion_identity() {
 
   cat > /etc/salt/minion <<EOF
 master_finger: ${gpo_token}
+startup_states: highstate
 EOF
 
   md_track /etc/salt/minion
