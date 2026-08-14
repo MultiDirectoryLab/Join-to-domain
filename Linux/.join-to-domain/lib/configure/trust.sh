@@ -11,7 +11,7 @@ install_md_server_certificate() {
 
   log "Retrieving TLS certificate from ${API_HOST}:443"
   if ! openssl s_client \
-      -connect "${API_HOST}:443" \
+      -connect "${API_RESOLVED_IP:-${API_HOST}}:443" \
       -servername "${API_HOST}" \
       -showcerts </dev/null 2>/dev/null \
       | openssl x509 -outform PEM >"${tmp_cert}"; then
@@ -40,7 +40,7 @@ install_md_server_certificate() {
       [[ "$(openssl x509 -in "$trust_file" -noout -fingerprint -sha256 2>/dev/null | sed 's/^.*=//')" == "$fingerprint" ]]; then
     CURL_CA_BUNDLE="$trust_file"
     export CURL_CA_BUNDLE
-    curl -sS --connect-timeout "${API_CONNECT_TIMEOUT}" --max-time "${API_MAX_TIME}" \
+    curl -sS "${API_CURL_RESOLVE[@]}" --connect-timeout "${API_CONNECT_TIMEOUT}" --max-time "${API_MAX_TIME}" \
       "https://${API_HOST}/" -o /dev/null \
       || die "TLS verification failed with the installed MultiDirectory certificate"
     log "Reusing installed MultiDirectory certificate: ${trust_file}"
@@ -101,7 +101,7 @@ install_md_server_certificate() {
   CURL_CA_BUNDLE="${trust_file}"
   export CURL_CA_BUNDLE
 
-  curl -sS --connect-timeout "${API_CONNECT_TIMEOUT}" --max-time "${API_MAX_TIME}" \
+  curl -sS "${API_CURL_RESOLVE[@]}" --connect-timeout "${API_CONNECT_TIMEOUT}" --max-time "${API_MAX_TIME}" \
     "https://${API_HOST}/" -o /dev/null \
     || die "TLS verification failed after installing the MultiDirectory certificate"
 
@@ -134,6 +134,8 @@ renew_md_server_certificate() {
 
   log "Checking API host address: ${API_HOST}"
   api_host_resolution_ok "${API_HOST}" || die "DNS resolution failed: ${API_HOST}"
+  pin_api_host "${API_HOST}" \
+    || die "Failed to resolve an IPv4 address for API host ${API_HOST}"
 
   activity_start "$(ui_text "Renewing the MultiDirectory certificate" "Обновление сертификата MultiDirectory")"
   install_md_server_certificate

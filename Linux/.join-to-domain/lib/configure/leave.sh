@@ -79,6 +79,9 @@ validate_leave_credentials() {
     log "DNS servers configured: $(dns_servers_csv "${dns_servers}")"
   done
 
+  pin_api_host "${API_HOST}" \
+    || die "Failed to resolve an IPv4 address for API host ${API_HOST}"
+
   activity_start "$(ui_text "Checking connection to the domain" "Проверка подключения к домену")"
   install_md_server_certificate
 

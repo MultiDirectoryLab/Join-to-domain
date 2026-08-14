@@ -403,7 +403,7 @@ create_computer_object_if_needed() {
   log "Creating computer object: ${computer_dn}"
 
   add_resp="$(
-    curl -sS -w "\n%{http_code}" \
+    curl -sS "${API_CURL_RESOLVE[@]}" -w "\n%{http_code}" \
       --connect-timeout "${API_CONNECT_TIMEOUT}" \
       --max-time "${API_MAX_TIME}" \
       -X POST "https://${API_HOST}/api/entry/add" \

@@ -63,6 +63,49 @@ api_host_resolution_ok() {
   getent hosts "$value" >/dev/null
 }
 
+API_RESOLVED_IP=""
+declare -a API_CURL_RESOLVE=()
+
+api_host_ipv4_once() {
+  local host="$1"
+  local candidate
+
+  if valid_ipv4_address "$host"; then
+    printf '%s\n' "$host"
+    return 0
+  fi
+
+  while read -r candidate _; do
+    if valid_ipv4_address "$candidate"; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done < <(getent ahostsv4 "$host" 2>/dev/null)
+
+  # Some getent implementations do not provide the ahostsv4 database.
+  while read -r candidate _; do
+    if valid_ipv4_address "$candidate"; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done < <(getent hosts "$host" 2>/dev/null)
+
+  return 1
+}
+
+pin_api_host() {
+  local host="${1:-${API_HOST:-}}"
+  local resolved_ip
+
+  [[ -n "$host" ]] || return 1
+  resolved_ip="$(api_host_ipv4_once "$host")" || return 1
+
+  API_RESOLVED_IP="$resolved_ip"
+  API_CURL_RESOLVE=(--resolve "${host}:443:${resolved_ip}")
+
+  log "Pinned API endpoint for this operation: ${host}:443 -> ${resolved_ip}"
+}
+
 valid_join_realm() {
   local value="$1"
 

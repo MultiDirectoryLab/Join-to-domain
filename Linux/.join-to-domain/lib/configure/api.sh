@@ -9,7 +9,7 @@ api_auth_cookie() {
 
   set +e
   http_code="$(
-    curl -sS -X POST "https://${API_HOST}/api/auth/" \
+    curl -sS "${API_CURL_RESOLVE[@]}" -X POST "https://${API_HOST}/api/auth/" \
       --connect-timeout "${API_CONNECT_TIMEOUT}" \
       --max-time "${API_MAX_TIME}" \
       -H "accept: application/json" \
@@ -66,7 +66,7 @@ api_validate_session() {
 
   set +e
   http_code="$(
-    curl -sS -X GET "https://${API_HOST}/api/auth/me" \
+    curl -sS "${API_CURL_RESOLVE[@]}" -X GET "https://${API_HOST}/api/auth/me" \
       --connect-timeout "${API_CONNECT_TIMEOUT}" \
       --max-time "${API_MAX_TIME}" \
       -H "accept: application/json" \
@@ -107,7 +107,7 @@ api_search() {
 
   set +e
   http_code="$(
-    curl -sS -X POST "https://${API_HOST}/api/entry/search" \
+    curl -sS "${API_CURL_RESOLVE[@]}" -X POST "https://${API_HOST}/api/entry/search" \
       --connect-timeout "${API_CONNECT_TIMEOUT}" \
       --max-time "${API_MAX_TIME}" \
       -H "accept: application/json" \
@@ -247,7 +247,7 @@ api_principal_add() {
   local primary="${spn%%/*}"
   local instance="${spn#*/}"
 
-  curl -sS -X POST "https://${API_HOST}/api/kerberos/principal/add" \
+  curl -sS "${API_CURL_RESOLVE[@]}" -X POST "https://${API_HOST}/api/kerberos/principal/add" \
     --connect-timeout "${API_CONNECT_TIMEOUT}" \
     --max-time "${API_MAX_TIME}" \
     -H "accept: application/json" \
@@ -312,7 +312,7 @@ api_ktadd_download() {
   log "Keytab principals: $*"
 
   http_code="$(
-    curl -sS \
+    curl -sS "${API_CURL_RESOLVE[@]}" \
       --connect-timeout "${API_CONNECT_TIMEOUT}" \
       --max-time "${API_MAX_TIME}" \
       -D "$tmp_headers" \
@@ -399,7 +399,7 @@ api_update_many_replace_uac() {
   )"
 
   resp="$(
-    curl -sS -w "\n%{http_code}" \
+    curl -sS "${API_CURL_RESOLVE[@]}" -w "\n%{http_code}" \
       --connect-timeout "${API_CONNECT_TIMEOUT}" \
       --max-time "${API_MAX_TIME}" \
       -X PATCH "https://${API_HOST}/api/entry/update_many" \

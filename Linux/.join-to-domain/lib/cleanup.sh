@@ -439,12 +439,52 @@ cleanup_api_host_resolution_ok() {
   getent hosts "$1" >/dev/null
 }
 
+CLEANUP_API_RESOLVED_IP=""
+declare -a CLEANUP_CURL_RESOLVE=()
+
+cleanup_api_host_ipv4_once() {
+  local host="$1"
+  local candidate
+
+  if cleanup_valid_ipv4_address "$host"; then
+    printf '%s\n' "$host"
+    return 0
+  fi
+
+  while read -r candidate _; do
+    if cleanup_valid_ipv4_address "$candidate"; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done < <(getent ahostsv4 "$host" 2>/dev/null)
+
+  while read -r candidate _; do
+    if cleanup_valid_ipv4_address "$candidate"; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done < <(getent hosts "$host" 2>/dev/null)
+
+  return 1
+}
+
+cleanup_pin_api_host() {
+  local host="$1"
+  local resolved_ip
+
+  resolved_ip="$(cleanup_api_host_ipv4_once "$host")" || return 1
+  CLEANUP_API_RESOLVED_IP="$resolved_ip"
+  CLEANUP_CURL_RESOLVE=(--resolve "${host}:443:${resolved_ip}")
+
+  cleanup_log "Pinned API endpoint for this operation: ${host}:443 -> ${resolved_ip}"
+}
+
 cleanup_api_auth_cookie() {
   local api_host="$1"
   local user="$2"
   local pass="$3"
 
-  curl -k -sS -X POST "https://${api_host}/api/auth/" \
+  curl -k -sS "${CLEANUP_CURL_RESOLVE[@]}" -X POST "https://${api_host}/api/auth/" \
     --connect-timeout "${API_CONNECT_TIMEOUT}" \
     --max-time "${API_MAX_TIME}" \
     -H "accept: application/json" \
@@ -465,7 +505,7 @@ cleanup_api_search() {
   local attrs_json="$6"
   local size_limit="${7:-5}"
 
-  curl -k -sS -X POST "https://${api_host}/api/entry/search" \
+  curl -k -sS "${CLEANUP_CURL_RESOLVE[@]}" -X POST "https://${api_host}/api/entry/search" \
     --connect-timeout "${API_CONNECT_TIMEOUT}" \
     --max-time "${API_MAX_TIME}" \
     -H "accept: application/json" \
@@ -604,6 +644,11 @@ cleanup_validate_remote_credentials() {
     info "DNS servers configured: ${dns_servers// /,}"
   done
 
+  cleanup_pin_api_host "${saved_api_host}" || {
+    error "Failed to resolve an IPv4 address for API host ${saved_api_host}"
+    return 1
+  }
+
   info "Authenticating domain administrator"
   token="$(cleanup_api_auth_cookie "$saved_api_host" "$login" "$password")"
   unset password
@@ -647,7 +692,7 @@ cleanup_delete_salt_minion_key() {
   fi
 
   resp="$(
-    curl -k -sS -w "\n%{http_code}" \
+    curl -k -sS "${CLEANUP_CURL_RESOLVE[@]}" -w "\n%{http_code}" \
       --connect-timeout "${API_CONNECT_TIMEOUT}" \
       --max-time "${API_MAX_TIME}" \
       -X DELETE "https://${API_HOST}/api/salt/minion/${minion_id}" \
@@ -757,7 +802,7 @@ cleanup_disable_computer_account() {
   )"
 
   resp="$(
-    curl -k -sS -w "\n%{http_code}" \
+    curl -k -sS "${CLEANUP_CURL_RESOLVE[@]}" -w "\n%{http_code}" \
       --connect-timeout "${API_CONNECT_TIMEOUT}" \
       --max-time "${API_MAX_TIME}" \
       -X PATCH "https://${API_HOST}/api/entry/update_many" \

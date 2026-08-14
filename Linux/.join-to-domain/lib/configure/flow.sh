@@ -151,6 +151,9 @@ join_domain() {
     done
   fi
 
+  pin_api_host "${API_HOST}" \
+    || die "Failed to resolve an IPv4 address for API host ${API_HOST}"
+
   activity_start "$(ui_text "Connecting to the MultiDirectory server" "Подключение к серверу MultiDirectory")"
   install_md_server_certificate
   activity_stop

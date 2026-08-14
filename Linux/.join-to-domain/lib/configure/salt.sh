@@ -10,7 +10,7 @@ api_delete_salt_minion_key() {
   fi
 
   resp="$(
-    curl -sS -w "\n%{http_code}" \
+    curl -sS "${API_CURL_RESOLVE[@]}" -w "\n%{http_code}" \
       --connect-timeout "${API_CONNECT_TIMEOUT}" \
       --max-time "${API_MAX_TIME}" \
       -X DELETE "https://${API_HOST}/api/salt/minion/${minion_id}" \
@@ -455,7 +455,7 @@ accept_salt_minion_key() {
     log "Attempt ${attempt}/${retries}: accepting Salt minion key"
 
     if resp="$(
-      curl -sS -w "\n%{http_code}" \
+      curl -sS "${API_CURL_RESOLVE[@]}" -w "\n%{http_code}" \
         --connect-timeout "${SALT_ACCEPT_CONNECT_TIMEOUT}" \
         --max-time "${SALT_ACCEPT_MAX_TIME}" \
         -X POST "https://${API_HOST}/api/salt/minion" \
@@ -547,7 +547,7 @@ configure_salt() {
   refresh_api_token_for_salt
 
   gpo_token="$(
-    curl -sS -X GET "https://${API_HOST}/api/salt/master/key" \
+    curl -sS "${API_CURL_RESOLVE[@]}" -X GET "https://${API_HOST}/api/salt/master/key" \
       --connect-timeout "${API_CONNECT_TIMEOUT}" \
       --max-time "${API_MAX_TIME}" \
       -H "Cookie: id=${access_token}" \
