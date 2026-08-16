@@ -196,70 +196,16 @@ configure_salt_systemd_override() {
   log "Configured Salt minion systemd override: ${SALT_SYSTEMD_OVERRIDE_DST}"
 }
 
-build_salt_master_fqdns() {
-  local raw_nodes="${MD_NODES:-}"
-  local item node_ip node_name fqdn configured_master existing
-  local master_count=0
-  local nodes=()
+configure_salt_master_from_api_ip() {
+  local master_ip="${API_RESOLVED_IP:-}"
 
-  SALT_MASTER_FQDNS=()
+  [[ -n "$master_ip" ]] || die "Resolved API IPv4 address is unavailable for Salt master configuration"
+  valid_ipv4_address "$master_ip" || die "Invalid resolved API IPv4 address for Salt master: ${master_ip}"
 
-  [[ -n "$raw_nodes" ]] \
-    || die "MD_NODES is missing in ${JOIN_TO_DOMAIN_ENV_FILE:-the join environment file}"
-
-  IFS=',' read -r -a nodes <<< "$raw_nodes"
-  for item in "${nodes[@]}"; do
-    item="$(sanitize_input "$item")"
-    [[ -n "$item" ]] || die "MD_NODES contains an empty node entry"
-    [[ "$item" == *:* ]] || die "Invalid MD_NODES entry: ${item}. Expected IPv4:hostname"
-
-    node_ip="$(sanitize_input "${item%%:*}")"
-    node_name="$(sanitize_input "${item#*:}")"
-    node_name="$(printf '%s' "$node_name" | tr '[:upper:]' '[:lower:]')"
-
-    valid_ipv4_address "$node_ip" \
-      || die "Invalid IPv4 address in MD_NODES entry: ${item}"
-
-    if valid_hostname "$node_name"; then
-      fqdn="${node_name}.${DOMAIN}"
-    elif valid_join_domain "$node_name"; then
-      [[ "$node_name" == *."${DOMAIN}" ]] \
-        || die "Salt master FQDN from MD_NODES is outside the detected domain ${DOMAIN}: ${node_name}"
-      fqdn="$node_name"
-    else
-      die "Invalid hostname in MD_NODES entry: ${item}"
-    fi
-
-    valid_join_domain "$fqdn" || die "Invalid Salt master FQDN generated from MD_NODES: ${fqdn}"
-
-    existing=0
-    if (( master_count > 0 )); then
-      for configured_master in "${SALT_MASTER_FQDNS[@]}"; do
-        if [[ "$configured_master" == "$fqdn" ]]; then
-          existing=1
-          break
-        fi
-      done
-    fi
-    if [[ "$existing" -eq 0 ]]; then
-      SALT_MASTER_FQDNS+=("$fqdn")
-      master_count=$((master_count + 1))
-    fi
-  done
-
-  [[ "$master_count" -gt 0 ]] || die "MD_NODES does not contain any Salt master nodes"
-  SALT_MASTER="${SALT_MASTER_FQDNS[0]}"
-  SALT_MASTERS_DISPLAY="$(IFS=,; printf '%s' "${SALT_MASTER_FQDNS[*]}")"
-  log "Salt masters from MD_NODES: ${SALT_MASTERS_DISPLAY}"
-}
-
-validate_salt_master_fqdns() {
-  local master
-
-  for master in "${SALT_MASTER_FQDNS[@]}"; do
-    log "Checking DNS resolution: SALT_MASTER=${master}"
-    getent hosts "$master" >/dev/null || die "DNS resolution failed for Salt master ${master}"
-  done
+  SALT_MASTER="$master_ip"
+  SALT_MASTERS=("$master_ip")
+  SALT_MASTERS_DISPLAY="$master_ip"
+  log "Using pinned API IPv4 address as the single Salt master: ${SALT_MASTER}"
 }
 
 remove_conflicting_salt_identity_settings() {
@@ -293,13 +239,9 @@ remove_conflicting_salt_identity_settings() {
 
 write_salt_master_config() {
   local master_file="$1"
-  local master
 
   {
-    printf 'master:\n'
-    for master in "${SALT_MASTER_FQDNS[@]}"; do
-      printf '  - %s\n' "$master"
-    done
+    printf 'master: %s\n' "$SALT_MASTER"
     printf 'master_type: str\n'
   } > "$master_file"
 }
@@ -395,7 +337,7 @@ salt_minion_master_connected() {
   systemctl is-active --quiet salt-minion.service 2>/dev/null || return 1
   have_cmd salt-call || return 1
 
-  for master in "${SALT_MASTER_FQDNS[@]}"; do
+  for master in "${SALT_MASTERS[@]}"; do
     if have_cmd timeout; then
       output="$(timeout 6 salt-call --local --out=txt status.master "$master" 2>/dev/null || true)"
     else
@@ -538,8 +480,7 @@ configure_salt() {
 
   local gpo_token guid
 
-  build_salt_master_fqdns
-  validate_salt_master_fqdns
+  configure_salt_master_from_api_ip
   configure_salt_masters
 
   require_salt_minion_ready

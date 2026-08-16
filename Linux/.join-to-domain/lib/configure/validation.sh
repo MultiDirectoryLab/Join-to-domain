@@ -78,7 +78,7 @@ discover_and_validate_domain() {
   LDAP_COMPUTER_OU="cn=computers,${LDAP_BASE_DN}"
 
   if [[ "${WITH_SALT:-0}" -eq 1 ]]; then
-    build_salt_master_fqdns
+    configure_salt_master_from_api_ip
   fi
 }
 
