@@ -191,6 +191,28 @@ configure_salt_master_health() {
   log "Configured Salt master health checks: ${health_file}"
 }
 
+configure_salt_highstate_schedule() {
+  local schedule_file="/etc/salt/minion.d/schedule.conf"
+
+  mkdir -p "$(dirname -- "$schedule_file")"
+  md_backup_once "$schedule_file"
+
+  {
+    printf 'schedule:\n'
+    printf '  periodic_highstate:\n'
+    printf '    function: state.highstate\n'
+    printf '    minutes: 60\n'
+    printf '    maxrunning: 1\n'
+    printf '    splay:\n'
+    printf '      start: 0\n'
+    printf '      end: 300\n'
+  } > "$schedule_file"
+
+  chmod 0644 "$schedule_file"
+  md_track "$schedule_file"
+  log "Configured periodic Salt highstate schedule: ${schedule_file}"
+}
+
 configure_salt_systemd_override() {
   install_local_file "$SALT_SYSTEMD_OVERRIDE_SRC" "$SALT_SYSTEMD_OVERRIDE_DST" 0644
   log "Configured Salt minion systemd override: ${SALT_SYSTEMD_OVERRIDE_DST}"
@@ -314,6 +336,7 @@ EOF
 
   configure_salt_pkg_provider
   configure_salt_master_health
+  configure_salt_highstate_schedule
   configure_salt_systemd_override
 
   systemctl daemon-reload || true
