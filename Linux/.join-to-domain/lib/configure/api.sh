@@ -9,7 +9,7 @@ api_auth_cookie() {
 
   set +e
   http_code="$(
-    curl -sS -X POST "https://${API_ADDRESS}/api/auth/" \
+    curl -sS "${API_CURL_RESOLVE[@]}" -X POST "https://${API_HOST}/api/auth/" \
       --connect-timeout "${API_CONNECT_TIMEOUT}" \
       --max-time "${API_MAX_TIME}" \
       -H "accept: application/json" \
@@ -66,7 +66,7 @@ api_validate_session() {
 
   set +e
   http_code="$(
-    curl -sS -X GET "https://${API_ADDRESS}/api/auth/me" \
+    curl -sS "${API_CURL_RESOLVE[@]}" -X GET "https://${API_HOST}/api/auth/me" \
       --connect-timeout "${API_CONNECT_TIMEOUT}" \
       --max-time "${API_MAX_TIME}" \
       -H "accept: application/json" \
@@ -107,7 +107,7 @@ api_search() {
 
   set +e
   http_code="$(
-    curl -sS -X POST "https://${API_ADDRESS}/api/entry/search" \
+    curl -sS "${API_CURL_RESOLVE[@]}" -X POST "https://${API_HOST}/api/entry/search" \
       --connect-timeout "${API_CONNECT_TIMEOUT}" \
       --max-time "${API_MAX_TIME}" \
       -H "accept: application/json" \
@@ -174,73 +174,6 @@ api_response_attribute() {
   '
 }
 
-api_get_json() {
-  local cookie="$1"
-  local path="$2"
-  local tmp_body http_code curl_rc detail
-
-  tmp_body="$(mktemp "${TMPDIR:-/tmp}/md-api-get.XXXXXX")"
-  chmod 600 "$tmp_body"
-
-  set +e
-  http_code="$(
-    curl -sS -X GET "https://${API_ADDRESS}/api${path}" \
-      --connect-timeout "${API_CONNECT_TIMEOUT}" \
-      --max-time "${API_MAX_TIME}" \
-      -H "accept: application/json" \
-      -H "Cookie: id=${cookie}" \
-      -o "$tmp_body" \
-      -w '%{http_code}'
-  )"
-  curl_rc=$?
-  set -e
-
-  if [[ "$curl_rc" -ne 0 || ! "$http_code" =~ ^2[0-9][0-9]$ ]]; then
-    detail="$(tr '\r\n' ' ' < "$tmp_body" | cut -c1-1000)"
-    log "API GET ${path} failed: curl exit ${curl_rc}, HTTP ${http_code:-000}; response=${detail:-empty}"
-    rm -f "$tmp_body"
-    return 1
-  fi
-
-  if ! jq -e . "$tmp_body" >/dev/null 2>&1; then
-    detail="$(tr '\r\n' ' ' < "$tmp_body" | cut -c1-1000)"
-    log "API GET ${path} returned invalid JSON: ${detail:-empty}"
-    rm -f "$tmp_body"
-    return 1
-  fi
-
-  cat "$tmp_body"
-  rm -f "$tmp_body"
-}
-
-api_controller_fqdn_from_dns() {
-  local cookie="$1"
-  local address="$2"
-  local domain="$3"
-  local zones
-
-  if ! zones="$(api_get_json "$cookie" "/dns/zone")"; then
-    return 1
-  fi
-
-  printf '%s' "$zones" | jq -r --arg address "$address" --arg domain "$domain" '
-    [
-      .[]?
-      | (.rrsets // [])[]?
-      | select(((.type // "") | ascii_upcase) == "A")
-      | . as $rrset
-      | (.records // [])[]?
-      | select((.disabled // false) == false)
-      | select((((.content // "") | split(" ")[0])) == $address)
-      | (($rrset.name // "") | sub("[.]$"; "") | ascii_downcase)
-      | select(. == $domain or endswith("." + $domain))
-    ]
-    | unique
-    | (map(select(. != $domain)) + map(select(. == $domain)))
-    | .[0] // empty
-  '
-}
-
 api_rootdse_default_nc() {
   local cookie="$1"
   local resp nc
@@ -276,7 +209,7 @@ api_rootdse_response() {
   local cookie="${1:-}"
 
   api_search "$cookie" "" 0 "(objectClass=*)" \
-    '["dnsHostName","dnsDomainName","dnsForestName","rootDomainNamingContext","defaultNamingContext","namingContexts","subschemaSubentry","supportedLDAPVersion","supportedSASLMechanisms","supportedExtension","supportedControl","supportedFeatures","vendorName","name","vendorVersion","objectClass"]' \
+    '["dnsHostName","rootDomainNamingContext","defaultNamingContext","namingContexts","subschemaSubentry","supportedLDAPVersion","supportedSASLMechanisms","supportedExtension","supportedControl","supportedFeatures","vendorName","name","vendorVersion","objectClass"]' \
     0
 }
 
@@ -288,14 +221,18 @@ api_rootdse_domain() {
     return 1
   fi
 
-  nc="$(printf '%s' "$resp" | api_response_attribute "defaultNamingContext")"
-  [[ -n "$nc" ]] || nc="$(printf '%s' "$resp" | api_response_attribute "rootDomainNamingContext")"
-  [[ -n "$nc" ]] || nc="$(printf '%s' "$resp" | api_response_attribute "namingContexts")"
-  [[ -n "$nc" ]] && dom="$(printf '%s' "$nc" | dn_to_domain)"
+  dom="$(printf '%s' "$resp" | api_response_attribute "dnsHostName")"
 
   [[ -n "$dom" ]] || dom="$(printf '%s' "$resp" | api_response_attribute "dnsDomainName")"
+
   [[ -n "$dom" ]] || dom="$(printf '%s' "$resp" | api_response_attribute "dnsForestName")"
-  [[ -n "$dom" ]] || dom="$(printf '%s' "$resp" | api_response_attribute "dnsHostName")"
+
+  if [[ -z "$dom" ]]; then
+    nc="$(printf '%s' "$resp" | api_response_attribute "defaultNamingContext")"
+    [[ -n "$nc" ]] || nc="$(printf '%s' "$resp" | api_response_attribute "rootDomainNamingContext")"
+    [[ -n "$nc" ]] || nc="$(printf '%s' "$resp" | api_response_attribute "namingContexts")"
+    [[ -n "$nc" ]] && dom="$(printf '%s' "$nc" | dn_to_domain)"
+  fi
 
   if [[ -z "$dom" ]]; then
     log "RootDSE response contains no usable domain attributes: $(printf '%s' "$resp" | tr '\r\n' ' ' | cut -c1-1500)"
@@ -310,7 +247,7 @@ api_principal_add() {
   local primary="${spn%%/*}"
   local instance="${spn#*/}"
 
-  curl -sS -X POST "https://${API_ADDRESS}/api/kerberos/principal/add" \
+  curl -sS "${API_CURL_RESOLVE[@]}" -X POST "https://${API_HOST}/api/kerberos/principal/add" \
     --connect-timeout "${API_CONNECT_TIMEOUT}" \
     --max-time "${API_MAX_TIME}" \
     -H "accept: application/json" \
@@ -371,16 +308,16 @@ api_ktadd_download() {
     body="${body}],\"is_rand_key\":true}"
   fi
 
-  log "Keytab API endpoint: https://${API_ADDRESS}/api/kerberos/ktadd"
+  log "Keytab API endpoint: https://${API_HOST}/api/kerberos/ktadd"
   log "Keytab principals: $*"
 
   http_code="$(
-    curl -sS \
+    curl -sS "${API_CURL_RESOLVE[@]}" \
       --connect-timeout "${API_CONNECT_TIMEOUT}" \
       --max-time "${API_MAX_TIME}" \
       -D "$tmp_headers" \
       -o "$tmp_body" \
-      -X POST "https://${API_ADDRESS}/api/kerberos/ktadd" \
+      -X POST "https://${API_HOST}/api/kerberos/ktadd" \
       -H "accept: application/octet-stream" \
       -H "Content-Type: application/json" \
       -H "Cookie: id=${cookie}" \
@@ -462,10 +399,10 @@ api_update_many_replace_uac() {
   )"
 
   resp="$(
-    curl -sS -w "\n%{http_code}" \
+    curl -sS "${API_CURL_RESOLVE[@]}" -w "\n%{http_code}" \
       --connect-timeout "${API_CONNECT_TIMEOUT}" \
       --max-time "${API_MAX_TIME}" \
-      -X PATCH "https://${API_ADDRESS}/api/entry/update_many" \
+      -X PATCH "https://${API_HOST}/api/entry/update_many" \
       -H 'accept: application/json' \
       -H 'Content-Type: application/json' \
       -H "Cookie: id=${cookie}" \
@@ -536,15 +473,16 @@ enable_computer_account_if_disabled() {
 }
 
 disable_computer_account_on_leave() {
-  local object_dn expected_dn lookup_rc
+  local object_dn expected_dn lookup_rc search_resp current_uac disabled_uac
+  local lookup_base lookup_scope lookup_filter
 
   [[ -n "${HOSTNAME:-}" ]] || {
     warn "HOSTNAME is unknown, computer account disable skipped"
     return 0
   }
 
-  [[ -n "${LDAP_COMPUTER_OU:-}" ]] || {
-    warn "LDAP_COMPUTER_OU is unknown, computer account disable skipped"
+  [[ -n "${COMPUTER_DN:-}" || -n "${LDAP_BASE_DN:-${LDAP_COMPUTER_OU:-}}" ]] || {
+    warn "Computer LDAP path is unknown, computer account disable skipped"
     return 0
   }
 
@@ -553,12 +491,27 @@ disable_computer_account_on_leave() {
     return 0
   }
 
-  expected_dn="cn=${HOSTNAME},${LDAP_COMPUTER_OU}"
+  expected_dn="${COMPUTER_DN:-cn=${HOSTNAME},${LDAP_COMPUTER_OU:-${LDAP_BASE_DN}}}"
+  if [[ -n "${COMPUTER_DN:-}" ]]; then
+    lookup_base="$COMPUTER_DN"
+    lookup_scope=0
+    lookup_filter='(objectClass=computer)'
+  else
+    lookup_base="${LDAP_BASE_DN:-$LDAP_COMPUTER_OU}"
+    lookup_scope=2
+    lookup_filter="(&(objectClass=computer)(cn=${HOSTNAME}))"
+  fi
 
-  if object_dn="$(api_find_computer_object_dn "${access_token}" "${LDAP_COMPUTER_OU}" "${HOSTNAME}")"; then
+  if search_resp="$(api_search "${access_token}" "$lookup_base" "$lookup_scope" "$lookup_filter" '["cn","userAccountControl"]')"; then
     lookup_rc=0
   else
-    lookup_rc=$?
+    lookup_rc=2
+  fi
+
+  if [[ "$lookup_rc" -eq 0 ]]; then
+    object_dn="$(printf '%s' "$search_resp" | jq -r '.search_result[0].object_name // empty' 2>/dev/null || true)"
+    current_uac="$(printf '%s' "$search_resp" | jq -r '.search_result[0].partial_attributes[]? | select((.type | ascii_downcase)=="useraccountcontrol") | .vals[0] // empty' 2>/dev/null || true)"
+    [[ -n "$object_dn" ]] || lookup_rc=1
   fi
 
   case "$lookup_rc" in
@@ -579,8 +532,19 @@ disable_computer_account_on_leave() {
       ;;
   esac
 
+  if [[ ! "$current_uac" =~ ^[0-9]+$ ]]; then
+    warn "Cannot determine userAccountControl for ${object_dn}; remote computer disable skipped"
+    return 0
+  fi
+
+  disabled_uac=$((10#$current_uac | 2))
+  if (( (10#$current_uac & 2) != 0 )); then
+    log "Computer account is already disabled: ${object_dn}"
+    return 0
+  fi
+
   info "Disabling computer account"
-  if api_update_many_replace_uac "${access_token}" "${object_dn}" "4098"; then
+  if api_update_many_replace_uac "${access_token}" "${object_dn}" "${disabled_uac}"; then
     log "Computer account disabled: ${object_dn}"
   else
     warn "Computer account was not disabled on server side; local leave will continue"

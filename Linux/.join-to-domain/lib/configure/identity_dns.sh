@@ -34,9 +34,15 @@ apply_hostname() {
 }
 
 prompt_change_hostname() {
-  local current default_name choice new_name
+  local actual_current current default_name choice new_name
 
-  current="$(hostname -s | tr '[:upper:]' '[:lower:]')"
+  actual_current="$(hostname -s | tr '[:upper:]' '[:lower:]')"
+  current="$actual_current"
+  if [[ -n "${MD_SWITCH_HOSTNAME:-}" ]]; then
+    valid_hostname "$MD_SWITCH_HOSTNAME" || die "Invalid preserved hostname: ${MD_SWITCH_HOSTNAME}"
+    current="$MD_SWITCH_HOSTNAME"
+    log "Preserving computer name across domain switch: ${current}"
+  fi
   default_name="$current"
   if [[ -n "${SAVED_HOSTNAME:-}" ]]; then
     default_name="$SAVED_HOSTNAME"
@@ -51,14 +57,15 @@ prompt_change_hostname() {
     fi
 
     if [[ "$new_name" == "$current" ]]; then
-      HOSTNAME="$current"
-      FQDN="${HOSTNAME}.${DOMAIN}"
-      log "Using current hostname from environment: ${HOSTNAME}"
+      log "Using current short hostname from environment and applying the new domain suffix: ${current}.${DOMAIN}"
+      apply_hostname "$current"
+      unset MD_SWITCH_HOSTNAME
       return 0
     fi
 
     log "Using hostname from environment: ${new_name}"
     apply_hostname "$new_name"
+    unset MD_SWITCH_HOSTNAME
     return 0
   fi
 
@@ -72,8 +79,11 @@ prompt_change_hostname() {
 
     case "$choice" in
       1)
-        HOSTNAME="$current"
-        FQDN="${HOSTNAME}.${DOMAIN}"
+        # Keep the short computer name, but always apply the detected domain
+        # suffix to the system hostname. Otherwise hostnamectl and new shells
+        # continue to report the previous/short-only hostname after Join.
+        apply_hostname "$current"
+        unset MD_SWITCH_HOSTNAME
         return 0
         ;;
       2)
@@ -84,6 +94,7 @@ prompt_change_hostname() {
 
           if valid_hostname "$new_name"; then
             apply_hostname "$new_name"
+            unset MD_SWITCH_HOSTNAME
             return 0
           fi
 
@@ -95,58 +106,6 @@ prompt_change_hostname() {
         ;;
     esac
   done
-}
-
-select_rejoin_hostname() {
-  local current preferred candidate
-
-  current="$(hostname -s | tr '[:upper:]' '[:lower:]')"
-  EXISTING_COMPUTER_FOUND=0
-
-  preferred="${SAVED_HOSTNAME:-$current}"
-  preferred="$(printf '%s' "$preferred" | tr '[:upper:]' '[:lower:]')"
-  if ! valid_hostname "$preferred"; then
-    if valid_hostname "$current"; then
-      preferred="$current"
-    else
-      die "$(ui_text "Rejoin cannot determine a valid computer name from join state or the current hostname" "Не удалось определить допустимое имя компьютера для Rejoin из состояния Join или текущего hostname")"
-    fi
-  fi
-
-  HOSTNAME="$preferred"
-  FQDN="${HOSTNAME}.${DOMAIN}"
-  info "$(ui_text "Using computer name: ${HOSTNAME}" "Используется имя компьютера: ${HOSTNAME}")"
-  info "$(ui_text "Rejoin: searching LDAP for computer ${HOSTNAME}" "Повторное присоединение: поиск компьютера ${HOSTNAME} в LDAP")"
-
-  if [[ -n "${SAVED_COMPUTER_DN:-}" ]] && lookup_computer_by_dn "$SAVED_COMPUTER_DN"; then
-    use_computer_lookup_result
-  elif lookup_computer_by_name "$preferred"; then
-    use_computer_lookup_result
-  elif [[ "$preferred" != "$current" ]] && valid_hostname "$current" \
-      && lookup_computer_by_name "$current"; then
-    use_computer_lookup_result
-  fi
-
-  if [[ "${EXISTING_COMPUTER_FOUND:-0}" == "1" ]]; then
-    candidate="${COMPUTER_LOOKUP_CN:-$preferred}"
-    candidate="$(printf '%s' "$candidate" | tr '[:upper:]' '[:lower:]')"
-    valid_hostname "$candidate" \
-      || die "$(ui_text "The existing LDAP computer has an invalid cn: ${candidate}" "У существующего объекта компьютера в LDAP некорректный cn: ${candidate}")"
-    if [[ "$candidate" != "$current" ]]; then
-      apply_hostname "$candidate"
-    else
-      HOSTNAME="$current"
-      FQDN="${HOSTNAME}.${DOMAIN}"
-    fi
-    info "$(ui_text "Existing computer found; hostname prompt skipped: ${HOSTNAME}" "Существующий компьютер найден; запрос имени пропущен: ${HOSTNAME}")"
-    log "Rejoin will reuse exact computer DN: ${COMPUTER_DN}"
-    return 0
-  fi
-
-  if [[ "$preferred" != "$current" ]]; then
-    apply_hostname "$preferred"
-  fi
-  info "$(ui_text "No existing computer object was found; the known hostname will be used: ${HOSTNAME}" "Существующий объект компьютера не найден; будет использовано известное имя: ${HOSTNAME}")"
 }
 
 prompt_edition() {
@@ -231,18 +190,23 @@ configure_dns_systemd_resolved() {
   local ns="$1"
   local resolved_dir="/etc/systemd/resolved.conf.d"
   local resolved_file="${resolved_dir}/MultiDirectory.conf"
-  local resolv_target=""
+  local resolv_target
 
   have_cmd systemctl || return 1
-  systemctl is-active --quiet systemd-resolved.service 2>/dev/null || return 1
+  systemctl list-unit-files systemd-resolved.service >/dev/null 2>&1 || return 1
 
-  # An installed/running resolved is not necessarily the system resolver.  Only
-  # use it when resolv.conf is actually connected to one of its managed files.
-  [[ -L /etc/resolv.conf ]] || return 1
+  # Merely having systemd-resolved installed does not mean that libc uses it.
+  # In particular, NetworkManager commonly owns a regular /etc/resolv.conf.
+  # Do not report success unless the system resolver is actually connected to
+  # one of systemd-resolved's resolv.conf files.
   resolv_target="$(readlink -f /etc/resolv.conf 2>/dev/null || true)"
   case "$resolv_target" in
-    /run/systemd/resolve/resolv.conf|/run/systemd/resolve/stub-resolv.conf) ;;
-    *) return 1 ;;
+    /run/systemd/resolve/resolv.conf|/run/systemd/resolve/stub-resolv.conf)
+      ;;
+    *)
+      log "systemd-resolved is installed but does not manage /etc/resolv.conf; skipping"
+      return 1
+      ;;
   esac
 
   mkdir -p "$resolved_dir"
@@ -256,9 +220,10 @@ EOF
   chmod 0644 "$resolved_file"
   md_track "$resolved_file"
 
-  systemctl restart systemd-resolved.service || return 1
-  log "Resolver backend: systemd-resolved (${resolv_target})"
+  systemctl enable systemd-resolved.service >/dev/null 2>&1 || true
+  systemctl restart systemd-resolved.service || true
 
+  log "resolv.conf is managed by systemd-resolved via ${resolv_target}"
   log "Persistent DNS configured via systemd-resolved: ${ns}"
   return 0
 }
@@ -268,7 +233,7 @@ configure_dns_networkmanager() {
   local nm_dns="$1"
   local iface conn_uuid previous_dns previous_ignore_auto_dns
   local previous_dns_priority previous_ipv6_ignore_auto_dns
-  local applied_dns applied_ignore_auto_dns attempt
+  local applied_dns applied_ignore_auto_dns state_file
 
   have_cmd nmcli || return 1
   LC_ALL=C nmcli -t -f RUNNING general 2>/dev/null | grep -qx 'running' || return 1
@@ -282,7 +247,8 @@ configure_dns_networkmanager() {
   )"
   [[ -n "$conn_uuid" ]] || return 1
 
-  if [[ ! -f "$MD_NM_DNS_STATE" ]]; then
+  state_file="${MD_OPERATION_NM_DNS_STATE:-$MD_NM_DNS_STATE}"
+  if [[ ! -f "$state_file" ]]; then
     previous_dns="$(LC_ALL=C nmcli -g ipv4.dns connection show uuid "$conn_uuid" 2>/dev/null | paste -sd, -)"
     previous_ignore_auto_dns="$(LC_ALL=C nmcli -g ipv4.ignore-auto-dns connection show uuid "$conn_uuid" 2>/dev/null | head -n1)"
     previous_dns_priority="$(LC_ALL=C nmcli -g ipv4.dns-priority connection show uuid "$conn_uuid" 2>/dev/null | head -n1)"
@@ -294,8 +260,8 @@ configure_dns_networkmanager() {
       write_join_state_var IPV4_IGNORE_AUTO_DNS "${previous_ignore_auto_dns:-no}"
       write_join_state_var IPV4_DNS_PRIORITY "${previous_dns_priority:-0}"
       write_join_state_var IPV6_IGNORE_AUTO_DNS "${previous_ipv6_ignore_auto_dns:-no}"
-    } > "$MD_NM_DNS_STATE"
-    chmod 600 "$MD_NM_DNS_STATE"
+    } > "$state_file"
+    chmod 600 "$state_file"
     log "Saved NetworkManager DNS state for connection ${conn_uuid}"
   fi
 
@@ -306,9 +272,7 @@ configure_dns_networkmanager() {
     ipv6.ignore-auto-dns yes \
     || return 1
 
-  if ! LC_ALL=C nmcli device reapply "$iface" >/dev/null 2>&1; then
-    LC_ALL=C nmcli connection up uuid "$conn_uuid" >/dev/null 2>&1 || return 1
-  fi
+  LC_ALL=C nmcli connection up uuid "$conn_uuid" >/dev/null 2>&1 || return 1
 
   applied_ignore_auto_dns="$(LC_ALL=C nmcli -g ipv4.ignore-auto-dns connection show uuid "$conn_uuid" 2>/dev/null | head -n1)"
   [[ "$applied_ignore_auto_dns" == "yes" ]] || {
@@ -316,17 +280,8 @@ configure_dns_networkmanager() {
     return 1
   }
 
-  for attempt in 1 2 3 4 5; do
-    applied_dns="$(LC_ALL=C nmcli -g IP4.DNS device show "$iface" 2>/dev/null | paste -sd' ' -)"
-    log "NetworkManager DNS readiness ${attempt}/5 on ${iface}: ${applied_dns:-not reported}"
-    dns_server_lists_match "$ns" "$applied_dns" && break
-    (( attempt < 5 )) && sleep 1
-  done
-  dns_server_lists_match "$ns" "$applied_dns" || {
-    warn "NetworkManager effective DNS does not contain all requested servers on ${iface}"
-    log_dns_diagnostics "$ns" "$iface" "$conn_uuid"
-    return 1
-  }
+  applied_dns="$(LC_ALL=C nmcli -g IP4.DNS device show "$iface" 2>/dev/null | paste -sd' ' -)"
+  log "Active NetworkManager DNS on ${iface}: ${applied_dns:-not reported}"
 
   if have_cmd resolvectl; then
     resolvectl flush-caches >/dev/null 2>&1 || true
@@ -345,8 +300,9 @@ restore_networkmanager_dns_state() {
   local IPV4_IGNORE_AUTO_DNS="no"
   local IPV4_DNS_PRIORITY="0"
   local IPV6_IGNORE_AUTO_DNS="no"
+  local state_file="${1:-${MD_OPERATION_NM_DNS_STATE:-$MD_NM_DNS_STATE}}"
 
-  [[ -f "$MD_NM_DNS_STATE" ]] || return 0
+  [[ -f "$state_file" ]] || return 0
   have_cmd nmcli || {
     warn "Cannot restore NetworkManager DNS state: nmcli is unavailable"
     return 1
@@ -354,7 +310,7 @@ restore_networkmanager_dns_state() {
 
   # The file is generated by write_join_state_var in a root-only state directory.
   # shellcheck disable=SC1090
-  . "$MD_NM_DNS_STATE"
+  . "$state_file"
 
   [[ -n "$CONNECTION_UUID" ]] || {
     warn "Cannot restore NetworkManager DNS state: connection UUID is missing"
@@ -371,11 +327,8 @@ restore_networkmanager_dns_state() {
       return 1
     }
 
-  LC_ALL=C nmcli connection up uuid "$CONNECTION_UUID" >/dev/null 2>&1 || {
-    warn "Failed to activate restored NetworkManager DNS state for ${CONNECTION_UUID}"
-    return 1
-  }
-  rm -f "$MD_NM_DNS_STATE"
+  LC_ALL=C nmcli connection up uuid "$CONNECTION_UUID" >/dev/null 2>&1 || true
+  rm -f "$state_file"
   log "Restored NetworkManager DNS state for connection ${CONNECTION_UUID}"
   info "$(ui_text "Original NetworkManager DNS settings were restored" "Исходные настройки DNS NetworkManager восстановлены")"
 }
@@ -427,8 +380,9 @@ configure_dns_static_resolv_conf() {
 md_set_resolv_first() {
   local ns="$1"
 
-  # NetworkManager owns the active connection on the common Astra setup, even
-  # when it delegates lookups to systemd-resolved.  Configure that owner first.
+  # Prefer the active connection manager. It owns /etc/resolv.conf on systems
+  # where the file contains "Generated by NetworkManager" and persists the
+  # DNS settings in the connection profile.
   if configure_dns_networkmanager "$ns"; then
     return 0
   fi
@@ -471,8 +425,11 @@ normalize_dns_servers() {
   [[ -n "$cleaned" ]] || return 1
   [[ "$cleaned" != *, ]] || return 1
   [[ "$cleaned" != ,* ]] || return 1
+  [[ "$cleaned" != *,,* ]] || return 1
 
-  # Accept the interactive CSV form and the legacy space-separated state form.
+  # .env uses comma-separated values, while join.env stores the normalized
+  # space-separated form. Accept both so a successful Join can always be
+  # loaded by Rejoin and Leave.
   cleaned="${cleaned//,/ }"
   read -r -a parts <<< "$cleaned"
   [[ "${#parts[@]}" -ge 1 && "${#parts[@]}" -le "$MAX_DNS_SERVERS" ]] || return 1
@@ -494,75 +451,6 @@ dns_servers_csv() {
   printf '%s\n' "${ns// /,}"
 }
 
-dns_server_lists_match() {
-  local requested="$1" effective="$2" server
-
-  for server in $requested; do
-    [[ " $effective " == *" $server "* ]] || return 1
-  done
-}
-
-log_dns_diagnostics() {
-  local requested="${1:-${MD_DNS_SERVER:-}}"
-  local iface="${2:-$(detect_default_iface)}"
-  local conn_uuid="${3:-}"
-
-  log "Requested DNS servers: ${requested:-not configured}"
-  log "Active NetworkManager interface: ${iface:-not detected}"
-  [[ -n "$conn_uuid" ]] && log "Active NetworkManager connection UUID: ${conn_uuid}"
-  if have_cmd nmcli && [[ -n "$iface" ]]; then
-    log "NetworkManager effective DNS: $(LC_ALL=C nmcli -g IP4.DNS device show "$iface" 2>/dev/null | paste -sd' ' -)"
-  fi
-  if have_cmd resolvectl; then
-    log "resolvectl DNS: $(resolvectl dns "$iface" 2>/dev/null | tr '\n' ' ')"
-  fi
-  log "/etc/resolv.conf target: $(readlink -f /etc/resolv.conf 2>/dev/null || printf '%s' /etc/resolv.conf)"
-  while IFS= read -r line; do log "/etc/resolv.conf: ${line}"; done < /etc/resolv.conf
-}
-
-log_direct_dns_queries() {
-  local fqdn="$1" server result
-
-  for server in ${MD_DNS_SERVER:-}; do
-    if have_cmd dig; then
-      result="$(dig +time=2 +tries=1 +short @"$server" "$fqdn" A 2>/dev/null | paste -sd, -)"
-      log "Direct DNS query ${server} for ${fqdn}: ${result:-no answer}"
-    elif have_cmd nslookup; then
-      result="$(nslookup "$fqdn" "$server" 2>/dev/null | awk '/^Address: / {print $2}' | paste -sd, -)"
-      log "Direct DNS query ${server} for ${fqdn}: ${result:-no answer}"
-    fi
-  done
-}
-
-show_dns_failure_summary() {
-  local iface configured
-
-  iface="$(detect_default_iface)"
-  configured="not configured"
-  [[ -n "${MD_DNS_SERVER:-}" ]] && configured="$(dns_servers_csv "$MD_DNS_SERVER")"
-  info "$(ui_text "Configured DNS servers: ${configured}" "Настроенные DNS-серверы: ${configured}")"
-  info "$(ui_text "Active NetworkManager interface: ${iface:-not detected}" "Активный интерфейс NetworkManager: ${iface:-не определён}")"
-  info "$(ui_text "See the detailed resolver diagnostics in the log." "Подробная диагностика резолвера записана в журнал.")"
-}
-
-wait_for_dns_resolution() {
-  local fqdn="$1" attempt address
-
-  for attempt in 1 2 3 4 5; do
-    address="$(getent ahostsv4 "$fqdn" 2>/dev/null | awk 'NR == 1 {print $1}')"
-    if [[ -n "$address" ]]; then
-      log "DNS resolution succeeded on attempt ${attempt}/5: ${fqdn} -> ${address}"
-      return 0
-    fi
-    log "DNS resolution pending ${attempt}/5: ${fqdn}"
-    (( attempt < 5 )) && sleep 1
-  done
-
-  log_dns_diagnostics
-  log_direct_dns_queries "$fqdn"
-  return 1
-}
-
 prompt_configure_dns() {
   local choice dns_input dns_servers default_dns default_choice
   local default_dns_csv
@@ -580,7 +468,7 @@ prompt_configure_dns() {
         ;;
       *)
         if ! dns_servers="$(normalize_dns_servers "$dns_input")"; then
-          die "Invalid MD_DNS_SERVER in environment. Example: 8.8.8.8 or 8.8.8.8,1.1.1.1"
+          die "Invalid MD_DNS_SERVER in environment. Example: 192.168.1.10 or 192.168.1.10,8.8.8.8,1.1.1.1"
         fi
 
         log "DNS input validated: $(dns_servers_csv "$dns_servers")"
@@ -619,7 +507,7 @@ prompt_configure_dns() {
             read_tty dns_input "$(ui_text "Enter DNS server IPs, separated by comma [${default_dns_csv}]:" "Введите IP-адреса DNS-серверов через запятую [${default_dns_csv}]:")"
             dns_input="${dns_input:-$default_dns_csv}"
           else
-            read_tty dns_input "$(tr_text prompt.dns_servers)"
+            read_tty dns_input "$(ui_text "Enter DNS server IPs, separated by comma [example: 192.168.1.10 or 192.168.1.10,8.8.8.8,1.1.1.1]:" "Введите IP-адреса DNS-серверов через запятую [пример: 192.168.1.10 или 192.168.1.10,8.8.8.8,1.1.1.1]:")"
           fi
           if dns_servers="$(normalize_dns_servers "$dns_input")"; then
             log "DNS input validated: $(dns_servers_csv "$dns_servers")"
@@ -630,7 +518,7 @@ prompt_configure_dns() {
               warn "$(ui_text "Failed to set DNS. Please check the IP addresses and network." "Не удалось настроить DNS. Проверьте IP-адреса и сеть.")"
             fi
           else
-            warn "$(ui_text "Invalid DNS input. Example: 8.8.8.8 or 8.8.8.8,1.1.1.1" "Некорректные DNS-адреса. Пример: 8.8.8.8 или 8.8.8.8,1.1.1.1")"
+            warn "$(ui_text "Invalid DNS input. Example: 192.168.1.10 or 192.168.1.10,8.8.8.8,1.1.1.1" "Некорректные DNS-адреса. Пример: 192.168.1.10 или 192.168.1.10,8.8.8.8,1.1.1.1")"
           fi
         done
         ;;

@@ -30,6 +30,10 @@ SALT_MODULES_SRC="${FILES_DIR}/_modules"
 SALT_MINION_EXTMODS_MODULES_DIR="/var/cache/salt/minion/extmods/modules"
 SALT_PKG_MODULE_SRC="${SALT_MODULES_SRC}/pkg.py"
 SALT_PKG_MODULE_DST="${SALT_MINION_EXTMODS_MODULES_DIR}/pkg.py"
+SALT_SCHEDULE_SRC="${SALT_SRC}/schedule.conf"
+SALT_SCHEDULE_DST="/etc/salt/minion.d/schedule.conf"
+SALT_SYSTEMD_OVERRIDE_SRC="${FILES_DIR}/systemd/salt-minion.service.d/override.conf"
+SALT_SYSTEMD_OVERRIDE_DST="/etc/systemd/system/salt-minion.service.d/override.conf"
 MD_GPUPDATE_SRC="${FILES_DIR}/md-gpupdate"
 MD_GPUPDATE_DST="/usr/local/libexec/multidirectory/md-gpupdate"
 MD_GPUPDATE_LINK="/usr/local/bin/md-gpupdate"
@@ -43,8 +47,10 @@ MD_JOIN_ENV="${MD_STATE_DIR}/join.env"
 MD_PENDING_BACKUP="${MD_STATE_DIR}/active-backup"
 MD_ROLLBACK_MARKER="${MD_STATE_DIR}/rollback-in-progress"
 MD_NM_DNS_STATE="${MD_STATE_DIR}/networkmanager-dns.env"
+MD_OPERATION_NM_DNS_STATE=""
 MD_AUTHSELECT_STATE="${MD_STATE_DIR}/authselect.profile"
 MD_SSSD_SOCKET_STATE="${MD_STATE_DIR}/sssd-sockets.state"
+MD_ACTIVITY_PID=""
 
 INSTALL_STATE_DIR="/var/lib/MultiDirectory/install"
 INSTALL_ENV="${INSTALL_STATE_DIR}/install.env"
@@ -59,38 +65,79 @@ log() {
   printf '[DETAIL] %s\n' "$*" >> "$LOG_FILE" 2>/dev/null || true
 }
 
-detail() {
-  # Technical diagnostics belong in the join log and must not clutter the
-  # administrator-facing progress output.
-  log "$*"
+activity_clear_line() {
+  if [[ -n "${MD_ACTIVITY_PID:-}" ]]; then
+    printf '\r\033[K' > /dev/tty 2>/dev/null || true
+  fi
+}
+
+activity_stop() {
+  if [[ -n "${MD_ACTIVITY_PID:-}" ]]; then
+    kill "$MD_ACTIVITY_PID" 2>/dev/null || true
+    wait "$MD_ACTIVITY_PID" 2>/dev/null || true
+    printf '\r\033[K' > /dev/tty 2>/dev/null || true
+    MD_ACTIVITY_PID=""
+  fi
+  return 0
+}
+
+activity_start() {
+  local message
+
+  activity_stop
+  message="$(runtime_text "$*")"
+  printf '[INFO] %s\n' "$message" >> "$LOG_FILE" 2>/dev/null || true
+  [[ -t 0 && -w /dev/tty ]] || return 0
+
+  (
+    local frame=0
+    local -a frames=('|' '/' '-' "\\")
+    trap 'exit 0' INT TERM
+    while true; do
+      printf '\r%b[%s]%b %s' "$BLUE" "${frames[$frame]}" "$NC" "$message" > /dev/tty
+      frame=$(( (frame + 1) % ${#frames[@]} ))
+      sleep 0.2
+    done
+  ) &
+  MD_ACTIVITY_PID=$!
 }
 
 info() {
   local message="$(runtime_text "$*")"
-  printf '%b\n' "${BLUE}[INFO]${NC} ${message}" > /dev/tty
   printf '[INFO] %s\n' "$message" >> "$LOG_FILE" 2>/dev/null || true
 }
 
 ok() {
   local message="$(runtime_text "$*")"
+  printf '[OK] %s\n' "$message" >> "$LOG_FILE" 2>/dev/null || true
+}
+
+user_info() {
+  local message="$(runtime_text "$*")"
+  activity_stop
+  printf '%b\n' "${BLUE}[INFO]${NC} ${message}" > /dev/tty
+  printf '[INFO] %s\n' "$message" >> "$LOG_FILE" 2>/dev/null || true
+}
+
+user_ok() {
+  local message="$(runtime_text "$*")"
+  activity_stop
   printf '%b\n' "${GREEN}[OK]${NC} ${message}" > /dev/tty
   printf '[OK] %s\n' "$message" >> "$LOG_FILE" 2>/dev/null || true
 }
 
 warn() {
   local message="$(runtime_text "$*")"
+  activity_clear_line
   printf '%b\n' "${YELLOW}[WARN]${NC} ${message}" > /dev/tty
   printf '[WARN] %s\n' "$message" >> "$LOG_FILE" 2>/dev/null || true
 }
 
 die() {
-  local raw_message="$*"
-  local message="$(runtime_text "$raw_message")"
+  local message="$(runtime_text "$*")"
+  activity_stop
   printf '%b\n' "${RED}[ERROR]${NC} ${message}" > /dev/tty
   printf '[ERROR] %s\n' "$message" >> "$LOG_FILE" 2>/dev/null || true
-  if [[ "$message" != "$raw_message" ]]; then
-    printf '[DETAIL] Raw error: %s\n' "$raw_message" >> "$LOG_FILE" 2>/dev/null || true
-  fi
   printf '%b\n' "${BLUE}[INFO]${NC} Full log: ${LOG_FILE}" > /dev/tty
   printf '[INFO] Full log: %s\n' "$LOG_FILE" >> "$LOG_FILE" 2>/dev/null || true
 
@@ -104,29 +151,8 @@ die() {
   exit 1
 }
 
-report_command_failure() {
-  local code="$1"
-  local source_file="$2"
-  local function_name="$3"
-  local line="$4"
-  local command="$5"
-  local console=/dev/stderr
-
-  if [[ -w /dev/tty ]]; then
-    console=/dev/tty
-  fi
-
-  printf '[ERROR] Command failed\n' >> "$LOG_FILE" 2>/dev/null || true
-  printf '[DETAIL] file: %s\n' "$source_file" >> "$LOG_FILE" 2>/dev/null || true
-  printf '[DETAIL] function: %s\n' "$function_name" >> "$LOG_FILE" 2>/dev/null || true
-  printf '[DETAIL] line: %s\n' "$line" >> "$LOG_FILE" 2>/dev/null || true
-  printf '[DETAIL] exit_code: %s\n' "$code" >> "$LOG_FILE" 2>/dev/null || true
-  printf '[DETAIL] command: %s\n' "$command" >> "$LOG_FILE" 2>/dev/null || true
-  printf '%b\n' "${RED}[ERROR]${NC} $(ui_text "Command failed in ${function_name} at ${source_file}:${line} (exit ${code})" "Ошибка команды в ${function_name}, ${source_file}:${line} (код ${code})")" > "$console"
-  printf '%b\n' "${BLUE}[INFO]${NC} Full log: ${LOG_FILE}" > "$console"
-}
-
 tty_echo() {
+  activity_stop
   printf '%b\n' "$*" > /dev/tty
 }
 
@@ -217,6 +243,7 @@ read_tty() {
   local var="$1"
   local prompt="$2"
 
+  activity_stop
   printf '%b ' "${YELLOW}${prompt}${NC}" > /dev/tty
   if ! read_clean_input "$var" < /dev/tty; then
     warn "Input contains invalid characters. Please enter the value again."
@@ -229,6 +256,7 @@ read_secret_tty() {
   local var="$1"
   local prompt="$2"
 
+  activity_stop
   printf -v "$var" '%s' ""
   printf '%b ' "${YELLOW}${prompt}${NC}" > /dev/tty
   IFS= read -rs "$var" < /dev/tty
@@ -380,29 +408,31 @@ salt_minion_unit_exists() {
 }
 
 print_salt_diagnostics() {
-  warn "Salt minion diagnostics:"
+  warn "$(ui_text "Salt minion failed; diagnostics were written to ${LOG_FILE}" "Ошибка Salt minion; диагностика записана в ${LOG_FILE}")"
+
+  printf '[DETAIL] Salt minion diagnostics:\n' >> "$LOG_FILE"
 
   if have_cmd salt-minion; then
-    salt-minion --version 2>/dev/null | sed 's/^/  binary: /' || true
+    salt-minion --version 2>/dev/null | sed 's/^/  binary: /' >> "$LOG_FILE" || true
   else
-    warn "salt-minion binary not found in PATH"
+    printf '  salt-minion binary not found in PATH\n' >> "$LOG_FILE"
   fi
 
   if have_cmd dpkg-query; then
-    dpkg-query -W -f='  dpkg: ${binary:Package} ${Version} ${Status}\n' 'salt*' 2>/dev/null || true
+    dpkg-query -W -f='  dpkg: ${binary:Package} ${Version} ${Status}\n' 'salt*' >> "$LOG_FILE" 2>/dev/null || true
   fi
 
   if have_cmd rpm; then
-    rpm -qa | grep -Ei '^salt|minion' | sed 's/^/  rpm: /' || true
+    rpm -qa | grep -Ei '^salt|minion' | sed 's/^/  rpm: /' >> "$LOG_FILE" || true
   fi
 
-  systemctl list-unit-files 2>/dev/null | grep -E '^salt|minion' | sed 's/^/  unit: /' || true
+  systemctl list-unit-files 2>/dev/null | grep -E '^salt|minion' | sed 's/^/  unit: /' >> "$LOG_FILE" || true
 
   if [[ -f /etc/salt/minion_id ]]; then
-    sed 's/^/  minion_id: /' /etc/salt/minion_id 2>/dev/null || true
+    sed 's/^/  minion_id: /' /etc/salt/minion_id >> "$LOG_FILE" 2>/dev/null || true
   fi
 
-  grep -RniE '^\s*id\s*:' /etc/salt 2>/dev/null | sed 's/^/  config-id: /' || true
+  grep -RniE '^\s*id\s*:' /etc/salt 2>/dev/null | sed 's/^/  config-id: /' >> "$LOG_FILE" || true
 }
 
 require_salt_minion_ready() {
@@ -422,10 +452,10 @@ require_salt_minion_ready() {
 restart_salt_minion_or_die() {
   require_salt_minion_ready
 
-  systemctl daemon-reload || true
+  systemctl daemon-reload >> "$LOG_FILE" 2>&1 || true
   systemctl enable salt-minion.service >/dev/null 2>&1 || true
-  systemctl restart salt-minion.service || {
-    systemctl status salt-minion.service --no-pager -l 2>/dev/null || true
+  systemctl restart salt-minion.service >> "$LOG_FILE" 2>&1 || {
+    systemctl status salt-minion.service --no-pager -l >> "$LOG_FILE" 2>&1 || true
     die "Failed to restart salt-minion.service"
   }
 
@@ -464,6 +494,7 @@ managed_join_paths() {
     /etc/pam.d/common-session /etc/pam.d/common-password \
     /etc/ssh/sshd_config.d/ssh_md.conf /etc/sudoers.d/domain-admins \
     /etc/systemd/resolved.conf.d/MultiDirectory.conf \
+    "$SALT_SYSTEMD_OVERRIDE_DST" \
     /etc/salt/minion /etc/salt/minion.append /etc/salt/minion_id \
     /etc/salt/pki/minion /etc/profile.d/multidirectory-prompt.sh \
     /usr/local/sbin/md-cache-accountsservice-user /usr/bin/sudo \
@@ -517,17 +548,129 @@ create_backup_set() {
 }
 
 create_join_backup() {
+  MD_OPERATION_NM_DNS_STATE=""
   create_backup_set join
 }
 
 create_recovery_backup() {
-  create_backup_set rejoin
+  create_backup_set rejoin || return 1
+  MD_OPERATION_NM_DNS_STATE="${MD_BACKUP_DIR}/networkmanager-dns.env"
+  # join.env is not part of the static managed-path list because older
+  # pre-Join backups must remain valid. Capture it dynamically for Rejoin so
+  # an interrupted/failed refresh restores the previous saved state as well.
+  md_backup_once "$MD_JOIN_ENV"
+}
+
+legacy_backup_safe_name() {
+  printf '%s' "${1//\//__}"
+}
+
+legacy_manifest_path_is_safe() {
+  local path="$1"
+
+  [[ "$path" == /* ]] || return 1
+  [[ "$path" != *$'\n'* && "$path" != *$'\r'* ]] || return 1
+  case "/${path#/}/" in
+    */../*|*/./*) return 1 ;;
+  esac
+  return 0
+}
+
+migrate_legacy_prejoin_backup() {
+  local legacy_manifest="${MD_STATE_DIR}/manifest"
+  local legacy_backup_dir="${MD_STATE_DIR}/backups"
+  local stamp candidate=0 migrated_dir migrated_manifest
+  local path key rel existed legacy_safe tmp_join_env
+
+  [[ -f "$MD_JOIN_ENV" && -r "$legacy_manifest" && -d "$legacy_backup_dir" ]] || return 1
+
+  while IFS= read -r path || [[ -n "$path" ]]; do
+    [[ -n "$path" ]] || continue
+    legacy_manifest_path_is_safe "$path" || {
+      warn "Legacy join manifest contains an unsafe path: ${path}"
+      return 1
+    }
+  done < "$legacy_manifest"
+
+  mkdir -p "$MD_BACKUPS_ROOT"
+  chmod 700 "$MD_BACKUPS_ROOT"
+  stamp="$(date '+%Y%m%d-%H%M%S')"
+  migrated_dir="${MD_BACKUPS_ROOT}/join-${stamp}-legacy"
+  while [[ -e "$migrated_dir" ]]; do
+    candidate=$((candidate + 1))
+    migrated_dir="${MD_BACKUPS_ROOT}/join-${stamp}-legacy-${candidate}"
+  done
+  migrated_manifest="${migrated_dir}/manifest.env"
+  mkdir -p "$migrated_dir/files"
+  chmod 700 "$migrated_dir" "$migrated_dir/files"
+  {
+    printf 'BACKUP_VERSION=1\n'
+    printf 'BACKUP_KIND=join\n'
+    printf 'CREATED_AT=%q\n' "$(date --iso-8601=seconds)"
+    printf 'BACKUP_DIR=%q\n' "$migrated_dir"
+    printf 'MIGRATED_FROM=%q\n' "$legacy_manifest"
+  } > "$migrated_manifest"
+
+  while IFS= read -r path; do
+    [[ -n "$path" ]] || continue
+    # State metadata is removed as a unit after Leave and must never be
+    # restored recursively from inside its own backup.
+    case "$path" in "$MD_ETC_DIR"|"$MD_ETC_DIR"/*) continue ;; esac
+
+    key="$(backup_key "$path")"
+    rel="${path#/}"
+    existed=0
+    legacy_safe="$(legacy_backup_safe_name "$path")"
+
+    if grep -Fxq "$path" "$legacy_manifest"; then
+      if [[ -e "$legacy_backup_dir/$legacy_safe" || -L "$legacy_backup_dir/$legacy_safe" ]]; then
+        mkdir -p "$migrated_dir/files/$(dirname "$rel")"
+        cp -a -- "$legacy_backup_dir/$legacy_safe" "$migrated_dir/files/$rel" || return 1
+        existed=1
+      fi
+    elif [[ -e "$path" || -L "$path" ]]; then
+      # The old Join did not touch this path. Preserve its current value so
+      # the expanded path list in the new format cannot delete it on Leave.
+      mkdir -p "$migrated_dir/files/$(dirname "$rel")"
+      cp -a -- "$path" "$migrated_dir/files/$rel" || return 1
+      existed=1
+    fi
+
+    printf '%s_PATH=%q\n%s_EXISTED=%s\n%s_BACKUP=%q\n' \
+      "$key" "$path" "$key" "$existed" "$key" "files/$rel" >> "$migrated_manifest"
+  done < <(
+    {
+      managed_join_paths
+      sed -n '/^[[:space:]]*\//p' "$legacy_manifest"
+    } | awk '!seen[$0]++'
+  )
+  chmod 600 "$migrated_manifest"
+
+  MD_BACKUP_DIR="$migrated_dir"
+  MD_MANIFEST="$migrated_manifest"
+  validate_join_backup || return 1
+
+  # Only publish the migrated backup after it is complete. Replace an empty
+  # legacy key as well as handling files that did not contain the key at all.
+  tmp_join_env="$(mktemp "${MD_STATE_DIR}/join.env.migrate.XXXXXX")"
+  sed '/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}BACKUP_DIR=/d' \
+    "$MD_JOIN_ENV" > "$tmp_join_env"
+  printf 'BACKUP_DIR=%s\n' "$migrated_dir" >> "$tmp_join_env"
+  chmod 600 "$tmp_join_env"
+  chown root:root "$tmp_join_env" 2>/dev/null || true
+  mv -f "$tmp_join_env" "$MD_JOIN_ENV"
+
+  log "Legacy pre-join backup migrated: ${legacy_manifest} -> ${migrated_dir}"
+  return 0
 }
 
 load_prejoin_backup() {
   local backup
   backup="$(join_state_value BACKUP_DIR 2>/dev/null || true)"
-  [[ -n "$backup" ]] || return 1
+  if [[ -z "$backup" ]]; then
+    migrate_legacy_prejoin_backup || return 1
+    return 0
+  fi
   case "$backup" in "$MD_BACKUPS_ROOT"/join-*) ;; *) return 1 ;; esac
   [[ -d "$backup" && -r "$backup/manifest.env" ]] || return 1
   MD_BACKUP_DIR="$backup"
@@ -542,8 +685,17 @@ load_active_backup() {
     [[ -d "$backup" && -r "$backup/manifest.env" ]] || return 1
     MD_BACKUP_DIR="$backup"
     MD_MANIFEST="$backup/manifest.env"
+    case "$backup" in
+      "$MD_BACKUPS_ROOT"/rejoin-*)
+        MD_OPERATION_NM_DNS_STATE="${backup}/networkmanager-dns.env"
+        ;;
+      *)
+        MD_OPERATION_NM_DNS_STATE=""
+        ;;
+    esac
     return 0
   fi
+  MD_OPERATION_NM_DNS_STATE=""
   load_prejoin_backup
 }
 

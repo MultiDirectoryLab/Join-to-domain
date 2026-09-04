@@ -9,9 +9,12 @@ configure_domain() {
   if recoverable_incomplete_join_detected; then
     status_info "$(ui_text "An incomplete previous join was found. Local recovery will run before retrying." "Обнаружено незавершённое предыдущее присоединение. Перед новой попыткой будет выполнено локальное восстановление.")"
   elif [[ "$DETECTED_DOMAIN_STATE" != "not_joined" ]]; then
-    warn "$(ui_text "Domain-related configuration already exists. Use 'Rejoin domain'." "Доменная конфигурация уже существует. Используйте пункт «Повторно присоединить к домену».")"
-    printf '  - %s\n' "${DETECTED_DOMAIN_REASONS[@]}"
-    return 1
+    if [[ "$DETECTED_DOMAIN_STATE" == "managed_join" ]]; then
+      status_info "$(ui_text "Existing domain membership found; it will be replaced with the new domain membership" "Обнаружено членство в существующем домене; оно будет заменено членством в новом домене")"
+    else
+      warn "$(ui_text "Partial domain configuration exists. Use 'Rejoin domain' to repair it." "Обнаружена частичная доменная конфигурация. Используйте «Повторно присоединить к домену» для её восстановления.")"
+      return 1
+    fi
   fi
 
   if [[ "${EUID:-$(id -u)}" -ne 0 && "$DRY_RUN" -eq 0 ]]; then

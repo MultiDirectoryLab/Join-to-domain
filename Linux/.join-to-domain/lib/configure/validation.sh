@@ -104,7 +104,7 @@ discover_and_validate_domain() {
   LDAP_COMPUTER_OU="cn=computers,${LDAP_BASE_DN}"
 
   if [[ "${WITH_SALT:-0}" -eq 1 ]]; then
-    build_salt_master_fqdns
+    configure_salt_master_from_api_ip
   fi
 
   log "Continuing common Join flow"
@@ -199,7 +199,7 @@ discover_controller_fqdn() {
 
 validate_sudoers() {
   if have_cmd visudo; then
-    visudo -cf /etc/sudoers || die "sudoers validation failed"
+    visudo -cf /etc/sudoers >> "$LOG_FILE" 2>&1 || die "sudoers validation failed"
   else
     warn "visudo not found, sudoers validation skipped"
   fi

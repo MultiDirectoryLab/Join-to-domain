@@ -148,7 +148,7 @@ install_pam_config() {
           warn "Current authselect profile could not be saved"
         fi
       fi
-      authselect select sssd with-mkhomedir --force || true
+      authselect select sssd with-mkhomedir --force >> "$LOG_FILE" 2>&1 || true
     fi
 
     systemctl enable --now oddjobd.service 2>/dev/null || true
@@ -182,7 +182,7 @@ install_pam_config() {
       [[ -f "${PAM_D_SRC}/common-session" ]] && install_local_file "${PAM_D_SRC}/common-session" /etc/pam.d/common-session 0644
       [[ -f "${PAM_D_SRC}/common-password" ]] && install_local_file "${PAM_D_SRC}/common-password" /etc/pam.d/common-password 0644
     else
-      pam-auth-update --enable mkhomedir || true
+    pam-auth-update --enable mkhomedir >> "$LOG_FILE" 2>&1 || true
     fi
   fi
 }
@@ -205,7 +205,7 @@ restore_authselect_state() {
     return 1
   }
 
-  authselect select "${authselect_args[@]}" --force || {
+  authselect select "${authselect_args[@]}" --force >> "$LOG_FILE" 2>&1 || {
     warn "Failed to restore authselect profile: ${authselect_args[*]}"
     return 1
   }
@@ -361,94 +361,52 @@ install_static_configs() {
   fi
 }
 
-reset_computer_lookup() {
-  COMPUTER_LOOKUP_DN=""
-  COMPUTER_LOOKUP_CN=""
-  COMPUTER_LOOKUP_UAC=""
-  COMPUTER_LOOKUP_GUID=""
-}
-
-parse_computer_lookup_response() {
-  local response="$1" count
-
-  count="$(printf '%s' "$response" | jq -r '[.search_result[]? | select(.object_name != null)] | length' 2>/dev/null)" \
-    || die "$(ui_text "Invalid computer search response from the directory" "Каталог вернул некорректный ответ при поиске компьютера")"
-  [[ "$count" =~ ^[0-9]+$ ]] \
-    || die "$(ui_text "Invalid computer search response from the directory" "Каталог вернул некорректный ответ при поиске компьютера")"
-
-  if (( count > 1 )); then
-    log "Ambiguous computer search returned ${count} objects"
-    printf '%s' "$response" | jq -r '.search_result[]?.object_name // empty' 2>/dev/null \
-      | while IFS= read -r dn; do log "Ambiguous computer candidate: ${dn}"; done
-    die "$(ui_text "Several matching computer objects were found in LDAP. No changes were made; resolve the duplicate objects and retry." "В LDAP найдено несколько подходящих объектов компьютера. Изменения не внесены; устраните дубликаты и повторите попытку.")"
-  fi
-
-  (( count == 1 )) || return 1
-  COMPUTER_LOOKUP_DN="$(printf '%s' "$response" | jq -r '.search_result[0].object_name // empty')"
-  COMPUTER_LOOKUP_CN="$(printf '%s' "$response" | jq -r '.search_result[0].partial_attributes[]? | select((.type | ascii_downcase)=="cn") | .vals[0] // empty' 2>/dev/null || true)"
-  COMPUTER_LOOKUP_UAC="$(printf '%s' "$response" | jq -r '.search_result[0].partial_attributes[]? | select((.type | ascii_downcase)=="useraccountcontrol") | .vals[0] // empty' 2>/dev/null || true)"
-  COMPUTER_LOOKUP_GUID="$(printf '%s' "$response" | jq -r '.search_result[0].partial_attributes[]? | select((.type | ascii_downcase)=="objectguid") | .vals[0] // empty' 2>/dev/null || true)"
-  [[ -n "$COMPUTER_LOOKUP_DN" ]]
-}
-
-lookup_computer_by_dn() {
-  local object_dn="$1" response
-
-  reset_computer_lookup
-  response="$(api_search "${access_token}" "$object_dn" 0 '(objectClass=computer)' '["cn","objectGUID","userAccountControl"]' 2)" \
-    || die "$(ui_text "Failed to search for the saved computer object in LDAP" "Не удалось найти сохранённый объект компьютера в LDAP")"
-  parse_computer_lookup_response "$response"
-}
-
-lookup_computer_by_name() {
-  local computer_name="$1" computer_fqdn response filter
-
-  reset_computer_lookup
-  valid_hostname "$computer_name" \
-    || die "$(ui_text "Invalid computer name used for LDAP search: ${computer_name}" "Для поиска в LDAP указано некорректное имя компьютера: ${computer_name}")"
-  [[ -n "${LDAP_BASE_DN:-}" ]] \
-    || die "$(ui_text "LDAP domain base is unavailable" "Не определена корневая запись домена LDAP")"
-
-  computer_fqdn="${computer_name}.${DOMAIN}"
-  filter="(&(objectClass=computer)(|(cn=${computer_name})(sAMAccountName=${computer_name})(sAMAccountName=${computer_name}\$)(servicePrincipalName=host/${computer_fqdn})))"
-  response="$(api_search "${access_token}" "${LDAP_BASE_DN}" 2 "$filter" '["cn","objectGUID","userAccountControl"]' 10)" \
-    || die "$(ui_text "Failed to search for computer ${computer_name} in LDAP" "Не удалось выполнить поиск компьютера ${computer_name} в LDAP")"
-  parse_computer_lookup_response "$response"
-}
-
-use_computer_lookup_result() {
-  COMPUTER_DN="$COMPUTER_LOOKUP_DN"
-  EXISTING_COMPUTER_UAC="$COMPUTER_LOOKUP_UAC"
-  EXISTING_COMPUTER_GUID="$COMPUTER_LOOKUP_GUID"
-  EXISTING_COMPUTER_FOUND=1
-}
-
 create_computer_object_if_needed() {
-  local computer_dn add_resp add_http add_body
+  local computer_dn exists_dn exists_uac search_resp add_resp add_http add_body
+  local search_count search_filter
 
   computer_dn="cn=${HOSTNAME},${LDAP_COMPUTER_OU}"
+  COMPUTER_DN="$computer_dn"
 
-  if [[ "${EXISTING_COMPUTER_FOUND:-0}" != "1" ]]; then
-    log "Searching the whole domain for computer ${HOSTNAME}"
-    if lookup_computer_by_name "$HOSTNAME"; then
-      use_computer_lookup_result
-    fi
+  log "Checking whether computer ${HOSTNAME} exists in the domain"
+
+  search_filter="(&(objectClass=computer)(|(cn=${HOSTNAME})(sAMAccountName=${HOSTNAME})(sAMAccountName=${HOSTNAME}\$)(servicePrincipalName=host/${FQDN})))"
+  search_resp="$(
+    api_search "${access_token}" "${LDAP_BASE_DN}" 2 "$search_filter" '["cn","userAccountControl"]' 10
+  )" || die "Failed to check whether computer object exists in LDAP"
+
+  search_count="$(printf '%s' "$search_resp" | jq -r '[.search_result[]? | select(.object_name != null)] | length' 2>/dev/null)" \
+    || die "Invalid computer search response from LDAP"
+  [[ "$search_count" =~ ^[0-9]+$ ]] || die "Invalid computer search response from LDAP"
+  if (( search_count > 1 )); then
+    printf '%s' "$search_resp" | jq -r '.search_result[]?.object_name // empty' 2>/dev/null \
+      | while IFS= read -r candidate_dn; do log "Duplicate computer candidate: ${candidate_dn}"; done
+    die "Several matching computer objects were found in LDAP; resolve duplicates before continuing"
   fi
 
-  if [[ "${EXISTING_COMPUTER_FOUND:-0}" == "1" ]]; then
-    info "$(ui_text "Existing computer object found and will be reused: ${COMPUTER_DN}" "Найден существующий объект компьютера, он будет использован повторно: ${COMPUTER_DN}")"
-    enable_computer_account_if_disabled "${COMPUTER_DN}" "${EXISTING_COMPUTER_UAC:-}"
+  exists_dn="$(
+    printf '%s' "$search_resp" \
+      | jq -r '.search_result[0].object_name // empty' 2>/dev/null || true
+  )"
+  exists_uac="$(
+    printf '%s' "$search_resp" \
+      | jq -r '.search_result[0].partial_attributes[]? | select(.type=="userAccountControl") | .vals[0] // empty' 2>/dev/null || true
+  )"
+
+  if [[ -n "${exists_dn}" ]]; then
+    info "Computer already exists in LDAP, creation skipped"
+    COMPUTER_DN="$exists_dn"
+    enable_computer_account_if_disabled "${exists_dn}" "${exists_uac}"
     return 0
   fi
 
-  COMPUTER_DN="$computer_dn"
   log "Creating computer object: ${computer_dn}"
 
   add_resp="$(
-    curl -sS -w "\n%{http_code}" \
+    curl -sS "${API_CURL_RESOLVE[@]}" -w "\n%{http_code}" \
       --connect-timeout "${API_CONNECT_TIMEOUT}" \
       --max-time "${API_MAX_TIME}" \
-      -X POST "https://${API_ADDRESS}/api/entry/add" \
+      -X POST "https://${API_HOST}/api/entry/add" \
       -H 'accept: application/json' \
       -H 'Content-Type: application/json' \
       -H "Cookie: id=${access_token}" \
@@ -475,7 +433,7 @@ create_computer_object_if_needed() {
 validate_keytab() {
   log "Checking keytab"
 
-  klist -k /etc/krb5.keytab || die "Invalid keytab"
+  klist -k /etc/krb5.keytab >> "$LOG_FILE" 2>&1 || die "Invalid keytab"
 
   if kinit -k "host/${FQDN}@${REALM}"; then
     log "Kerberos authentication succeeded: host/${FQDN}@${REALM}"
@@ -520,63 +478,36 @@ validate_ldap_uri_uses_fqdn() {
     die "LDAP URI must use FQDN, not IP address: ${URI}. IP-based Kerberos SPNs such as ldap/${host}@${REALM} are not supported."
   fi
 
-  [[ -n "${LDAP_GSSAPI_HOST:-}" ]] \
-    || die "LDAP GSSAPI host is not configured"
-
-  if [[ "${host,,}" != "${LDAP_GSSAPI_HOST,,}" ]]; then
-    die "LDAP URI host ${host} does not match the provisioned GSSAPI host ${LDAP_GSSAPI_HOST}"
+  if [[ "$host" != "${DOMAIN}" && "$host" != "${FQDN}" ]]; then
+    warn "LDAP URI host is ${host}; expected ${DOMAIN} or ${FQDN} to avoid Kerberos SPN mismatch"
   fi
 }
 
 validate_ldap_gssapi_auth() {
-  local ldap_client_conf="" ldap_host="" client_principal="" expected_spn=""
-  local kvno_output="" ldap_output=""
+  local ldap_client_conf="/tmp/md-ldap-gssapi.conf"
 
   log "Checking LDAP GSSAPI authentication"
 
   validate_ldap_uri_uses_fqdn
 
-  ldap_host="$(ldap_uri_host "${URI}")"
-  client_principal="host/${FQDN}@${REALM}"
-  expected_spn="${LDAP_SERVICE_PRINCIPAL:-ldap/${ldap_host}@${REALM}}"
-
-  detail "LDAP URI: ${URI}"
-  detail "LDAP hostname: ${ldap_host}"
-  detail "Kerberos realm: ${REALM}"
-  detail "Client principal: ${client_principal}"
-  detail "Expected LDAP SPN: ${expected_spn}"
-
-  if ! kinit -k "$client_principal"; then
-    die "Kerberos GSSAPI initialization failed: ${client_principal}"
+  if ! kinit -k "host/${FQDN}@${REALM}"; then
+    die "Kerberos GSSAPI initialization failed: host/${FQDN}@${REALM}"
   fi
 
-  if ! kvno_output="$(kvno "$expected_spn" 2>&1)"; then
-    log "LDAP service principal preflight failed: ${kvno_output}"
-    kdestroy || true
-    die "LDAP Kerberos service principal is unavailable: ${expected_spn}"
-  fi
-  log "LDAP service principal preflight succeeded: ${kvno_output}"
-
-  ldap_client_conf="$(mktemp /tmp/md-ldap-gssapi.XXXXXX)" \
-    || {
-      kdestroy || true
-      die "Failed to create temporary LDAP client configuration"
-    }
-  chmod 600 "$ldap_client_conf"
   cat > "$ldap_client_conf" <<EOF
 SASL_NOCANON on
 URI ${URI}
 BASE ${LDAP_BASE_DN}
 EOF
 
-  if ! ldap_output="$(LDAPCONF="$ldap_client_conf" ldapwhoami -Y GSSAPI -H "${URI}" 2>&1)"; then
-    log "LDAP GSSAPI bind failed for ${expected_spn}: ${ldap_output}"
-    rm -f "$ldap_client_conf"
-    kdestroy || true
-    die "LDAP GSSAPI authentication failed for ${expected_spn}"
-  fi
+  LDAPCONF="$ldap_client_conf" ldapwhoami -Y GSSAPI -H "${URI}" >/dev/null \
+    || {
+      rm -f "$ldap_client_conf"
+      kdestroy || true
+      die "LDAP GSSAPI authentication failed"
+    }
 
-  log "LDAP GSSAPI authentication succeeded for ${expected_spn}: ${ldap_output}"
+  log "LDAP GSSAPI authentication succeeded"
 
   rm -f "$ldap_client_conf"
   kdestroy || true
@@ -651,8 +582,8 @@ install_astra_parsec_sssd_packages() {
   fi
 
   log "Installing Astra SE PARSEC/SSSD packages: ${missing[*]}"
-  apt-get update || die "Failed to update package index before installing Astra SE PARSEC/SSSD packages"
-  apt-get install -y "${missing[@]}" || die "Failed to install Astra SE PARSEC/SSSD packages"
+  apt-get update >> "$LOG_FILE" 2>&1 || die "Failed to update package index before installing Astra SE PARSEC/SSSD packages"
+  apt-get install -y "${missing[@]}" >> "$LOG_FILE" 2>&1 || die "Failed to install Astra SE PARSEC/SSSD packages"
 
   astra_parsec_sssd_packages_installed || die "Astra SE PARSEC/SSSD packages are still missing after installation"
 }
@@ -747,7 +678,8 @@ validate_astra_parsec_sssd_config_or_rollback() {
 configure_astra_se_parsec_sssd() {
   is_astra_se || return 0
 
-  log "Astra Linux SE detected: preserving existing SSSD snippets and checking PARSEC/SSSD integration"
+  info "Astra Linux SE detected: preserving existing SSSD snippets"
+  log "Astra Linux SE detected: checking PARSEC/SSSD integration"
 
   if ! astra_parsec_mswitch_available; then
     return 0

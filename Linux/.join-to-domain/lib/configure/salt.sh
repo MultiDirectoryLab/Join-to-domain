@@ -10,10 +10,10 @@ api_delete_salt_minion_key() {
   fi
 
   resp="$(
-    curl -sS -w "\n%{http_code}" \
+    curl -sS "${API_CURL_RESOLVE[@]}" -w "\n%{http_code}" \
       --connect-timeout "${API_CONNECT_TIMEOUT}" \
       --max-time "${API_MAX_TIME}" \
-      -X DELETE "https://${API_ADDRESS}/api/salt/minion/${minion_id}" \
+      -X DELETE "https://${API_HOST}/api/salt/minion/${minion_id}" \
       -H "Cookie: id=${cookie}" \
       -H 'accept: application/json' 2>&1
   )" || {
@@ -35,7 +35,7 @@ api_delete_salt_minion_key() {
 }
 
 delete_salt_minion_key_on_leave() {
-  local guid lookup_resp lookup_base lookup_scope lookup_filter
+  local guid lookup_resp
 
   [[ "${WITH_SALT:-0}" -eq 1 ]] || {
     log "Community edition: Salt key cleanup skipped"
@@ -50,23 +50,14 @@ delete_salt_minion_key_on_leave() {
   guid="${SALT_MINION_ID:-}"
 
   if [[ -z "$guid" ]]; then
-    [[ -n "${COMPUTER_DN:-}" || ( -n "${LDAP_BASE_DN:-}" && -n "${HOSTNAME:-}" ) ]] || {
+    [[ -n "${LDAP_COMPUTER_OU:-}" && -n "${HOSTNAME:-}" ]] || {
       warn "Computer LDAP path is unknown, Salt key cleanup skipped"
       return 0
     }
 
     log "Getting Salt minion id from computer objectGUID"
-    if [[ -n "${COMPUTER_DN:-}" ]]; then
-      lookup_base="$COMPUTER_DN"
-      lookup_scope=0
-      lookup_filter='(objectClass=computer)'
-    else
-      lookup_base="$LDAP_BASE_DN"
-      lookup_scope=2
-      lookup_filter="(&(objectClass=computer)(cn=${HOSTNAME}))"
-    fi
     lookup_resp="$(
-      api_search "${access_token}" "$lookup_base" "$lookup_scope" "$lookup_filter" "[\"objectGUID\"]"
+      api_search "${access_token}" "${LDAP_COMPUTER_OU}" 2 "(&(objectClass=*)(cn=${HOSTNAME}))" "[\"objectGUID\"]"
     )" || {
       warn "Failed to get computer objectGUID, Salt key cleanup skipped"
       return 0
@@ -88,8 +79,7 @@ delete_salt_minion_key_on_leave() {
     return 0
   fi
 
-  info "$(ui_text "Deleting Salt key ${guid} from the master" "Удаление ключа Salt ${guid} с мастера")"
-  log "Deleting Salt key on master for minion id: ${guid}"
+  warn "Deleting Salt key on master for minion id: ${guid}"
   api_delete_salt_minion_key "${access_token}" "${guid}"
 }
 
@@ -201,82 +191,26 @@ configure_salt_master_health() {
   log "Configured Salt master health checks: ${health_file}"
 }
 
-build_salt_master_fqdns() {
-  local raw_nodes="${MD_NODES:-}"
-  local item node_ip node_name fqdn configured_master existing
-  local master_count=0
-  local nodes=()
-
-  SALT_MASTER_FQDNS=()
-
-  if [[ -z "$raw_nodes" ]]; then
-    # Legacy and current single-node join environments do not publish
-    # MD_NODES.  Preserve the established single-node Salt DNS name instead
-    # of aborting immediately after controller discovery.
-    fqdn="salt.${DOMAIN}"
-    valid_join_domain "$fqdn" \
-      || die "Invalid fallback Salt master FQDN: ${fqdn}"
-    SALT_MASTER_FQDNS=("$fqdn")
-    SALT_MASTER="$fqdn"
-    SALT_MASTERS_DISPLAY="$fqdn"
-    log "MD_NODES is not published; using single-node Salt master fallback: ${fqdn}"
-    return 0
-  fi
-
-  IFS=',' read -r -a nodes <<< "$raw_nodes"
-  for item in "${nodes[@]}"; do
-    item="$(sanitize_input "$item")"
-    [[ -n "$item" ]] || die "MD_NODES contains an empty node entry"
-    [[ "$item" == *:* ]] || die "Invalid MD_NODES entry: ${item}. Expected IPv4:hostname"
-
-    node_ip="$(sanitize_input "${item%%:*}")"
-    node_name="$(sanitize_input "${item#*:}")"
-    node_name="$(printf '%s' "$node_name" | tr '[:upper:]' '[:lower:]')"
-
-    valid_ipv4_address "$node_ip" \
-      || die "Invalid IPv4 address in MD_NODES entry: ${item}"
-
-    if valid_hostname "$node_name"; then
-      fqdn="${node_name}.${DOMAIN}"
-    elif valid_join_domain "$node_name"; then
-      [[ "$node_name" == *."${DOMAIN}" ]] \
-        || die "Salt master FQDN from MD_NODES is outside the detected domain ${DOMAIN}: ${node_name}"
-      fqdn="$node_name"
-    else
-      die "Invalid hostname in MD_NODES entry: ${item}"
-    fi
-
-    valid_join_domain "$fqdn" || die "Invalid Salt master FQDN generated from MD_NODES: ${fqdn}"
-
-    existing=0
-    if (( master_count > 0 )); then
-      for configured_master in "${SALT_MASTER_FQDNS[@]}"; do
-        if [[ "$configured_master" == "$fqdn" ]]; then
-          existing=1
-          break
-        fi
-      done
-    fi
-    if [[ "$existing" -eq 0 ]]; then
-      SALT_MASTER_FQDNS+=("$fqdn")
-      master_count=$((master_count + 1))
-    fi
-  done
-
-  [[ "$master_count" -gt 0 ]] || die "MD_NODES does not contain any Salt master nodes"
-  SALT_MASTER="${SALT_MASTER_FQDNS[0]}"
-  SALT_MASTERS_DISPLAY="$(IFS=,; printf '%s' "${SALT_MASTER_FQDNS[*]}")"
-  log "Salt masters from MD_NODES: ${SALT_MASTERS_DISPLAY}"
-  return 0
+configure_salt_highstate_schedule() {
+  install_local_file "$SALT_SCHEDULE_SRC" "$SALT_SCHEDULE_DST" 0644
+  log "Configured periodic Salt highstate schedule: ${SALT_SCHEDULE_DST}"
 }
 
-validate_salt_master_fqdns() {
-  local master
+configure_salt_systemd_override() {
+  install_local_file "$SALT_SYSTEMD_OVERRIDE_SRC" "$SALT_SYSTEMD_OVERRIDE_DST" 0644
+  log "Configured Salt minion systemd override: ${SALT_SYSTEMD_OVERRIDE_DST}"
+}
 
-  for master in "${SALT_MASTER_FQDNS[@]}"; do
-    log "Checking DNS resolution: SALT_MASTER=${master}"
-    getent hosts "$master" >/dev/null || die "DNS resolution failed for Salt master ${master}"
-  done
+configure_salt_master_from_api_ip() {
+  local master_ip="${API_RESOLVED_IP:-}"
+
+  [[ -n "$master_ip" ]] || die "Resolved API IPv4 address is unavailable for Salt master configuration"
+  valid_ipv4_address "$master_ip" || die "Invalid resolved API IPv4 address for Salt master: ${master_ip}"
+
+  SALT_MASTER="$master_ip"
+  SALT_MASTERS=("$master_ip")
+  SALT_MASTERS_DISPLAY="$master_ip"
+  log "Using pinned API IPv4 address as the single Salt master: ${SALT_MASTER}"
 }
 
 remove_conflicting_salt_identity_settings() {
@@ -310,13 +244,9 @@ remove_conflicting_salt_identity_settings() {
 
 write_salt_master_config() {
   local master_file="$1"
-  local master
 
   {
-    printf 'master:\n'
-    for master in "${SALT_MASTER_FQDNS[@]}"; do
-      printf '  - %s\n' "$master"
-    done
+    printf 'master: %s\n' "$SALT_MASTER"
     printf 'master_type: str\n'
   } > "$master_file"
 }
@@ -358,21 +288,15 @@ prepare_salt_minion_identity() {
 
   if [[ -f /etc/salt/minion_id ]]; then
     existing_minion_id="$(tr -d '\r\n' < /etc/salt/minion_id 2>/dev/null || true)"
-  elif [[ -n "${SALT_MINION_ID:-}" ]]; then
-    existing_minion_id="$SALT_MINION_ID"
-  fi
-
-  if [[ -n "$existing_minion_id" && "$existing_minion_id" == "$guid" ]]; then
-    info "$(ui_text "The computer objectGUID is unchanged; reusing the existing Salt minion identity" "objectGUID компьютера не изменился; используется существующая идентичность Salt minion")"
-  elif [[ -n "$existing_minion_id" ]]; then
-    info "$(ui_text "The computer identifier changed; updating the Salt minion identity" "Идентификатор компьютера изменился; обновляется идентичность Salt minion")"
-    log "Salt minion id changes from ${existing_minion_id} to ${guid}; keeping the existing minion key pair"
-    if [[ "$existing_minion_id" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$ ]]; then
-      log "Deleting the previous Salt minion id before publishing the new one: ${existing_minion_id}"
-      api_delete_salt_minion_key "${access_token}" "${existing_minion_id}"
-    else
-      log "Previous Salt minion id is not a UUID (${existing_minion_id}); deletion via the UUID endpoint is not required"
-      log "Skipped deletion of incompatible legacy Salt minion id: ${existing_minion_id}"
+    if [[ -n "$existing_minion_id" && "$existing_minion_id" != "$guid" ]]; then
+      info "$(ui_text "Updating Salt minion id from ${existing_minion_id} to ${guid}; keeping the existing minion key pair" "Идентификатор Salt minion меняется с ${existing_minion_id} на ${guid}; существующая пара ключей сохраняется")"
+      if [[ "$existing_minion_id" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$ ]]; then
+        log "Deleting the previous Salt minion id before publishing the new one: ${existing_minion_id}"
+        api_delete_salt_minion_key "${access_token}" "${existing_minion_id}"
+      else
+        info "Previous Salt minion id is not a UUID (${existing_minion_id}); deletion via the UUID endpoint is not required"
+        log "Skipped deletion of incompatible legacy Salt minion id: ${existing_minion_id}"
+      fi
     fi
   fi
 
@@ -384,6 +308,7 @@ prepare_salt_minion_identity() {
 
   cat > /etc/salt/minion <<EOF
 master_finger: ${gpo_token}
+startup_states: highstate
 EOF
 
   md_track /etc/salt/minion
@@ -394,6 +319,8 @@ EOF
 
   configure_salt_pkg_provider
   configure_salt_master_health
+  configure_salt_highstate_schedule
+  configure_salt_systemd_override
 
   systemctl daemon-reload || true
   systemctl enable salt-minion.service >/dev/null 2>&1 || true
@@ -416,7 +343,7 @@ salt_minion_master_connected() {
   systemctl is-active --quiet salt-minion.service 2>/dev/null || return 1
   have_cmd salt-call || return 1
 
-  for master in "${SALT_MASTER_FQDNS[@]}"; do
+  for master in "${SALT_MASTERS[@]}"; do
     if have_cmd timeout; then
       output="$(timeout 6 salt-call --local --out=txt status.master "$master" 2>/dev/null || true)"
     else
@@ -473,16 +400,14 @@ accept_salt_minion_key() {
   local delay=3
   local attempt=1
 
-  info "$(ui_text "Registering Salt key ${guid} on the master" "Регистрация ключа Salt ${guid} на мастере")"
-
   while [[ $attempt -le $retries ]]; do
     log "Attempt ${attempt}/${retries}: accepting Salt minion key"
 
     if resp="$(
-      curl -sS -w "\n%{http_code}" \
+      curl -sS "${API_CURL_RESOLVE[@]}" -w "\n%{http_code}" \
         --connect-timeout "${SALT_ACCEPT_CONNECT_TIMEOUT}" \
         --max-time "${SALT_ACCEPT_MAX_TIME}" \
-        -X POST "https://${API_ADDRESS}/api/salt/minion" \
+        -X POST "https://${API_HOST}/api/salt/minion" \
         -H 'accept: application/json' \
         -H "Cookie: id=${access_token}" \
         -H 'Content-Type: application/json' \
@@ -559,10 +484,9 @@ configure_salt() {
     return 0
   }
 
-  local gpo_token guid guid_lookup_base guid_lookup_scope guid_lookup_filter
+  local gpo_token guid
 
-  build_salt_master_fqdns
-  validate_salt_master_fqdns
+  configure_salt_master_from_api_ip
   configure_salt_masters
 
   require_salt_minion_ready
@@ -571,7 +495,7 @@ configure_salt() {
   refresh_api_token_for_salt
 
   gpo_token="$(
-    curl -sS -X GET "https://${API_ADDRESS}/api/salt/master/key" \
+    curl -sS "${API_CURL_RESOLVE[@]}" -X GET "https://${API_HOST}/api/salt/master/key" \
       --connect-timeout "${API_CONNECT_TIMEOUT}" \
       --max-time "${API_MAX_TIME}" \
       -H "Cookie: id=${access_token}" \
@@ -582,17 +506,8 @@ configure_salt() {
   [[ -n "${gpo_token}" ]] || die "Failed to get Salt master_finger"
 
   log "Getting computer objectGUID"
-  if [[ -n "${COMPUTER_DN:-}" ]]; then
-    guid_lookup_base="$COMPUTER_DN"
-    guid_lookup_scope=0
-    guid_lookup_filter='(objectClass=computer)'
-  else
-    guid_lookup_base="$LDAP_BASE_DN"
-    guid_lookup_scope=2
-    guid_lookup_filter="(&(objectClass=computer)(cn=${HOSTNAME}))"
-  fi
   guid="$(
-    api_search "${access_token}" "$guid_lookup_base" "$guid_lookup_scope" "$guid_lookup_filter" "[\"objectGUID\"]" \
+    api_search "${access_token}" "${LDAP_COMPUTER_OU}" 2 "(&(objectClass=*)(cn=${HOSTNAME}))" "[\"objectGUID\"]" \
       | jq -r '.search_result[0].partial_attributes[]? | select(.type=="objectGUID") | .vals[0] // empty'
   )"
 

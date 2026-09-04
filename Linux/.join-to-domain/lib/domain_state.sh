@@ -9,15 +9,65 @@ directory_has_entries() {
   find "$dir" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null | grep -q .
 }
 
+pending_transaction_manifest() {
+  local pending_backup="${MD_PENDING_BACKUP:-${MD_STATE_DIR}/active-backup}"
+  local backups_root="${MD_BACKUPS_ROOT:-${MD_ETC_DIR}/backups}"
+  local backup
+
+  [[ -r "$pending_backup" ]] || return 1
+  IFS= read -r backup < "$pending_backup"
+  case "$backup" in
+    "$backups_root"/join-*|"$backups_root"/rejoin-*) ;;
+    *) return 1 ;;
+  esac
+  [[ -r "$backup/manifest.env" ]] || return 1
+  printf '%s\n' "$backup/manifest.env"
+}
+
+authoritative_domain_manifest() {
+  local manifest=""
+  local legacy_manifest="${MD_STATE_DIR}/manifest"
+
+  # A manifest stored under backups is active only while active-backup points
+  # to it. After a successful rollback MD_MANIFEST can still contain that path
+  # in the current shell, but the orphaned backup must not be treated as an
+  # existing domain join.
+  manifest="$(pending_transaction_manifest 2>/dev/null || true)"
+  if [[ -n "$manifest" ]]; then
+    printf '%s\n' "$manifest"
+    return 0
+  fi
+
+  # Compatibility with state created by versions that kept the manifest
+  # directly in the state directory.
+  if [[ -r "$legacy_manifest" ]]; then
+    printf '%s\n' "$legacy_manifest"
+    return 0
+  fi
+
+  return 1
+}
+
 manifest_has_tracked_paths() {
-  [[ -f "$MD_MANIFEST" ]] || return 1
-  grep -Eq '^[[:space:]]*/[^[:space:]]+' "$MD_MANIFEST" 2>/dev/null
+  local manifest="${1:-}"
+
+  if [[ -z "$manifest" ]]; then
+    manifest="$(authoritative_domain_manifest 2>/dev/null || true)"
+  fi
+  [[ -f "$manifest" ]] || return 1
+
+  # Support both the old path-per-line manifest and BACKUP_VERSION=1, where
+  # tracked paths are stored as FILE_*_PATH=/absolute/path.
+  grep -Eq '(^[[:space:]]*/[^[:space:]]+|^FILE_[A-Za-z0-9_]+_PATH=/)' "$manifest" 2>/dev/null
 }
 
 krb5_conf_looks_domain_managed() {
+  local manifest=""
+
   [[ -f /etc/krb5.conf ]] || return 1
 
-  if [[ -f "$MD_MANIFEST" ]] && grep -Fxq /etc/krb5.conf "$MD_MANIFEST" 2>/dev/null; then
+  manifest="$(authoritative_domain_manifest 2>/dev/null || true)"
+  if [[ -n "$manifest" ]] && grep -Fxq /etc/krb5.conf "$manifest" 2>/dev/null; then
     return 0
   fi
 
@@ -34,6 +84,18 @@ sssd_conf_has_domain_block() {
 
 recoverable_incomplete_join_detected() {
   local rollback_marker="${MD_ROLLBACK_MARKER:-${MD_STATE_DIR}/rollback-in-progress}"
+  local pending_backup="${MD_PENDING_BACKUP:-${MD_STATE_DIR}/active-backup}"
+  local pending_manifest=""
+
+  # active-backup is the authoritative marker for an interrupted Join or
+  # Rejoin transaction. A completed operation removes it.
+  pending_manifest="$(pending_transaction_manifest 2>/dev/null || true)"
+  if [[ -n "$pending_manifest" ]] && manifest_has_tracked_paths "$pending_manifest"; then
+    return 0
+  fi
+  # A malformed pointer must block a new transaction rather than be silently
+  # overwritten. The recovery path will report that the backup is corrupted.
+  [[ -e "$pending_backup" ]] && return 0
 
   # The marker alone is not enough: older versions can leave an empty marker
   # together with an empty manifest after a completed rollback. Recover only
@@ -67,7 +129,7 @@ recoverable_incomplete_join_detected() {
 }
 
 detect_domain_state() {
-  local managed=0 partial=0 unmanaged_sssd=0
+  local managed=0 partial=0 unmanaged_sssd=0 detected_manifest=""
 
   DETECTED_DOMAIN_STATE="not_joined"
   DETECTED_DOMAIN_REASONS=()
@@ -77,12 +139,13 @@ detect_domain_state() {
     add_domain_state_reason "MultiDirectory join state found: ${MD_JOIN_ENV}"
   fi
 
-  if manifest_has_tracked_paths; then
+  detected_manifest="$(authoritative_domain_manifest 2>/dev/null || true)"
+  if manifest_has_tracked_paths "$detected_manifest"; then
     managed=1
-    add_domain_state_reason "MultiDirectory manifest found: ${MD_MANIFEST}"
+    add_domain_state_reason "MultiDirectory manifest found: ${detected_manifest}"
   fi
 
-  if [[ -f "${MD_ROLLBACK_MARKER:-${MD_STATE_DIR}/rollback-in-progress}" ]] && manifest_has_tracked_paths; then
+  if [[ -f "${MD_ROLLBACK_MARKER:-${MD_STATE_DIR}/rollback-in-progress}" ]] && manifest_has_tracked_paths "$detected_manifest"; then
     partial=1
     add_domain_state_reason "MultiDirectory rollback marker found: ${MD_ROLLBACK_MARKER:-${MD_STATE_DIR}/rollback-in-progress}"
   fi

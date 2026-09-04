@@ -64,6 +64,7 @@ join_packages() {
   prompt_edition
   save_install_env
 
+  activity_start "$(ui_text "Installing required packages" "Установка необходимых пакетов")"
   save_packages_before
 
   if is_deb_based; then
@@ -79,6 +80,7 @@ join_packages() {
 
   systemctl daemon-reload || true
   require_salt_minion_installed
+  activity_stop
 
   log "Packages installation completed"
 
@@ -95,6 +97,7 @@ leave_packages() {
 
   run_configure_leave_if_needed
 
+  activity_start "$(ui_text "Removing packages installed for domain membership" "Удаление пакетов, установленных для работы в домене")"
   build_removal_list
 
   if [[ -s "$PACKAGES_TO_REMOVE" ]]; then
@@ -113,6 +116,7 @@ leave_packages() {
   fi
 
   systemctl daemon-reload || true
+  activity_stop
 
   log "Package rollback completed"
 }

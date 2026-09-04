@@ -195,7 +195,10 @@ runtime_text() {
     "Active join backup is missing or corrupted") printf 'Активная резервная копия присоединения отсутствует или повреждена' ;;
     "Ignoring invalid "*) printf 'Некорректное сохранённое значение проигнорировано: %s' "${text#Ignoring invalid }" ;;
     "No valid join state values found in "*) printf 'В файле состояния не найдено корректных значений: %s' "${text#No valid join state values found in }" ;;
-    *) printf 'Внутренняя операция; подробности записаны в журнал' ;;
+    # Do not replace an unknown message with a generic success-looking line.
+    # Keeping the original text is more useful and, importantly, does not hide
+    # errors or produce a screen full of identical messages.
+    *) printf '%s' "$text" ;;
   esac
 }
 

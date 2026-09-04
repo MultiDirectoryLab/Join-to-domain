@@ -18,7 +18,7 @@ purge_deb_config_files_if_needed() {
       ;;
     *)
       warn "Package ${pkg} is not fully installed: ${status}. Purging stale dpkg state."
-      apt-get purge -y "$pkg" || true
+      apt-get purge -y "$pkg" >> "$LOG_FILE" 2>&1 || true
       return 0
       ;;
   esac
@@ -164,4 +164,3 @@ require_salt_minion_installed() {
   fi
 
 }
-

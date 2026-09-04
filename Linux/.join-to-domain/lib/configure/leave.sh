@@ -5,12 +5,9 @@ load_join_env() {
   REALM="${SAVED_REALM:-}"
   LDAP_BASE_DN="${SAVED_LDAP_BASE_DN:-}"
   LDAP_COMPUTER_OU="${SAVED_LDAP_COMPUTER_OU:-}"
-  LDAP_GSSAPI_HOST="${SAVED_LDAP_GSSAPI_HOST:-${SAVED_DOMAIN:-}}"
   HOSTNAME="${SAVED_HOSTNAME:-}"
   FQDN="${SAVED_FQDN:-}"
-  API_ADDRESS="${SAVED_API_ADDRESS:-${SAVED_API_HOST:-}}"
-  API_HOST="$API_ADDRESS"
-  CONTROLLER_FQDN="${SAVED_CONTROLLER_FQDN:-}"
+  API_HOST="${SAVED_API_HOST:-}"
   WITH_SALT="${SAVED_WITH_SALT:-0}"
   EDITION="${SAVED_EDITION:-community}"
   SALT_MASTER="${SAVED_SALT_MASTER:-}"
@@ -23,37 +20,69 @@ load_join_env() {
     warn "Saved domain is unavailable; it will be detected after authentication"
   fi
 
-  if [[ -n "${SAVED_API_ADDRESS:-${SAVED_API_HOST:-}}" ]]; then
-    log "Saved API address: ${SAVED_API_ADDRESS:-${SAVED_API_HOST:-}}"
+  if [[ -n "${SAVED_API_HOST:-}" ]]; then
+    log "Saved API host: ${SAVED_API_HOST}"
   else
     warn "Saved API host is unavailable; asking interactively"
   fi
 }
 
-validate_directory_credentials() {
-  local leave_login leave_password leave_token detected_domain
+validate_leave_credentials() {
+  local leave_login leave_password leave_token detected_domain dns_input dns_servers
+  local supplied_api_host=""
+
+  if env_has_key API_HOST; then
+    supplied_api_host="${API_HOST:-}"
+    [[ -n "$supplied_api_host" ]] || die "API_HOST is empty in environment"
+  fi
 
   if [[ "${1:-load-state}" != "state-loaded" ]]; then
     load_join_env
   fi
+  [[ -z "$supplied_api_host" ]] || API_HOST="$supplied_api_host"
 
-  if [[ -n "${API_ADDRESS:-${API_HOST:-}}" ]]; then
-    set_api_address "${API_ADDRESS:-${API_HOST:-}}" \
-      || die "Invalid saved API address: ${API_ADDRESS:-${API_HOST:-}}"
-  else
-    prompt_api_address \
-      || die "$(ui_text "Directory operation cancelled" "Операция с каталогом отменена")"
-  fi
+  while true; do
+    if [[ -z "${API_HOST:-}" ]]; then
+      read_tty API_HOST "$(ui_text "Enter MULTIDIRECTORY server IPv4 address or FQDN:" "Введите IPv4-адрес или FQDN сервера MULTIDIRECTORY:")"
+    fi
+    if [[ -z "${API_HOST}" ]]; then
+      warn "$(ui_text "API host must be filled." "Адрес API не может быть пустым.")"
+      continue
+    fi
+    if ! valid_api_host "${API_HOST}"; then
+      warn "$(ui_text "Invalid server address. Enter an IPv4 address or FQDN." "Некорректный адрес сервера. Введите IPv4-адрес или FQDN.")"
+      API_HOST=""
+      continue
+    fi
+    break
+  done
 
   read_tty leave_login "$(ui_text "Enter domain administrator login:" "Введите логин администратора домена:")"
   read_secret_tty leave_password "$(ui_text "Enter domain administrator password:" "Введите пароль администратора домена:")"
 
   [[ -n "$leave_login" && -n "$leave_password" ]] || die "Login and password must be filled"
 
-  log "Checking API address: ${API_ADDRESS}"
-  api_host_resolution_ok "$API_ADDRESS" \
-    || die "$(ui_text "DNS resolution failed: ${API_ADDRESS}" "Не удалось разрешить имя через DNS: ${API_ADDRESS}")"
+  log "Checking API host address: ${API_HOST}"
+  while ! api_host_resolution_ok "${API_HOST}"; do
+    warn "$(ui_text "DNS resolution failed: ${API_HOST}" "Не удалось разрешить имя через DNS: ${API_HOST}")"
+    read_tty dns_input "$(ui_text "Enter DNS server IP address:" "Введите IP-адрес DNS-сервера:")"
+    dns_servers="$(normalize_dns_servers "${dns_input}" 2>/dev/null || true)"
+    if [[ -z "${dns_servers}" ]]; then
+      warn "$(ui_text "Invalid DNS server address." "Некорректный адрес DNS-сервера.")"
+      continue
+    fi
+    md_set_resolv_first "${dns_servers}" || {
+      warn "$(ui_text "Failed to configure DNS servers." "Не удалось настроить DNS-серверы.")"
+      continue
+    }
+    MD_DNS_SERVER="$dns_servers"
+    log "DNS servers configured: $(dns_servers_csv "${dns_servers}")"
+  done
 
+  pin_api_host "${API_HOST}" \
+    || die "Failed to resolve an IPv4 address for API host ${API_HOST}"
+
+  activity_start "$(ui_text "Checking connection to the domain" "Проверка подключения к домену")"
   install_md_server_certificate
 
   log "Authenticating domain administrator"
@@ -83,13 +112,9 @@ validate_directory_credentials() {
   LOGIN="$leave_login"
 
   unset leave_password
+  activity_stop
 
-  log "Directory administrator credentials validated"
-}
-
-validate_leave_credentials() {
-  validate_directory_credentials
-  log "Credentials approved for explicit domain leave"
+  log "Leave credentials validated"
 }
 
 start_services() {
@@ -109,7 +134,6 @@ start_services() {
   done
 
   if [[ "${WITH_SALT:-0}" -eq 1 ]]; then
-    restart_salt_minion_or_die
     services+=(salt-minion)
   fi
 
@@ -142,8 +166,13 @@ restore_backups() {
   done < <(grep '^FILE_.*_PATH=' "$MD_MANIFEST")
   [[ "$failed" -eq 0 ]] || return 1
 
-  if [[ "${MD_RESTORE_OPERATION_ONLY:-0}" -ne 1 ]]; then
-    restore_networkmanager_dns_state || warn "NetworkManager DNS state was not fully restored"
+  if [[ "${MD_RESTORE_OPERATION_ONLY:-0}" -eq 1 ]]; then
+    if [[ -n "${MD_OPERATION_NM_DNS_STATE:-}" ]]; then
+      restore_networkmanager_dns_state "$MD_OPERATION_NM_DNS_STATE" \
+        || warn "NetworkManager DNS state was not fully restored"
+    fi
+  else
+    restore_networkmanager_dns_state "$MD_NM_DNS_STATE" || warn "NetworkManager DNS state was not fully restored"
     restore_authselect_state || warn "authselect state was not fully restored"
     restore_sssd_socket_state || warn "SSSD socket state was not fully restored"
   fi
@@ -238,7 +267,10 @@ perform_local_rollback_cleanup() {
 }
 
 recover_incomplete_join_state() {
+  local backup_kind
+
   warn "$(ui_text "The previous join did not finish. Completing local rollback before retrying." "Предыдущее присоединение не завершилось. Перед новой попыткой завершается локальный откат.")"
+  activity_start "$(ui_text "Restoring local configuration" "Восстановление локальной конфигурации")"
 
   mkdir -p "${MD_STATE_DIR}"
   touch "${MD_ROLLBACK_MARKER}"
@@ -247,11 +279,30 @@ recover_incomplete_join_state() {
     die "Active join backup is missing or corrupted"
   fi
 
+  backup_kind="$(sed -n 's/^BACKUP_KIND=//p' "$MD_MANIFEST" | tail -n1)"
+  case "$backup_kind" in
+    rejoin)
+      warn "$(ui_text "An interrupted Rejoin was found; restoring the configuration from immediately before Rejoin." "Обнаружен прерванный Rejoin; восстанавливается конфигурация непосредственно перед Rejoin.")"
+      MD_RESTORE_OPERATION_ONLY=1
+      perform_local_rollback_cleanup
+      MD_RESTORE_OPERATION_ONLY=0
+      printf 'RESTORED_AT=%q\n' "$(date --iso-8601=seconds)" >> "$MD_MANIFEST"
+      rm -f "$MD_PENDING_BACKUP" "$MD_ROLLBACK_MARKER"
+      MD_OPERATION_NM_DNS_STATE=""
+      activity_stop
+      ok "$(ui_text "Interrupted Rejoin state was recovered" "Состояние прерванного Rejoin восстановлено")"
+      return 0
+      ;;
+    join) ;;
+    *) die "Active backup has an invalid BACKUP_KIND: ${backup_kind:-empty}" ;;
+  esac
+
   perform_local_rollback_cleanup
 
   # Keep the marker and backups if the process is interrupted. Remove the
   # transaction directory only after all local recovery steps have returned.
   rm -rf "${MD_STATE_DIR}"
+  activity_stop
   ok "$(ui_text "Incomplete join state was recovered" "Состояние незавершённого присоединения восстановлено")"
 }
 
@@ -262,17 +313,9 @@ restart_after_leave() {
   systemctl restart sshd.service 2>/dev/null || true
 }
 
-perform_authenticated_leave() {
-  if ! load_active_backup || ! validate_join_backup; then
-    die "Active join backup is missing or corrupted"
-  fi
-
-  log "Starting remote domain cleanup"
-  delete_salt_minion_key_on_leave
-  disable_computer_account_on_leave
-  log "Remote domain cleanup step completed"
-
+perform_local_leave_cleanup() {
   log "Starting local leave cleanup"
+  activity_start "$(ui_text "Restoring local configuration" "Восстановление локальной конфигурации")"
   stop_domain_services
   remove_managed_files
   restore_backups || die "Original configuration could not be fully restored"
@@ -285,16 +328,62 @@ perform_authenticated_leave() {
   restart_after_leave
 
   log "Local leave cleanup completed"
-  ok "$(ui_text "MultiDirectory leave completed" "Выход из MultiDirectory завершён")"
-  info "$(ui_text "System reboot is recommended" "Рекомендуется перезагрузить компьютер")"
+  activity_stop
+  if [[ "${MD_DOMAIN_SWITCH_ACTIVE:-0}" == "1" ]]; then
+    ok "$(ui_text "Old local domain membership removed" "Локальное членство в старом домене удалено")"
+  else
+    user_ok "$(ui_text "MultiDirectory leave completed" "Выход из MultiDirectory завершён")"
+    user_info "$(ui_text "System reboot is recommended" "Рекомендуется перезагрузить компьютер")"
+  fi
+}
+
+perform_authenticated_leave() {
+  if ! load_active_backup || ! validate_join_backup; then
+    die "Active join backup is missing or corrupted"
+  fi
+
+  activity_start "$(ui_text "Removing the computer from the domain" "Удаление компьютера из домена")"
+  log "Starting remote domain cleanup"
+  delete_salt_minion_key_on_leave
+  disable_computer_account_on_leave
+  log "Remote domain cleanup step completed"
+
+  perform_local_leave_cleanup
+}
+
+leave_domain_locally_for_switch() {
+  need_root
+  setup_logging
+  info "$(ui_text "Removing local membership in the unavailable old domain" "Удаление локального членства в недоступном старом домене")"
+  load_os_release
+
+  if recoverable_incomplete_join_detected; then
+    recover_incomplete_join_state
+  fi
+
+  need_cmd awk
+  need_cmd sed
+  need_cmd tr
+
+  if ! load_active_backup || ! validate_join_backup; then
+    die "$(ui_text "The pre-join backup is missing or corrupted; local domain switch cannot continue safely" "Исходная резервная копия отсутствует или повреждена; безопасный локальный переход в другой домен невозможен")"
+  fi
+  ok "$(ui_text "Backup validated" "Резервная копия проверена")"
+  log "Old-domain LDAP computer and Salt objects remain on the old server"
+
+  perform_local_leave_cleanup
 }
 
 leave_domain() {
   need_root
   setup_logging
-  info "$(ui_text "Leaving MultiDirectory domain" "Выход из домена MultiDirectory")"
+  user_info "$(ui_text "Leaving MultiDirectory domain" "Выход из домена MultiDirectory")"
 
   load_os_release
+
+  if recoverable_incomplete_join_detected; then
+    recover_incomplete_join_state
+  fi
 
   need_cmd curl
   need_cmd jq
@@ -303,7 +392,7 @@ leave_domain() {
   need_cmd tr
 
   if ! load_active_backup || ! validate_join_backup; then
-    die "Active join backup is missing or corrupted"
+    die "$(ui_text "The pre-join backup is missing or corrupted; safe Leave cannot continue" "Исходная резервная копия отсутствует или повреждена; безопасный выход из домена невозможен")"
   fi
   ok "$(ui_text "Backup validated" "Резервная копия проверена")"
 
@@ -320,6 +409,7 @@ rollback_local_changes() {
   warn "$(ui_text "Join failed with exit code ${code}" "Присоединение завершилось ошибкой с кодом ${code}")"
   warn "$(ui_text "Rolling back local configuration changes" "Выполняется откат локальных изменений")"
   warn "$(ui_text "Server-side objects created via API are not removed by local rollback" "Объекты, созданные на сервере через API, не удаляются локальным откатом")"
+  activity_start "$(ui_text "Restoring local configuration" "Восстановление локальной конфигурации")"
 
   mkdir -p "${MD_STATE_DIR}"
   touch "${MD_ROLLBACK_MARKER}"
@@ -332,18 +422,14 @@ rollback_local_changes() {
   printf 'RESTORED_AT=%q\n' "$(date --iso-8601=seconds)" >> "$MD_MANIFEST"
   rm -rf "${MD_STATE_DIR}"
 
-  info "$(ui_text "Rollback completed" "Откат завершён")"
+  activity_stop
+  user_ok "$(ui_text "Rollback completed" "Откат завершён")"
 }
 
 on_join_error() {
-  local code="$1"
-  local source_file="${2:-unknown}"
-  local function_name="${3:-main}"
-  local line="${4:-unknown}"
-  local command="${5:-unknown}"
+  local code=$?
 
   trap - ERR INT TERM
-  report_command_failure "$code" "$source_file" "$function_name" "$line" "$command"
   MD_JOIN_ROLLBACK_ACTIVE=0
 
   rollback_local_changes "$code"

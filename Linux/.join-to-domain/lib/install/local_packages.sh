@@ -72,11 +72,11 @@ install_local_deb_packages() {
   log "Installing local DEB packages via apt-get:"
   local deb_install_args=()
   for deb in "${debs_to_install[@]}"; do
-    printf '  - %s\n' "$(basename "$deb")"
+    printf '  - %s\n' "$(basename "$deb")" >> "$LOG_FILE"
     deb_install_args+=("./$(basename "$deb")")
   done
 
-  if ! (cd "$DEB_DIR" && apt-get install -y "${deb_install_args[@]}"); then
+  if ! (cd "$DEB_DIR" && apt-get install -y "${deb_install_args[@]}" >> "$LOG_FILE" 2>&1); then
     print_salt_diagnostics
     die "Failed to install local DEB packages via apt-get"
   fi
@@ -165,14 +165,16 @@ install_local_rpm_packages() {
   log "Installing local RPM packages:"
   local rpm_install_args=()
   for rpm_file in "${rpms_to_install[@]}"; do
-    printf '  - %s\n' "$(basename "$rpm_file")"
+    printf '  - %s\n' "$(basename "$rpm_file")" >> "$LOG_FILE"
     rpm_install_args+=("./$(basename "$rpm_file")")
   done
 
   if [[ "${PM}" == "apt-get" ]]; then
-    (cd "$RPM_DIR" && apt-get install -y "${rpm_install_args[@]}") || (cd "$RPM_DIR" && rpm -Uvh --replacepkgs "${rpm_install_args[@]}")
+    (cd "$RPM_DIR" && apt-get install -y "${rpm_install_args[@]}" >> "$LOG_FILE" 2>&1) \
+      || (cd "$RPM_DIR" && rpm -Uvh --replacepkgs "${rpm_install_args[@]}" >> "$LOG_FILE" 2>&1)
   else
-    (cd "$RPM_DIR" && "${PM}" install -y "${rpm_install_args[@]}") || (cd "$RPM_DIR" && rpm -Uvh --replacepkgs "${rpm_install_args[@]}")
+    (cd "$RPM_DIR" && "${PM}" install -y "${rpm_install_args[@]}" >> "$LOG_FILE" 2>&1) \
+      || (cd "$RPM_DIR" && rpm -Uvh --replacepkgs "${rpm_install_args[@]}" >> "$LOG_FILE" 2>&1)
   fi
 
   systemctl daemon-reload || true
@@ -181,4 +183,3 @@ install_local_rpm_packages() {
     require_salt_minion_installed
   fi
 }
-
