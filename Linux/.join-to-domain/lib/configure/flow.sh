@@ -66,6 +66,8 @@ join_domain() {
   ok "$(ui_text "Backup created" "Резервная копия создана")"
   md_init_state
   MD_JOIN_ROLLBACK_ACTIVE=1
+  MD_JOIN_FAILURE_REPORTED=0
+  MD_JOIN_PHASE="domain_join"
   trap on_join_error ERR
   trap on_join_signal INT TERM
 
@@ -178,8 +180,10 @@ join_domain() {
       warn "$(ui_text "Authentication failed. Please check login and password." "Ошибка аутентификации. Проверьте логин и пароль.")"
     fi
   done
+  MD_JOIN_PHASE="domain_discovery"
   activity_start "$(ui_text "Detecting domain settings" "Определение параметров домена")"
   discover_and_validate_domain
+  MD_JOIN_PHASE="domain_join"
   user_info "$(ui_text "Domain detected: ${DOMAIN}" "Обнаружен домен: ${DOMAIN}")"
 
   prompt_change_hostname
@@ -209,6 +213,8 @@ join_domain() {
   api_ktadd_download "${access_token}" "host/${HOSTNAME}" "host/${FQDN}"
 
   validate_keytab
+  configure_sssd_keytab_principal
+  validate_sssd_config
   ok "$(ui_text "Kerberos authentication succeeded" "Аутентификация Kerberos выполнена")"
   info "$(ui_text "Checking LDAP GSSAPI authentication" "Проверка аутентификации LDAP GSSAPI")"
   validate_ldap_gssapi_auth

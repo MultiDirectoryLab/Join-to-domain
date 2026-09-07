@@ -118,14 +118,28 @@ validate_leave_credentials() {
 }
 
 start_services() {
-  local services=(sssd ssh sshd)
+  local services=(sssd)
+  local ssh_service=""
   local sshd_bin
 
   systemctl daemon-reload || true
 
   sshd_bin="$(find_executable sshd 2>/dev/null || true)"
   if [[ -n "$sshd_bin" ]]; then
-    "$sshd_bin" -t || die "Error in SSH daemon configuration"
+    if "$sshd_bin" -t; then
+      if systemctl is-active --quiet sshd.service 2>/dev/null; then
+        ssh_service=sshd
+      elif systemctl is-active --quiet ssh.service 2>/dev/null; then
+        ssh_service=ssh
+      fi
+
+      if [[ -n "$ssh_service" ]]; then
+        systemctl reload-or-restart "${ssh_service}.service" >/dev/null 2>&1 || \
+          warn "Failed to reload active SSH service: ${ssh_service}"
+      fi
+    else
+      warn "SSH configuration is invalid; SSH reload was skipped"
+    fi
   fi
 
   for svc in "${services[@]}"; do
@@ -166,6 +180,15 @@ restore_backups() {
   done < <(grep '^FILE_.*_PATH=' "$MD_MANIFEST")
   [[ "$failed" -eq 0 ]] || return 1
 
+  # Validate transaction snapshots for both Join/Leave and failed Rejoin.
+  # Legacy profile restoration still only applies to full restoration.
+  if [[ -f "${MD_BACKUP_DIR}/authselect.snapshot" || "${MD_RESTORE_OPERATION_ONLY:-0}" -ne 1 ]]; then
+    restore_authselect_state || {
+      warn "authselect state was not fully restored"
+      return 1
+    }
+  fi
+
   if [[ "${MD_RESTORE_OPERATION_ONLY:-0}" -eq 1 ]]; then
     if [[ -n "${MD_OPERATION_NM_DNS_STATE:-}" ]]; then
       restore_networkmanager_dns_state "$MD_OPERATION_NM_DNS_STATE" \
@@ -173,7 +196,6 @@ restore_backups() {
     fi
   else
     restore_networkmanager_dns_state "$MD_NM_DNS_STATE" || warn "NetworkManager DNS state was not fully restored"
-    restore_authselect_state || warn "authselect state was not fully restored"
     restore_sssd_socket_state || warn "SSSD socket state was not fully restored"
   fi
 
@@ -210,7 +232,7 @@ validate_join_backup() {
 }
 
 validate_restored_system() {
-  local pam_file sshd_bin
+  local pam_file
   for pam_file in /etc/pam.d/common-auth /etc/pam.d/common-account /etc/pam.d/common-session /etc/pam.d/common-password; do
     [[ ! -e "$pam_file" ]] && continue
     [[ -s "$pam_file" ]] || { warn "PAM restore validation failed: $pam_file"; return 1; }
@@ -222,8 +244,6 @@ validate_restored_system() {
   if [[ -f /etc/nsswitch.conf ]]; then
     awk '$1 ~ /^(passwd|group):$/ && $0 ~ /(^|[[:space:]])files([[:space:]]|$)/ {ok[$1]=1} END {exit !(ok["passwd:"] && ok["group:"])}' /etc/nsswitch.conf || return 1
   fi
-  sshd_bin="$(find_executable sshd 2>/dev/null || true)"
-  [[ -z "$sshd_bin" ]] || "$sshd_bin" -t || return 1
 }
 
 cleanup_domain_state() {
@@ -255,15 +275,15 @@ cleanup_domain_state() {
 }
 
 perform_local_rollback_cleanup() {
-  set +e
-
-  stop_domain_services
-  remove_managed_files
-  restore_backups
-  cleanup_domain_state
-  restart_after_leave
-
-  set -e
+  stop_domain_services || true
+  remove_managed_files || return 1
+  restore_backups || {
+    activity_stop
+    warn "Local rollback failed; backup and recovery metadata were preserved"
+    return 1
+  }
+  cleanup_domain_state || return 1
+  restart_after_leave || return 1
 }
 
 recover_incomplete_join_state() {
@@ -284,7 +304,7 @@ recover_incomplete_join_state() {
     rejoin)
       warn "$(ui_text "An interrupted Rejoin was found; restoring the configuration from immediately before Rejoin." "Обнаружен прерванный Rejoin; восстанавливается конфигурация непосредственно перед Rejoin.")"
       MD_RESTORE_OPERATION_ONLY=1
-      perform_local_rollback_cleanup
+      perform_local_rollback_cleanup || return 1
       MD_RESTORE_OPERATION_ONLY=0
       printf 'RESTORED_AT=%q\n' "$(date --iso-8601=seconds)" >> "$MD_MANIFEST"
       rm -f "$MD_PENDING_BACKUP" "$MD_ROLLBACK_MARKER"
@@ -297,7 +317,7 @@ recover_incomplete_join_state() {
     *) die "Active backup has an invalid BACKUP_KIND: ${backup_kind:-empty}" ;;
   esac
 
-  perform_local_rollback_cleanup
+  perform_local_rollback_cleanup || return 1
 
   # Keep the marker and backups if the process is interrupted. Remove the
   # transaction directory only after all local recovery steps have returned.
@@ -321,7 +341,7 @@ perform_local_leave_cleanup() {
   restore_backups || die "Original configuration could not be fully restored"
   cleanup_domain_state
 
-  validate_restored_system || die "Restored PAM/NSS/SSH configuration validation failed"
+  validate_restored_system || die "Restored PAM/NSS configuration validation failed"
   printf 'RESTORED_AT=%q\n' "$(date --iso-8601=seconds)" >> "$MD_MANIFEST"
   rm -rf "$MD_STATE_DIR"
 
@@ -414,7 +434,7 @@ rollback_local_changes() {
   mkdir -p "${MD_STATE_DIR}"
   touch "${MD_ROLLBACK_MARKER}"
 
-  perform_local_rollback_cleanup
+  perform_local_rollback_cleanup || return 1
 
   # A completed rollback must not look like an active managed join on the next
   # run. If the process is interrupted before this point, the marker remains
@@ -430,6 +450,7 @@ on_join_error() {
   local code=$?
 
   trap - ERR INT TERM
+  report_unexpected_join_failure "$code"
   MD_JOIN_ROLLBACK_ACTIVE=0
 
   rollback_local_changes "$code"
@@ -443,7 +464,9 @@ on_join_signal() {
   trap - ERR INT TERM
   MD_JOIN_ROLLBACK_ACTIVE=0
 
+  activity_stop
   warn "$(ui_text "Domain join was interrupted" "Присоединение к домену прервано")"
+  report_join_failure_status
   rollback_local_changes "$code"
 
   exit "$code"
@@ -455,6 +478,7 @@ validate_internal_modules() {
     create_join_backup md_backup_once restore_one rollback_local_changes
     build_sssd_conf install_pam_config install_nsswitch_config
     validate_sssd_config validate_no_password_based_sssd_auth
+    select_keytab_host_principal configure_sssd_keytab_principal
   )
 
   if is_astra_se; then

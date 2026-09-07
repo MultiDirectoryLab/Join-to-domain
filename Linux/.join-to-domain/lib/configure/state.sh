@@ -198,6 +198,7 @@ load_join_state() {
   SAVED_HOSTNAME=""
   SAVED_FQDN=""
   SAVED_API_HOST=""
+  SAVED_CONTROLLER_FQDN=""
   SAVED_DNS_SERVERS=""
   SAVED_EDITION=""
   SAVED_WITH_SALT=""
@@ -216,6 +217,7 @@ load_join_state() {
   load_join_state_field LDAP_BASE_DN SAVED_LDAP_BASE_DN valid_join_ldap_dn || true
   load_join_state_field LDAP_COMPUTER_OU SAVED_LDAP_COMPUTER_OU valid_join_ldap_dn || true
   load_join_state_field API_HOST SAVED_API_HOST valid_api_host || true
+  load_join_state_field CONTROLLER_FQDN SAVED_CONTROLLER_FQDN valid_join_domain || true
   load_join_state_field HOSTNAME SAVED_HOSTNAME valid_hostname || true
   load_join_state_field SALT_MASTER SAVED_SALT_MASTER valid_join_domain || true
   load_join_state_field SALT_MINION_ID SAVED_SALT_MINION_ID || true
@@ -275,6 +277,7 @@ save_join_env() {
     write_join_state_var HOSTNAME "${HOSTNAME}"
     write_join_state_var FQDN "${FQDN}"
     write_join_state_var API_HOST "${API_HOST}"
+    write_join_state_var CONTROLLER_FQDN "${CONTROLLER_FQDN}"
     write_join_state_var DNS_SERVERS "${dns_servers}"
     write_join_state_var EDITION "${EDITION}"
     write_join_state_var WITH_SALT "${WITH_SALT}"

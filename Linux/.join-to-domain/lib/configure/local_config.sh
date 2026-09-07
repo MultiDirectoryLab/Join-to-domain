@@ -136,19 +136,30 @@ install_astra_se_pam_config() {
   log "Astra SE PAM stack preserved"
 }
 
+uses_authselect() {
+  is_redos_or_rhel_like && have_cmd authselect
+}
+
+verify_authselect_nss() {
+  local file="${1:-/etc/nsswitch.conf}" db
+  authselect check >> "$LOG_FILE" 2>&1 || die "authselect configuration check failed"
+  for db in passwd group; do
+    awk -v db="$db" '
+      $1 == db ":" { for (i=2; i<=NF; i++) { if ($i ~ /^#/) break; if ($i == "sss") found=1 } }
+      END { exit !found }
+    ' "$file" || die "NSS database ${db} does not use SSSD"
+  done
+  log "authselect NSS/PAM configuration verified"
+}
+
 install_pam_config() {
   if is_redos_or_rhel_like; then
     if have_cmd authselect; then
-      if [[ ! -f "$MD_AUTHSELECT_STATE" ]]; then
-        if authselect current --raw > "$MD_AUTHSELECT_STATE" 2>/dev/null && [[ -s "$MD_AUTHSELECT_STATE" ]]; then
-          chmod 600 "$MD_AUTHSELECT_STATE"
-          log "Saved authselect profile"
-        else
-          rm -f "$MD_AUTHSELECT_STATE"
-          warn "Current authselect profile could not be saved"
-        fi
-      fi
-      authselect select sssd with-mkhomedir --force >> "$LOG_FILE" 2>&1 || true
+      [[ -f "${MD_BACKUP_DIR}/authselect.snapshot" ]] \
+        || die "authselect configuration has no pre-change snapshot"
+      authselect select sssd with-mkhomedir --force >> "$LOG_FILE" 2>&1 \
+        || die "Failed to configure authselect SSSD profile"
+      verify_authselect_nss
     fi
 
     systemctl enable --now oddjobd.service 2>/dev/null || true
@@ -190,6 +201,20 @@ install_pam_config() {
 restore_authselect_state() {
   local -a authselect_args=()
   local saved_arg
+  local -a line_args=()
+
+  # New backups restore /etc/authselect and its NSS/PAM links as one
+  # filesystem snapshot. Selecting again would overwrite that exact state.
+  if [[ -f "${MD_BACKUP_DIR:-}/authselect.snapshot" ]]; then
+    if [[ -f "$MD_BACKUP_DIR/authselect.valid" ]]; then
+      have_cmd authselect && authselect check >> "$LOG_FILE" 2>&1 || {
+        warn "Restored authselect configuration failed validation"
+        return 1
+      }
+    fi
+    log "Restored authselect from the NSS/PAM filesystem snapshot"
+    return 0
+  fi
 
   [[ -f "$MD_AUTHSELECT_STATE" ]] || return 0
   have_cmd authselect || {
@@ -198,7 +223,8 @@ restore_authselect_state() {
   }
 
   while IFS= read -r saved_arg || [[ -n "$saved_arg" ]]; do
-    [[ -n "$saved_arg" ]] && authselect_args+=("$saved_arg")
+    IFS=$' \t\r' read -r -a line_args <<< "$saved_arg"
+    authselect_args+=("${line_args[@]}")
   done < "$MD_AUTHSELECT_STATE"
   (( ${#authselect_args[@]} > 0 )) || {
     warn "Cannot restore authselect profile: saved profile is empty"
@@ -298,6 +324,10 @@ remove_nsswitch_database_service() {
 }
 
 install_nsswitch_config() {
+  if uses_authselect; then
+    log "Configuring NSS/PAM via authselect; preserving /etc/nsswitch.conf"
+    return 0
+  fi
   if ! is_astra_se; then
     install_local_file "$NSSWITCH_SRC" /etc/nsswitch.conf 0644
     return 0
@@ -319,6 +349,8 @@ install_nsswitch_config() {
 }
 
 install_static_configs() {
+  local sshd_bin
+
   log "Installing config files"
 
   install_local_file "$KRB5_SRC" /etc/krb5.conf 0644
@@ -326,8 +358,13 @@ install_static_configs() {
 
   install_nsswitch_config
 
-  mkdir -p /etc/ssh/sshd_config.d
-  install_local_file "$SSH_MD_SRC" /etc/ssh/sshd_config.d/ssh_md.conf 0644
+  sshd_bin="$(find_executable sshd 2>/dev/null || true)"
+  if [[ -n "$sshd_bin" ]]; then
+    mkdir -p /etc/ssh/sshd_config.d
+    install_local_file "$SSH_MD_SRC" /etc/ssh/sshd_config.d/ssh_md.conf 0644
+  else
+    log "SSH server is not installed; skipping SSH domain configuration"
+  fi
 
   build_sssd_conf
   install_accountsservice_cache_helper
@@ -430,24 +467,79 @@ create_computer_object_if_needed() {
   enable_computer_account "${computer_dn}"
 }
 
+keytab_find_principal_case_insensitive() {
+  local keytab="$1"
+  local expected="$2"
+
+  LC_ALL=C klist -k "$keytab" 2>/dev/null \
+    | awk -v expected="$expected" '
+        BEGIN { wanted = tolower(expected) }
+        NF && tolower($NF) == wanted { print $NF; exit }
+      '
+}
+
+select_keytab_host_principal() {
+  local keytab="${1:-/etc/krb5.keytab}"
+  local expected principal
+
+  KEYTAB_HOST_PRINCIPAL=""
+  for expected in "host/${FQDN}@${REALM}" "host/${HOSTNAME}@${REALM}"; do
+    principal="$(keytab_find_principal_case_insensitive "$keytab" "$expected")"
+    if [[ -n "$principal" ]]; then
+      KEYTAB_HOST_PRINCIPAL="$principal"
+      log "Selected keytab host principal: ${KEYTAB_HOST_PRINCIPAL}"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+configure_sssd_keytab_principal() {
+  local sssd_conf="${1:-/etc/sssd/sssd.conf}"
+  local tmp
+
+  [[ -n "${KEYTAB_HOST_PRINCIPAL:-}" ]] \
+    || die "Cannot configure SSSD: keytab host principal is not selected"
+  [[ -f "$sssd_conf" ]] || die "Cannot configure SSSD: file not found: ${sssd_conf}"
+
+  md_backup_once "$sssd_conf"
+  tmp="$(mktemp "${sssd_conf}.tmp.XXXXXX")"
+  if ! awk -v principal="$KEYTAB_HOST_PRINCIPAL" '
+      BEGIN { updated = 0 }
+      /^[[:space:]]*ldap_sasl_authid[[:space:]]*=/ {
+        print "ldap_sasl_authid = " principal
+        updated++
+        next
+      }
+      { print }
+      END { if (updated == 0) exit 1 }
+    ' "$sssd_conf" > "$tmp"; then
+    rm -f "$tmp"
+    die "Cannot configure SSSD: ldap_sasl_authid setting was not found"
+  fi
+
+  mv -f "$tmp" "$sssd_conf"
+  chown root:root "$sssd_conf" 2>/dev/null || true
+  chmod 600 "$sssd_conf"
+  md_track "$sssd_conf"
+  log "Configured SSSD ldap_sasl_authid from keytab: ${KEYTAB_HOST_PRINCIPAL}"
+}
+
 validate_keytab() {
   log "Checking keytab"
 
   klist -k /etc/krb5.keytab >> "$LOG_FILE" 2>&1 || die "Invalid keytab"
+  select_keytab_host_principal /etc/krb5.keytab \
+    || die "Kerberos keytab contains no host principal for ${FQDN} or ${HOSTNAME} (principal matching is case-insensitive)"
 
-  if kinit -k "host/${FQDN}@${REALM}"; then
-    log "Kerberos authentication succeeded: host/${FQDN}@${REALM}"
+  if kinit -k -t /etc/krb5.keytab "$KEYTAB_HOST_PRINCIPAL"; then
+    log "Kerberos authentication succeeded: ${KEYTAB_HOST_PRINCIPAL}"
     kdestroy || true
     return 0
   fi
 
-  if kinit -k "host/${HOSTNAME}@${REALM}"; then
-    log "Kerberos authentication succeeded: host/${HOSTNAME}@${REALM}"
-    kdestroy || true
-    return 0
-  fi
-
-  die "Kerberos keytab authentication failed"
+  die "Kerberos keytab authentication failed for ${KEYTAB_HOST_PRINCIPAL}"
 }
 
 ldap_uri_host() {
@@ -478,40 +570,92 @@ validate_ldap_uri_uses_fqdn() {
     die "LDAP URI must use FQDN, not IP address: ${URI}. IP-based Kerberos SPNs such as ldap/${host}@${REALM} are not supported."
   fi
 
-  if [[ "$host" != "${DOMAIN}" && "$host" != "${FQDN}" ]]; then
-    warn "LDAP URI host is ${host}; expected ${DOMAIN} or ${FQDN} to avoid Kerberos SPN mismatch"
-  fi
+  valid_join_domain "$host" || die "LDAP URI must contain a valid DNS name: ${URI}"
 }
 
 validate_ldap_gssapi_auth() {
-  local ldap_client_conf="/tmp/md-ldap-gssapi.conf"
+  local failure_file failure_message
+  failure_file="$(mktemp "${TMPDIR:-/tmp}/md-gssapi-error.XXXXXXXX")" \
+    || die "Cannot create GSSAPI error file"
+  if check_ldap_gssapi_auth "$failure_file"; then
+    rm -f -- "$failure_file"
+    return 0
+  fi
+  failure_message="$(cat "$failure_file")"
+  rm -f -- "$failure_file"
+  die "${failure_message:-LDAP GSSAPI validation failed; see ${LOG_FILE}}"
+}
+
+check_ldap_gssapi_auth() (
+  local ldap_host ldap_port ldap_addresses work_dir
+  # Credentials and temporary files belong to this subshell; only the caller
+  # may stop its spinner and roll back the join.
+  local failure_file="$1"
+  local MD_JOIN_ROLLBACK_ACTIVE=0
+  trap - ERR
+  die() { printf '%s\n' "$*" > "$failure_file"; exit 1; }
 
   log "Checking LDAP GSSAPI authentication"
-
   validate_ldap_uri_uses_fqdn
+  ldap_host="$(ldap_uri_host "$URI")"
+  case "$URI" in
+    "ldap://${ldap_host}"|"ldap://${ldap_host}:389") ldap_port=389 ;;
+    *) die "Unsupported LDAP GSSAPI endpoint: ${URI}" ;;
+  esac
+  log "LDAP GSSAPI endpoint: ${URI}"
+  log "LDAP hostname: ${ldap_host}; port: ${ldap_port}"
+  log "Canonical controller: ${CONTROLLER_FQDN:-unknown}"
+  log "API bootstrap: ${API_HOST:-unknown}; pinned API IPv4: ${API_RESOLVED_IP:-unknown}"
+  ldap_addresses="$(getent ahostsv4 "$ldap_host" 2>/dev/null | awk '!seen[$1]++ {print $1}' || true)"
+  [[ -n "$ldap_addresses" ]] || die "$(ui_text "LDAP DNS resolution failed: ${ldap_host}" "Не удалось разрешить DNS-имя LDAP-сервера: ${ldap_host}")"
+  log "LDAP target IPv4: ${ldap_addresses//$'\n'/, }"
+  have_cmd timeout || die "LDAP validation requires timeout"
+  log "LDAP_TCP_CONNECT: ${ldap_host}:${ldap_port}"
+  timeout 5 bash -c 'exec 3<>/dev/tcp/"$1"/"$2"' _ "$ldap_host" "$ldap_port" >> "$LOG_FILE" 2>&1 \
+    || die "$(ui_text "Cannot connect to LDAP server ${ldap_host}:${ldap_port}" "Не удалось подключиться к LDAP-серверу ${ldap_host}:${ldap_port}")"
+  log "LDAP_TCP_CONNECT: ok"
 
-  if ! kinit -k "host/${FQDN}@${REALM}"; then
-    die "Kerberos GSSAPI initialization failed: host/${FQDN}@${REALM}"
+  work_dir="$(mktemp -d "${TMPDIR:-/tmp}/md-gssapi.XXXXXXXX")" || die "Cannot create GSSAPI validation directory"
+  trap 'rm -rf -- "$work_dir"' EXIT
+  export KRB5CCNAME="FILE:${work_dir}/ccache"
+  if [[ "${MD_GSSAPI_DEBUG:-0}" == 1 ]]; then
+    exec 9>> "$LOG_FILE"
+    export KRB5_TRACE=/dev/fd/9
   fi
 
-  cat > "$ldap_client_conf" <<EOF
+  if [[ -z "${KEYTAB_HOST_PRINCIPAL:-}" ]]; then
+    select_keytab_host_principal /etc/krb5.keytab \
+      || die "Kerberos GSSAPI initialization failed: no matching host principal in keytab"
+  fi
+
+  log "LDAP GSSAPI authid: ${KEYTAB_HOST_PRINCIPAL}"
+  if ! timeout 30 kinit -k -t /etc/krb5.keytab "$KEYTAB_HOST_PRINCIPAL" >> "$LOG_FILE" 2>&1; then
+    die "Kerberos GSSAPI initialization failed: ${KEYTAB_HOST_PRINCIPAL}"
+  fi
+
+  LDAP_SERVICE_PRINCIPAL="ldap/${ldap_host}@${REALM}"
+  log "LDAP service principal: ${LDAP_SERVICE_PRINCIPAL}"
+  have_cmd kvno || die "LDAP service principal validation requires kvno"
+  timeout 30 kvno "$LDAP_SERVICE_PRINCIPAL" >> "$LOG_FILE" 2>&1 \
+    || die "$(ui_text "Cannot obtain LDAP service ticket: ${LDAP_SERVICE_PRINCIPAL}. See ${LOG_FILE}" "Не удалось получить сервисный билет LDAP: ${LDAP_SERVICE_PRINCIPAL}. Подробности: ${LOG_FILE}")"
+  log "LDAP service principal verified"
+  log "LDAP canonicalization: SASL_NOCANON on; ldapwhoami -N; see krb5.conf for Kerberos settings"
+  grep -E '^[[:space:]]*(rdns|dns_canonicalize_hostname)[[:space:]]*=' /etc/krb5.conf >> "$LOG_FILE" 2>&1 || true
+
+  cat > "${work_dir}/ldap.conf" <<EOF
 SASL_NOCANON on
 URI ${URI}
 BASE ${LDAP_BASE_DN}
 EOF
+  [[ -s "${work_dir}/ldap.conf" ]] || die "Cannot write LDAP client configuration"
 
-  LDAPCONF="$ldap_client_conf" ldapwhoami -Y GSSAPI -H "${URI}" >/dev/null \
-    || {
-      rm -f "$ldap_client_conf"
-      kdestroy || true
-      die "LDAP GSSAPI authentication failed"
-    }
+  log "LDAP SASL mechanism: GSS-SPNEGO (required by MultiDirectory PAC extraction)"
+  LDAPCONF="${work_dir}/ldap.conf" timeout 30 ldapwhoami -Q -N -Y GSS-SPNEGO -o nettimeout=5 -H "${URI}" >> "$LOG_FILE" 2>&1 \
+    || die "$(ui_text "LDAP GSSAPI bind failed after TCP and service ticket validation. See ${LOG_FILE}" "Ошибка LDAP GSSAPI bind после успешных проверок TCP и сервисного билета. Подробности: ${LOG_FILE}")"
 
   log "LDAP GSSAPI authentication succeeded"
 
-  rm -f "$ldap_client_conf"
-  kdestroy || true
-}
+)
 
 astra_parsec_sssd_package_list() {
   printf '%s\n' \

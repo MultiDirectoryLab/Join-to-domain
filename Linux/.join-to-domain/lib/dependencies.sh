@@ -61,9 +61,6 @@ package_binaries() {
     oddjob)
       printf '%s\n' oddjobd
       ;;
-    openssh-server)
-      printf '%s\n' sshd
-      ;;
     libparsec-db-sssd3|libparsec-mac-db-sssd3|libparsec-mic-db-sssd3|libparsec-aud-db-sssd3|libparsec-cap-db-sssd3|sssd-dbus)
       ;;
     *)

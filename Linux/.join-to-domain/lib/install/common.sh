@@ -88,7 +88,6 @@ DEB_REQUIRED_PACKAGES=(
   libpam-modules
   oddjob
   oddjob-mkhomedir
-  openssh-server
 )
 
 RPM_REQUIRED_PACKAGES=(
@@ -105,7 +104,6 @@ RPM_REQUIRED_PACKAGES=(
   sssd-client
   oddjob
   oddjob-mkhomedir
-  openssh-server
 )
 
 RPM_APT_REQUIRED_PACKAGES=(
@@ -119,7 +117,6 @@ RPM_APT_REQUIRED_PACKAGES=(
   krb5-workstation
   sssd
   sssd-tools
-  openssh-server
 )
 
 STATE_DIR="/var/lib/MultiDirectory/install"

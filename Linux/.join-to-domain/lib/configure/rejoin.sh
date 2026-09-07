@@ -90,7 +90,7 @@ rollback_recovery_changes() {
   warn "Recovery rejoin failed with exit code ${code}; restoring the pre-rejoin configuration"
   activity_start "$(ui_text "Restoring the pre-rejoin configuration" "Восстановление конфигурации до повторного присоединения")"
   MD_RESTORE_OPERATION_ONLY=1
-  perform_local_rollback_cleanup
+  perform_local_rollback_cleanup || return 1
   MD_RESTORE_OPERATION_ONLY=0
   printf 'RESTORED_AT=%q\n' "$(date --iso-8601=seconds)" >> "$MD_MANIFEST"
   MD_BACKUP_DIR="$PREJOIN_BACKUP_DIR"
@@ -136,6 +136,8 @@ recovery_rejoin_domain() {
   info "$(ui_text "Requesting new Kerberos keytab" "Запрос нового Kerberos keytab")"
   api_ktadd_download "$access_token" "host/${HOSTNAME}" "host/${FQDN}"
   validate_keytab
+  configure_sssd_keytab_principal
+  validate_sssd_config
   ok "$(ui_text "Kerberos authentication succeeded" "Аутентификация Kerberos выполнена")"
   validate_ldap_gssapi_auth
   ok "$(ui_text "LDAP GSSAPI authentication succeeded" "Аутентификация LDAP GSSAPI выполнена")"

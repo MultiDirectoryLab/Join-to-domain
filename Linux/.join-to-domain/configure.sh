@@ -37,4 +37,5 @@ source_configure_module leave
 source_configure_module rejoin
 source_configure_module flow
 
+trap 'configure_exit_cleanup "$?"' EXIT
 main "$@"

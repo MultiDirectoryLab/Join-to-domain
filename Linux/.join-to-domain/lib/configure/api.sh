@@ -174,6 +174,73 @@ api_response_attribute() {
   '
 }
 
+api_get_json() {
+  local cookie="$1"
+  local path="$2"
+  local tmp_body http_code curl_rc detail
+
+  tmp_body="$(mktemp "${TMPDIR:-/tmp}/md-api-get.XXXXXX")"
+  chmod 600 "$tmp_body"
+
+  set +e
+  http_code="$(
+    curl -sS "${API_CURL_RESOLVE[@]}" -X GET "https://${API_HOST}/api${path}" \
+      --connect-timeout "${API_CONNECT_TIMEOUT}" \
+      --max-time "${API_MAX_TIME}" \
+      -H "accept: application/json" \
+      -H "Cookie: id=${cookie}" \
+      -o "$tmp_body" \
+      -w '%{http_code}'
+  )"
+  curl_rc=$?
+  set -e
+
+  if [[ "$curl_rc" -ne 0 || ! "$http_code" =~ ^2[0-9][0-9]$ ]]; then
+    detail="$(tr '\r\n' ' ' < "$tmp_body" | cut -c1-1000)"
+    log "API GET ${path} failed: curl exit ${curl_rc}, HTTP ${http_code:-000}; response=${detail:-empty}"
+    rm -f "$tmp_body"
+    return 1
+  fi
+
+  if ! jq -e . "$tmp_body" >/dev/null 2>&1; then
+    detail="$(tr '\r\n' ' ' < "$tmp_body" | cut -c1-1000)"
+    log "API GET ${path} returned invalid JSON: ${detail:-empty}"
+    rm -f "$tmp_body"
+    return 1
+  fi
+
+  cat "$tmp_body"
+  rm -f "$tmp_body"
+}
+
+api_controller_fqdn_from_dns() {
+  local cookie="$1"
+  local address="$2"
+  local domain="$3"
+  local zones
+
+  if ! zones="$(api_get_json "$cookie" "/dns/zone")"; then
+    return 1
+  fi
+
+  printf '%s' "$zones" | jq -r --arg address "$address" --arg domain "$domain" '
+    [
+      .[]?
+      | (.rrsets // [])[]?
+      | select(((.type // "") | ascii_upcase) == "A")
+      | . as $rrset
+      | (.records // [])[]?
+      | select((.disabled // false) == false)
+      | select((((.content // "") | split(" ")[0])) == $address)
+      | (($rrset.name // "") | sub("[.]$"; "") | ascii_downcase)
+      | select(. == $domain or endswith("." + $domain))
+    ]
+    | unique
+    | (map(select(. != $domain)) + map(select(. == $domain)))
+    | .[0] // empty
+  '
+}
+
 api_rootdse_default_nc() {
   local cookie="$1"
   local resp nc

@@ -1,12 +1,12 @@
 validate_api_host_resolution() {
-  if valid_ipv4_address "${API_ADDRESS}"; then
-    log "API address is an IPv4 address; DNS resolution skipped: ${API_ADDRESS}"
+  if valid_ipv4_address "${API_HOST}"; then
+    log "API host is an IPv4 address; DNS resolution skipped: ${API_HOST}"
     return 0
   fi
 
-  log "Checking DNS resolution: ${API_ADDRESS}"
-  api_host_resolution_ok "${API_ADDRESS}" || die "DNS resolution failed: ${API_ADDRESS}"
-  log "DNS resolution OK: ${API_ADDRESS}"
+  log "Checking DNS resolution: ${API_HOST}"
+  api_host_resolution_ok "${API_HOST}" || die "DNS resolution failed: ${API_HOST}"
+  log "DNS resolution OK: ${API_HOST}"
 }
 
 validate_salt_host_resolution() {
@@ -76,16 +76,17 @@ discover_and_validate_domain() {
   discover_controller_fqdn "$rootdse_dns_host"
   ok "$(ui_text "MultiDirectory controller: ${CONTROLLER_FQDN}" "Контроллер MultiDirectory: ${CONTROLLER_FQDN}")"
   log "Controller discovery completed"
-  log "Bootstrap API address: ${API_ADDRESS}"
+  log "Bootstrap API host: ${API_HOST}"
+  log "Pinned API endpoint: ${API_RESOLVED_IP}"
   log "Canonical controller: ${CONTROLLER_FQDN}"
-  log "API session remains on bootstrap address ${API_ADDRESS}; endpoint and cookie context are unchanged"
+  log "API session remains on bootstrap host ${API_HOST}; endpoint and cookie context are unchanged"
 
-  if valid_ipv4_address "$API_ADDRESS"; then
-    if controller_fqdn_resolves_to_address "$CONTROLLER_FQDN" "$API_ADDRESS"; then
-      log "Controller DNS verification succeeded: ${CONTROLLER_FQDN} -> ${API_ADDRESS}"
+  if valid_ipv4_address "$API_HOST"; then
+    if controller_fqdn_resolves_to_address "$CONTROLLER_FQDN" "$API_RESOLVED_IP"; then
+      log "Controller DNS verification succeeded: ${CONTROLLER_FQDN} -> ${API_RESOLVED_IP}"
     else
-      warn "$(ui_text "Controller ${CONTROLLER_FQDN} was discovered by MultiDirectory, but local DNS does not currently resolve it to ${API_ADDRESS}. Continuing with the authoritative API result." "Контроллер ${CONTROLLER_FQDN} определён MultiDirectory, но локальный DNS пока не разрешает его в ${API_ADDRESS}. Продолжение с авторитетным результатом API.")"
-      log "Controller DNS verification did not confirm ${CONTROLLER_FQDN} -> ${API_ADDRESS}"
+      warn "$(ui_text "Controller ${CONTROLLER_FQDN} was discovered by MultiDirectory, but local DNS does not currently resolve it to ${API_RESOLVED_IP}. Continuing with the authoritative API result." "Контроллер ${CONTROLLER_FQDN} определён MultiDirectory, но локальный DNS пока не разрешает его в ${API_RESOLVED_IP}. Продолжение с авторитетным результатом API.")"
+      log "Controller DNS verification did not confirm ${CONTROLLER_FQDN} -> ${API_RESOLVED_IP}"
     fi
   fi
 
@@ -98,6 +99,7 @@ discover_and_validate_domain() {
   LDAP_GSSAPI_HOST="$DOMAIN"
   LDAP_SERVICE_PRINCIPAL="ldap/${LDAP_GSSAPI_HOST}@${REALM}"
   URI="ldap://${LDAP_GSSAPI_HOST}"
+  log "LDAP endpoint: ${URI}:389; domain service identity: ${LDAP_SERVICE_PRINCIPAL}"
   LDAP_SEARCH_BASE="$LDAP_BASE_DN"
   LDAP_USER_BASE="$LDAP_BASE_DN"
   LDAP_GROUP_BASE="$LDAP_BASE_DN"
@@ -147,53 +149,74 @@ controller_fqdn_from_ptr() {
 
 discover_controller_fqdn() {
   local rootdse_dns_host="${1:-}"
-  local candidate="" source=""
+  local bootstrap_host="${API_HOST:-}"
+  local endpoint_ip="${API_RESOLVED_IP:-}"
+  local candidate="" domain_endpoint_candidate="" source=""
 
-  if ! valid_ipv4_address "$API_ADDRESS"; then
-    CONTROLLER_FQDN="$(normalize_controller_fqdn "$API_ADDRESS")"
-    controller_fqdn_in_domain "$CONTROLLER_FQDN" \
-      || die "API server FQDN does not belong to detected domain ${DOMAIN}: ${CONTROLLER_FQDN}"
-    log "Controller FQDN supplied directly: ${CONTROLLER_FQDN}"
-    return 0
-  fi
+  [[ -n "$bootstrap_host" ]] \
+    || die "$(ui_text "Controller discovery failed: API host is not initialized" "Не удалось определить контроллер: адрес API не инициализирован")"
+  valid_api_host "$bootstrap_host" \
+    || die "Controller discovery failed: invalid API host: ${bootstrap_host}"
+  [[ -n "$endpoint_ip" ]] \
+    || die "$(ui_text "Controller discovery failed: pinned API IPv4 address is not initialized" "Не удалось определить контроллер: закреплённый IPv4-адрес API не инициализирован")"
+  valid_ipv4_address "$endpoint_ip" \
+    || die "Controller discovery failed: invalid pinned API IPv4 address: ${endpoint_ip}"
 
-  candidate="$(api_controller_fqdn_from_dns "$access_token" "$API_ADDRESS" "$DOMAIN" 2>/dev/null || true)"
+  log "Bootstrap API host: ${bootstrap_host}"
+  log "Pinned API IP: ${endpoint_ip}"
+  log "Detected domain: ${DOMAIN}"
+
+  candidate="$(api_controller_fqdn_from_dns "$access_token" "$endpoint_ip" "$DOMAIN" 2>/dev/null || true)"
   candidate="$(normalize_controller_fqdn "$candidate")"
-  if controller_fqdn_in_domain "$candidate"; then
+  if controller_fqdn_in_domain "$candidate" && [[ "$candidate" != "$DOMAIN" ]]; then
     source="MultiDirectory DNS API"
   else
+    [[ "$candidate" == "$DOMAIN" ]] && domain_endpoint_candidate="$candidate"
     candidate=""
   fi
 
   if [[ -z "$candidate" && -n "$rootdse_dns_host" ]]; then
     candidate="$(normalize_controller_fqdn "$rootdse_dns_host")"
-    if controller_fqdn_in_domain "$candidate" \
-        && controller_fqdn_resolves_to_address "$candidate" "$API_ADDRESS"; then
+    if controller_fqdn_in_domain "$candidate" && [[ "$candidate" != "$DOMAIN" ]]; then
       source="RootDSE dnsHostName"
+    else
+      [[ "$candidate" == "$DOMAIN" ]] && domain_endpoint_candidate="$candidate"
+      candidate=""
+    fi
+  fi
+
+  if [[ -z "$candidate" ]] && ! valid_ipv4_address "$bootstrap_host"; then
+    candidate="$(normalize_controller_fqdn "$bootstrap_host")"
+    if controller_fqdn_in_domain "$candidate" && [[ "$candidate" != "$DOMAIN" ]]; then
+      source="bootstrap controller FQDN"
     else
       candidate=""
     fi
   fi
 
   if [[ -z "$candidate" ]]; then
-    candidate="$(controller_fqdn_from_ptr "$API_ADDRESS" 2>/dev/null || true)"
+    candidate="$(controller_fqdn_from_ptr "$endpoint_ip" 2>/dev/null || true)"
     [[ -z "$candidate" ]] || source="PTR lookup"
   fi
 
   if [[ -z "$candidate" && -n "${SAVED_CONTROLLER_FQDN:-}" ]]; then
     candidate="$(normalize_controller_fqdn "$SAVED_CONTROLLER_FQDN")"
-    if controller_fqdn_in_domain "$candidate" \
-        && controller_fqdn_resolves_to_address "$candidate" "$API_ADDRESS"; then
+    if controller_fqdn_in_domain "$candidate"; then
       source="saved join state"
     else
       candidate=""
     fi
   fi
 
-  [[ -n "$candidate" ]] || die "$(ui_text "Cannot determine a controller FQDN for ${API_ADDRESS}. The DNS API, RootDSE and PTR lookup returned no usable name." "Не удалось определить FQDN контроллера для ${API_ADDRESS}. DNS API, RootDSE и PTR не вернули подходящее имя.")"
+  if [[ -z "$candidate" && -n "$domain_endpoint_candidate" ]]; then
+    candidate="$domain_endpoint_candidate"
+    source="domain endpoint fallback"
+  fi
+
+  [[ -n "$candidate" ]] || die "$(ui_text "Cannot determine a controller FQDN via bootstrap host ${bootstrap_host} (${endpoint_ip}). The DNS API, RootDSE and PTR lookup returned no usable name." "Не удалось определить FQDN контроллера через bootstrap-адрес ${bootstrap_host} (${endpoint_ip}). DNS API, RootDSE и PTR не вернули подходящее имя.")"
 
   CONTROLLER_FQDN="$candidate"
-  log "Controller discovery source: ${source}; ${API_ADDRESS} -> ${CONTROLLER_FQDN}"
+  log "Controller discovery source: ${source}; bootstrap=${bootstrap_host}; pinned_ip=${endpoint_ip}; controller=${CONTROLLER_FQDN}"
   return 0
 }
 

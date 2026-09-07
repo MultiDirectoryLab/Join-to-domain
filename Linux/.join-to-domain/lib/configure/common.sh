@@ -51,6 +51,8 @@ MD_OPERATION_NM_DNS_STATE=""
 MD_AUTHSELECT_STATE="${MD_STATE_DIR}/authselect.profile"
 MD_SSSD_SOCKET_STATE="${MD_STATE_DIR}/sssd-sockets.state"
 MD_ACTIVITY_PID=""
+MD_JOIN_PHASE=""
+MD_JOIN_FAILURE_REPORTED=0
 
 INSTALL_STATE_DIR="/var/lib/MultiDirectory/install"
 INSTALL_ENV="${INSTALL_STATE_DIR}/install.env"
@@ -102,6 +104,47 @@ activity_start() {
   MD_ACTIVITY_PID=$!
 }
 
+report_join_failure_status() {
+  local phase="${MD_JOIN_PHASE:-domain_join}"
+
+  [[ "${MD_JOIN_FAILURE_REPORTED:-0}" -eq 0 ]] || return 0
+  MD_JOIN_FAILURE_REPORTED=1
+  log "phase=${phase} status=failed"
+  [[ "$phase" == "domain_join" ]] || log "phase=domain_join status=failed"
+}
+
+report_unexpected_join_failure() {
+  local code="${1:-1}"
+  local message
+
+  message="$(ui_text "Domain join failed unexpectedly (exit code ${code})" "Присоединение к домену аварийно завершилось с кодом ${code}")"
+  activity_stop
+  printf '%b\n' "${RED}[ERROR]${NC} ${message}" > /dev/tty 2>/dev/null || true
+  printf '[ERROR] %s\n' "$message" >> "$LOG_FILE" 2>/dev/null || true
+  report_join_failure_status
+  printf '%b\n' "${BLUE}[INFO]${NC} Full log: ${LOG_FILE}" > /dev/tty 2>/dev/null || true
+  printf '[INFO] Full log: %s\n' "$LOG_FILE" >> "$LOG_FILE" 2>/dev/null || true
+}
+
+configure_exit_cleanup() {
+  local code="${1:-0}"
+  local rollback_handler="${MD_ROLLBACK_HANDLER:-rollback_local_changes}"
+
+  trap - EXIT
+  activity_stop
+
+  if [[ "$code" -ne 0 && "${MD_JOIN_ROLLBACK_ACTIVE:-0}" -eq 1 ]]; then
+    report_unexpected_join_failure "$code"
+    MD_JOIN_ROLLBACK_ACTIVE=0
+    trap - ERR INT TERM
+    if declare -F "$rollback_handler" >/dev/null 2>&1; then
+      "$rollback_handler" "$code"
+    fi
+  fi
+
+  exit "$code"
+}
+
 info() {
   local message="$(runtime_text "$*")"
   printf '[INFO] %s\n' "$message" >> "$LOG_FILE" 2>/dev/null || true
@@ -143,6 +186,7 @@ die() {
 
   local rollback_handler="${MD_ROLLBACK_HANDLER:-rollback_local_changes}"
   if [[ "${MD_JOIN_ROLLBACK_ACTIVE:-0}" -eq 1 ]] && declare -F "$rollback_handler" >/dev/null 2>&1; then
+    report_join_failure_status
     MD_JOIN_ROLLBACK_ACTIVE=0
     trap - ERR INT TERM
     "$rollback_handler" 1
@@ -541,6 +585,33 @@ create_backup_set() {
     printf '%s_PATH=%q\n%s_EXISTED=%s\n%s_BACKUP=%q\n' \
       "$key" "$path" "$key" "$existed" "$key" "files/$rel" >> "$MD_MANIFEST"
   done < <(managed_join_paths | awk '!seen[$0]++')
+  if is_redos_or_rhel_like && have_cmd authselect; then
+    # Keep this dynamic so backups made by older versions remain valid.
+    # cp -a preserves the generated files, custom profiles and symlinks;
+    # the static snapshot above already contains all NSS/PAM entry points.
+    md_backup_once /etc/authselect
+    # authselect 1.x validates generated files against these private copies;
+    # newer versions also keep a profile checksum here. Preserve absence too,
+    # but never recursively snapshot the unrelated native backups directory.
+    local authselect_state_file
+    for authselect_state_file in system-auth password-auth fingerprint-auth \
+      smartcard-auth switchable-auth postlogin nsswitch.conf dconf-db dconf-locks \
+      checksum user-nsswitch-created; do
+      md_backup_once "/var/lib/authselect/$authselect_state_file"
+    done
+    md_backup_once /etc/dconf/db/distro.d/20-authselect
+    md_backup_once /etc/dconf/db/distro.d/locks/20-authselect
+    authselect current --raw > "$MD_BACKUP_DIR/authselect.profile" 2>> "$LOG_FILE" || true
+    if authselect check >> "$LOG_FILE" 2>&1; then
+      : > "$MD_BACKUP_DIR/authselect.valid"
+      chmod 600 "$MD_BACKUP_DIR/authselect.valid"
+    fi
+    ls -ld /etc/nsswitch.conf >> "$LOG_FILE" 2>&1 || true
+    readlink -f /etc/nsswitch.conf >> "$LOG_FILE" 2>&1 || true
+    : > "$MD_BACKUP_DIR/authselect.snapshot"
+    chmod 600 "$MD_BACKUP_DIR/authselect.profile" "$MD_BACKUP_DIR/authselect.snapshot"
+    log "Saved authselect and NSS/PAM snapshot before configuration"
+  fi
   chmod 600 "$MD_MANIFEST"
   printf '%s\n' "$MD_BACKUP_DIR" > "$MD_PENDING_BACKUP"
   chmod 600 "$MD_PENDING_BACKUP"
@@ -757,12 +828,12 @@ restore_one() {
   rel="${path#/}"
   if [[ "$existed" == 1 ]]; then
     [[ -e "${MD_BACKUP_DIR}/files/${rel}" || -L "${MD_BACKUP_DIR}/files/${rel}" ]] || return 1
-    rm -rf "$path"
-    mkdir -p "$(dirname -- "$path")"
-    cp -a -- "${MD_BACKUP_DIR}/files/${rel}" "$path"
+    rm -rf "$path" || return 1
+    mkdir -p "$(dirname -- "$path")" || return 1
+    cp -a -- "${MD_BACKUP_DIR}/files/${rel}" "$path" || return 1
     log "Restored: $path"
   elif [[ "$existed" == 0 ]]; then
-    rm -rf -- "$path"
+    rm -rf -- "$path" || return 1
     log "Removed join-created path: $path"
   else
     return 1
