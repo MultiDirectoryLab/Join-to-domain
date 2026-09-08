@@ -62,6 +62,8 @@ join_domain() {
   # immediately before the first possible system modification (DNS setup).
   activity_start "$(ui_text "Creating a safe pre-join backup" "Создание безопасной резервной копии перед присоединением")"
   create_join_backup || die "Failed to create a safe pre-join backup"
+  validate_join_backup || die "Failed to validate the safe pre-join backup"
+  write_transaction_state JOIN_IN_PROGRESS join || die "Failed to write join transaction state"
   activity_stop
   ok "$(ui_text "Backup created" "Резервная копия создана")"
   md_init_state
@@ -235,8 +237,9 @@ join_domain() {
 
   activity_start "$(ui_text "Starting services and saving state" "Запуск служб и сохранение состояния")"
   start_services
+  publish_original_backup "$MD_BACKUP_DIR" || die "Failed to publish the immutable original backup"
   save_join_env
-  rm -f "${MD_ROLLBACK_MARKER}" "${MD_PENDING_BACKUP}"
+  rm -f "${MD_ROLLBACK_MARKER}" "${MD_PENDING_BACKUP}" "${MD_TRANSACTION_STATE}"
 
   MD_JOIN_ROLLBACK_ACTIVE=0
   trap - ERR INT TERM

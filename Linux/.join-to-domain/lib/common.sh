@@ -13,9 +13,13 @@ API_CONNECT_TIMEOUT=10
 API_MAX_TIME=30
 MD_ETC_DIR="/etc/MultiDirectory"
 MD_STATE_DIR="${MD_ETC_DIR}/state"
+MD_BACKUPS_ROOT="${MD_ETC_DIR}/backups"
 MD_BACKUP_DIR="${MD_STATE_DIR}/backups"
 MD_MANIFEST="${MD_STATE_DIR}/manifest"
 MD_JOIN_ENV="/etc/MultiDirectory/state/join.env"
+MD_PENDING_BACKUP="${MD_STATE_DIR}/active-backup"
+MD_ORIGINAL_BACKUP="${MD_STATE_DIR}/original-backup"
+MD_TRANSACTION_STATE="${MD_STATE_DIR}/transaction.env"
 MD_ROLLBACK_MARKER="${MD_STATE_DIR}/rollback-in-progress"
 SALT_PKG_MODULE_DST="/var/cache/salt/minion/extmods/modules/pkg.py"
 MD_GPUPDATE_DST="/usr/local/libexec/multidirectory/md-gpupdate"
@@ -198,10 +202,26 @@ validate_utf8_input() {
   return 0
 }
 
+apply_input_erase() {
+  local value="$1" result="" char i
+
+  for ((i = 0; i < ${#value}; i++)); do
+    char="${value:i:1}"
+    case "$char" in
+      $'\b'|$'\177')
+        [[ -n "$result" ]] && result="${result:0:${#result}-1}"
+        ;;
+      *) result+="$char" ;;
+    esac
+  done
+  printf '%s' "$result"
+}
+
 sanitize_input() {
   local value="$1"
 
   value="${value//$'\r'/}"
+  value="$(apply_input_erase "$value")"
   value="$(
     printf '%s' "$value" |
       LC_ALL=C tr -d '\000-\010\013\014\016-\037\177' |

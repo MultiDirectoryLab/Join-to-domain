@@ -300,6 +300,8 @@ recover_incomplete_join_state() {
   fi
 
   backup_kind="$(sed -n 's/^BACKUP_KIND=//p' "$MD_MANIFEST" | tail -n1)"
+  MD_TRANSACTION_OPERATION="$backup_kind"
+  write_transaction_state ROLLBACK_IN_PROGRESS "$backup_kind" || return 1
   case "$backup_kind" in
     rejoin)
       warn "$(ui_text "An interrupted Rejoin was found; restoring the configuration from immediately before Rejoin." "Обнаружен прерванный Rejoin; восстанавливается конфигурация непосредственно перед Rejoin.")"
@@ -307,7 +309,7 @@ recover_incomplete_join_state() {
       perform_local_rollback_cleanup || return 1
       MD_RESTORE_OPERATION_ONLY=0
       printf 'RESTORED_AT=%q\n' "$(date --iso-8601=seconds)" >> "$MD_MANIFEST"
-      rm -f "$MD_PENDING_BACKUP" "$MD_ROLLBACK_MARKER"
+      rm -f "$MD_PENDING_BACKUP" "$MD_ROLLBACK_MARKER" "$MD_TRANSACTION_STATE"
       MD_OPERATION_NM_DNS_STATE=""
       activity_stop
       ok "$(ui_text "Interrupted Rejoin state was recovered" "Состояние прерванного Rejoin восстановлено")"
@@ -379,6 +381,11 @@ leave_domain_locally_for_switch() {
 
   if recoverable_incomplete_join_detected; then
     recover_incomplete_join_state
+    detect_domain_state
+    if [[ "$DETECTED_DOMAIN_STATE" == "not_joined" ]]; then
+      user_ok "$(ui_text "Incomplete Join was recovered; the computer is not joined" "Незавершённый Join восстановлен; компьютер не состоит в домене")"
+      return 0
+    fi
   fi
 
   need_cmd awk
@@ -403,6 +410,11 @@ leave_domain() {
 
   if recoverable_incomplete_join_detected; then
     recover_incomplete_join_state
+    detect_domain_state
+    if [[ "$DETECTED_DOMAIN_STATE" == "not_joined" ]]; then
+      user_ok "$(ui_text "Incomplete Join was recovered; the computer is not joined" "Незавершённый Join восстановлен; компьютер не состоит в домене")"
+      return 0
+    fi
   fi
 
   need_cmd curl
@@ -433,6 +445,7 @@ rollback_local_changes() {
 
   mkdir -p "${MD_STATE_DIR}"
   touch "${MD_ROLLBACK_MARKER}"
+  write_transaction_state ROLLBACK_IN_PROGRESS "${MD_TRANSACTION_OPERATION:-join}" || return 1
 
   perform_local_rollback_cleanup || return 1
 

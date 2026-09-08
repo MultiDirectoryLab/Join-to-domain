@@ -53,6 +53,11 @@ classify_prejoin_backup() {
   PREJOIN_MANIFEST=""
   reference="$(join_state_value BACKUP_DIR 2>/dev/null || true)"
 
+  if [[ -z "$reference" && -r "$MD_ORIGINAL_BACKUP" ]]; then
+    IFS= read -r reference < "$MD_ORIGINAL_BACKUP"
+    info "$(ui_text "Using the immutable original backup pointer" "Используется неизменяемый указатель исходной резервной копии")"
+  fi
+
   if [[ -z "$reference" ]]; then
     info "$(ui_text "Migrating legacy pre-join backup" "Перенос резервной копии старого формата")"
     if load_prejoin_backup && validate_join_backup; then
@@ -88,6 +93,7 @@ rollback_recovery_changes() {
   local code="$1"
   activity_stop
   warn "Recovery rejoin failed with exit code ${code}; restoring the pre-rejoin configuration"
+  write_transaction_state ROLLBACK_IN_PROGRESS rejoin || return 1
   activity_start "$(ui_text "Restoring the pre-rejoin configuration" "Восстановление конфигурации до повторного присоединения")"
   MD_RESTORE_OPERATION_ONLY=1
   perform_local_rollback_cleanup || return 1
@@ -95,7 +101,7 @@ rollback_recovery_changes() {
   printf 'RESTORED_AT=%q\n' "$(date --iso-8601=seconds)" >> "$MD_MANIFEST"
   MD_BACKUP_DIR="$PREJOIN_BACKUP_DIR"
   MD_MANIFEST="$PREJOIN_MANIFEST"
-  rm -f "$MD_PENDING_BACKUP" "$MD_ROLLBACK_MARKER"
+  rm -f "$MD_PENDING_BACKUP" "$MD_ROLLBACK_MARKER" "$MD_TRANSACTION_STATE"
   MD_OPERATION_NM_DNS_STATE=""
   unset MD_ROLLBACK_HANDLER
   activity_stop
@@ -148,7 +154,7 @@ recovery_rejoin_domain() {
   JOIN_STATE_BACKUP_DIR="$PREJOIN_BACKUP_DIR"
   save_join_env
   unset JOIN_STATE_BACKUP_DIR
-  rm -f "$MD_PENDING_BACKUP" "$MD_ROLLBACK_MARKER"
+  rm -f "$MD_PENDING_BACKUP" "$MD_ROLLBACK_MARKER" "$MD_TRANSACTION_STATE"
 
   MD_JOIN_ROLLBACK_ACTIVE=0
   unset MD_ROLLBACK_HANDLER
@@ -167,6 +173,8 @@ recovery_rejoin_domain() {
 start_rejoin_transaction() {
   activity_start "$(ui_text "Creating a recovery backup" "Создание резервной копии для восстановления")"
   create_recovery_backup || die "Failed to create the recovery rejoin operation backup"
+  validate_join_backup || die "Failed to validate the recovery rejoin operation backup"
+  write_transaction_state REJOIN_IN_PROGRESS rejoin || die "Failed to write rejoin transaction state"
   activity_stop
   ok "$(ui_text "Recovery backup created" "Резервная копия для восстановления создана")"
 

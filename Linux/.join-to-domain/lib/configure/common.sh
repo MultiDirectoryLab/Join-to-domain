@@ -45,6 +45,8 @@ MD_BACKUP_DIR=""
 MD_MANIFEST=""
 MD_JOIN_ENV="${MD_STATE_DIR}/join.env"
 MD_PENDING_BACKUP="${MD_STATE_DIR}/active-backup"
+MD_ORIGINAL_BACKUP="${MD_STATE_DIR}/original-backup"
+MD_TRANSACTION_STATE="${MD_STATE_DIR}/transaction.env"
 MD_ROLLBACK_MARKER="${MD_STATE_DIR}/rollback-in-progress"
 MD_NM_DNS_STATE="${MD_STATE_DIR}/networkmanager-dns.env"
 MD_OPERATION_NM_DNS_STATE=""
@@ -320,10 +322,29 @@ validate_utf8_input() {
   return 0
 }
 
+apply_input_erase() {
+  local value="$1" result="" char i
+
+  for ((i = 0; i < ${#value}; i++)); do
+    char="${value:i:1}"
+    case "$char" in
+      $'\b'|$'\177')
+        [[ -n "$result" ]] && result="${result:0:${#result}-1}"
+        ;;
+      *) result+="$char" ;;
+    esac
+  done
+  printf '%s' "$result"
+}
+
 sanitize_input() {
   local value="$1"
 
   value="${value//$'\r'/}"
+  # Most terminals erase in canonical mode. Some consoles/serial sessions
+  # deliver BS or DEL literally; apply those edits instead of merely dropping
+  # the control byte and accidentally retaining the text the user erased.
+  value="$(apply_input_erase "$value")"
   value="$(
     printf '%s' "$value" |
       LC_ALL=C tr -d '\000-\010\013\014\016-\037\177' |
@@ -550,6 +571,51 @@ backup_key() {
   printf 'FILE_%s' "$(printf '%s' "$1" | sed 's#^/##; s#[^A-Za-z0-9]#_#g' | tr '[:lower:]' '[:upper:]')"
 }
 
+write_state_pointer() {
+  local target="$1" value="$2" tmp
+
+  mkdir -p "$MD_STATE_DIR"
+  tmp="$(mktemp "${target}.tmp.XXXXXX")" || return 1
+  printf '%s\n' "$value" > "$tmp" || { rm -f "$tmp"; return 1; }
+  chmod 600 "$tmp" || { rm -f "$tmp"; return 1; }
+  chown root:root "$tmp" 2>/dev/null || true
+  mv -f "$tmp" "$target"
+}
+
+write_transaction_state() {
+  local state="$1" operation="${2:-${MD_TRANSACTION_OPERATION:-join}}" tmp
+
+  mkdir -p "$MD_STATE_DIR"
+  tmp="$(mktemp "${MD_TRANSACTION_STATE}.tmp.XXXXXX")" || return 1
+  {
+    printf 'STATE=%q\n' "$state"
+    printf 'OPERATION=%q\n' "$operation"
+    printf 'OPERATION_BACKUP=%q\n' "${MD_BACKUP_DIR:-}"
+    printf 'UPDATED_AT=%q\n' "$(date --iso-8601=seconds)"
+  } > "$tmp" || { rm -f "$tmp"; return 1; }
+  chmod 600 "$tmp" || { rm -f "$tmp"; return 1; }
+  chown root:root "$tmp" 2>/dev/null || true
+  mv -f "$tmp" "$MD_TRANSACTION_STATE"
+  MD_TRANSACTION_OPERATION="$operation"
+  log "Transaction state: ${state}; operation=${operation}; backup=${MD_BACKUP_DIR:-none}"
+}
+
+publish_original_backup() {
+  local backup="${1:-$MD_BACKUP_DIR}" existing=""
+
+  case "$backup" in "$MD_BACKUPS_ROOT"/join-*) ;; *) return 1 ;; esac
+  [[ -d "$backup" && -r "$backup/manifest.env" ]] || return 1
+  if [[ -r "$MD_ORIGINAL_BACKUP" ]]; then
+    IFS= read -r existing < "$MD_ORIGINAL_BACKUP"
+    [[ "$existing" == "$backup" ]] && return 0
+    # The first pre-Join snapshot is immutable for this domain lifecycle.
+    case "$existing" in "$MD_BACKUPS_ROOT"/join-*) ;; *) return 1 ;; esac
+    [[ -d "$existing" && -r "$existing/manifest.env" ]] || return 1
+    return 1
+  fi
+  write_state_pointer "$MD_ORIGINAL_BACKUP" "$backup"
+}
+
 create_backup_set() {
   local kind="$1"
   local stamp candidate=0 path key rel existed
@@ -613,8 +679,7 @@ create_backup_set() {
     log "Saved authselect and NSS/PAM snapshot before configuration"
   fi
   chmod 600 "$MD_MANIFEST"
-  printf '%s\n' "$MD_BACKUP_DIR" > "$MD_PENDING_BACKUP"
-  chmod 600 "$MD_PENDING_BACKUP"
+  write_state_pointer "$MD_PENDING_BACKUP" "$MD_BACKUP_DIR" || return 1
   log "${kind} backup created: ${MD_BACKUP_DIR}"
 }
 
@@ -738,6 +803,10 @@ migrate_legacy_prejoin_backup() {
 load_prejoin_backup() {
   local backup
   backup="$(join_state_value BACKUP_DIR 2>/dev/null || true)"
+  if [[ -z "$backup" && -r "$MD_ORIGINAL_BACKUP" ]]; then
+    IFS= read -r backup < "$MD_ORIGINAL_BACKUP"
+    log "Using immutable original backup pointer: ${backup}"
+  fi
   if [[ -z "$backup" ]]; then
     migrate_legacy_prejoin_backup || return 1
     return 0

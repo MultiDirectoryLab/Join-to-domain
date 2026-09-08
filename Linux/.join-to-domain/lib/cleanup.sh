@@ -64,9 +64,6 @@ cleanup_domain_runtime_state() {
     /etc/sudoers.d/domain-admins
     /etc/systemd/resolved.conf.d/MultiDirectory.conf
     /etc/salt/minion.append
-    "$MD_JOIN_ENV"
-    "${MD_STATE_DIR}/rollback-in-progress"
-    "$MD_MANIFEST"
     "$SALT_PKG_MODULE_DST"
     "$MD_GPUPDATE_LINK"
     "$MD_GPUPDATE_DST"
@@ -76,6 +73,23 @@ cleanup_domain_runtime_state() {
     safe_remove_path "$path" || failed=1
   done
 
+  return "$failed"
+}
+
+cleanup_recovery_metadata() {
+  local path failed=0
+  local metadata_paths=(
+    "$MD_JOIN_ENV"
+    "$MD_ROLLBACK_MARKER"
+    "$MD_MANIFEST"
+    "$MD_PENDING_BACKUP"
+    "$MD_ORIGINAL_BACKUP"
+    "$MD_TRANSACTION_STATE"
+  )
+
+  for path in "${metadata_paths[@]}"; do
+    safe_remove_path "$path" || failed=1
+  done
   return "$failed"
 }
 
@@ -879,6 +893,16 @@ safe_leave_domain() {
     cleanup_log "Final leave result: completed with errors"
     return 1
   fi
+
+  # State, manifest and backup pointers are the last things removed. If any
+  # managed cleanup step fails, the next run retains the evidence needed to
+  # diagnose or resume recovery.
+  cleanup_recovery_metadata || {
+    error "Safe domain leave could not finalize recovery metadata cleanup"
+    cleanup_log "Final leave result: recovery metadata cleanup failed"
+    return 1
+  }
+  cleanup_empty_domain_dirs
 
   info "Safe MultiDirectory domain leave completed"
   info "$(ui_text "System reboot is recommended" "Рекомендуется перезагрузить компьютер")"

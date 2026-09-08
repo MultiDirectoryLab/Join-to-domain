@@ -24,6 +24,18 @@ pending_transaction_manifest() {
   printf '%s\n' "$backup/manifest.env"
 }
 
+original_backup_manifest() {
+  local original_pointer="${MD_ORIGINAL_BACKUP:-${MD_STATE_DIR}/original-backup}"
+  local backups_root="${MD_BACKUPS_ROOT:-${MD_ETC_DIR}/backups}"
+  local backup
+
+  [[ -r "$original_pointer" ]] || return 1
+  IFS= read -r backup < "$original_pointer"
+  case "$backup" in "$backups_root"/join-*) ;; *) return 1 ;; esac
+  [[ -r "$backup/manifest.env" ]] || return 1
+  printf '%s\n' "$backup/manifest.env"
+}
+
 authoritative_domain_manifest() {
   local manifest=""
   local legacy_manifest="${MD_STATE_DIR}/manifest"
@@ -33,6 +45,14 @@ authoritative_domain_manifest() {
   # in the current shell, but the orphaned backup must not be treated as an
   # existing domain join.
   manifest="$(pending_transaction_manifest 2>/dev/null || true)"
+  if [[ -n "$manifest" ]]; then
+    printf '%s\n' "$manifest"
+    return 0
+  fi
+
+  # A completed managed Join removes active-backup, but keeps this immutable
+  # pointer so Leave/Rejoin still work even if join.env is damaged or lost.
+  manifest="$(original_backup_manifest 2>/dev/null || true)"
   if [[ -n "$manifest" ]]; then
     printf '%s\n' "$manifest"
     return 0
@@ -59,6 +79,40 @@ manifest_has_tracked_paths() {
   # Support both the old path-per-line manifest and BACKUP_VERSION=1, where
   # tracked paths are stored as FILE_*_PATH=/absolute/path.
   grep -Eq '(^[[:space:]]*/[^[:space:]]+|^FILE_[A-Za-z0-9_]+_PATH=/)' "$manifest" 2>/dev/null
+}
+
+recovery_file_state() {
+  [[ -e "$1" ]] && printf PRESENT || printf ABSENT
+}
+
+recovery_backup_state() {
+  local pointer="$1" backup=""
+  [[ -r "$pointer" ]] || { printf ABSENT; return 0; }
+  IFS= read -r backup < "$pointer"
+  case "$backup" in "$MD_BACKUPS_ROOT"/join-*|"$MD_BACKUPS_ROOT"/rejoin-*) ;; *) printf INVALID; return 0 ;; esac
+  [[ -d "$backup" && -r "$backup/manifest.env" ]] && printf PRESENT || printf INVALID
+}
+
+log_recovery_state() {
+  local manifest=""
+  manifest="$(authoritative_domain_manifest 2>/dev/null || true)"
+  cleanup_log "Recovery state:"
+  cleanup_log "  join_env=$(recovery_file_state "$MD_JOIN_ENV")"
+  cleanup_log "  transaction_state=$(recovery_file_state "$MD_TRANSACTION_STATE")"
+  cleanup_log "  manifest=$([[ -n "$manifest" && -r "$manifest" ]] && printf PRESENT || printf ABSENT)"
+  cleanup_log "  original_backup=$(recovery_backup_state "$MD_ORIGINAL_BACKUP")"
+  cleanup_log "  operation_backup=$(recovery_backup_state "$MD_PENDING_BACKUP")"
+  cleanup_log "  rollback_marker=$(recovery_file_state "$MD_ROLLBACK_MARKER")"
+  cleanup_log "  domain_config=${DETECTED_DOMAIN_STATE:-UNKNOWN}"
+  cleanup_log "  kerberos_config=$([[ -e /etc/krb5.conf || -e /etc/krb5.keytab ]] && printf DETECTED || printf NOT_DETECTED)"
+  cleanup_log "  sssd_config=$([[ -e /etc/sssd/sssd.conf ]] && printf DETECTED || printf NOT_DETECTED)"
+  cleanup_log "  salt_config=$([[ -e /etc/salt/minion.append || -e /etc/salt/minion_id ]] && printf DETECTED || printf NOT_DETECTED)"
+}
+
+partial_without_recovery_metadata() {
+  [[ "${DETECTED_DOMAIN_STATE:-}" == "partial_join" ]] || return 1
+  recoverable_incomplete_join_detected && return 1
+  [[ ! -f "$MD_JOIN_ENV" ]]
 }
 
 krb5_conf_looks_domain_managed() {

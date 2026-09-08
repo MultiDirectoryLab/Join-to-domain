@@ -6,13 +6,23 @@ configure_domain() {
   fi
 
   detect_domain_state
+  log_recovery_state
   if recoverable_incomplete_join_detected; then
     status_info "$(ui_text "An incomplete previous join was found. Local recovery will run before retrying." "Обнаружено незавершённое предыдущее присоединение. Перед новой попыткой будет выполнено локальное восстановление.")"
   elif [[ "$DETECTED_DOMAIN_STATE" != "not_joined" ]]; then
     if [[ "$DETECTED_DOMAIN_STATE" == "managed_join" ]]; then
       status_info "$(ui_text "Existing domain membership found; it will be replaced with the new domain membership" "Обнаружено членство в существующем домене; оно будет заменено членством в новом домене")"
+    elif partial_without_recovery_metadata; then
+      warn "$(ui_text "An incomplete Join has no original backup; cleaning only identifiable MultiDirectory components" "У незавершённого Join нет исходной резервной копии; очищаются только однозначно определяемые компоненты MultiDirectory")"
+      safe_leave_domain || return 1
+      detect_domain_state
+      [[ "$DETECTED_DOMAIN_STATE" == "not_joined" ]] || {
+        error "$(ui_text "Conservative recovery left ambiguous domain configuration; Join was stopped" "После консервативного восстановления осталась неоднозначная доменная конфигурация; Join остановлен")"
+        return 1
+      }
+      status_info "$(ui_text "Incomplete state recovered; starting a clean Join" "Незавершённое состояние восстановлено; запускается чистый Join")"
     else
-      warn "$(ui_text "Partial domain configuration exists. Use 'Rejoin domain' to repair it." "Обнаружена частичная доменная конфигурация. Используйте «Повторно присоединить к домену» для её восстановления.")"
+      warn "$(ui_text "Partial domain configuration cannot be identified safely" "Частичную доменную конфигурацию нельзя безопасно идентифицировать")"
       return 1
     fi
   fi
@@ -48,6 +58,14 @@ leave_domain_from_menu() {
   if [[ "$DRY_RUN" -eq 1 ]]; then
     info "Dry-run: leave domain"
     return 0
+  fi
+
+  detect_domain_state
+  log_recovery_state
+  if partial_without_recovery_metadata; then
+    warn "$(ui_text "The original backup is unavailable; performing conservative MultiDirectory cleanup" "Исходная резервная копия недоступна; выполняется консервативная очистка компонентов MultiDirectory")"
+    safe_leave_domain
+    return $?
   fi
 
   info "$(ui_text "Running domain leave" "Запуск выхода из домена")"
@@ -96,6 +114,18 @@ rejoin_domain() {
   if [[ "$DRY_RUN" -eq 1 ]]; then
     info "Dry-run: inspect local and remote rejoin state"
     return 0
+  fi
+
+  detect_domain_state
+  log_recovery_state
+  if partial_without_recovery_metadata; then
+    warn "$(ui_text "The original backup is unavailable; recovering identifiable MultiDirectory components before Rejoin" "Исходная резервная копия недоступна; перед Rejoin восстанавливаются однозначно определяемые компоненты MultiDirectory")"
+    safe_leave_domain || return 1
+    detect_domain_state
+    [[ "$DETECTED_DOMAIN_STATE" == "not_joined" ]] || {
+      error "$(ui_text "Conservative recovery could not produce a clean state" "Консервативное восстановление не смогло получить чистое состояние")"
+      return 1
+    }
   fi
 
   MD_CALLED_FROM_INSTALL_PACKAGES=1 bash "$CONFIGURE_SCRIPT" rejoin < /dev/tty
