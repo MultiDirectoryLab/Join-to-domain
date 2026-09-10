@@ -289,12 +289,11 @@ prepare_salt_minion_identity() {
   if [[ -f /etc/salt/minion_id ]]; then
     existing_minion_id="$(tr -d '\r\n' < /etc/salt/minion_id 2>/dev/null || true)"
     if [[ -n "$existing_minion_id" && "$existing_minion_id" != "$guid" ]]; then
-      info "$(ui_text "Updating Salt minion id from ${existing_minion_id} to ${guid}; keeping the existing minion key pair" "Идентификатор Salt minion меняется с ${existing_minion_id} на ${guid}; существующая пара ключей сохраняется")"
+      log "Updating Salt minion id from ${existing_minion_id} to ${guid}; keeping the existing minion key pair"
       if [[ "$existing_minion_id" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$ ]]; then
         log "Deleting the previous Salt minion id before publishing the new one: ${existing_minion_id}"
         api_delete_salt_minion_key "${access_token}" "${existing_minion_id}"
       else
-        info "Previous Salt minion id is not a UUID (${existing_minion_id}); deletion via the UUID endpoint is not required"
         log "Skipped deletion of incompatible legacy Salt minion id: ${existing_minion_id}"
       fi
     fi
@@ -455,7 +454,7 @@ accept_salt_minion_key() {
     fi
 
     if [[ "$curl_rc" -eq 28 ]]; then
-      info "$(ui_text "Salt API response timed out after ${SALT_ACCEPT_MAX_TIME}s; checking whether the key was accepted anyway" "Ответ Salt API не получен за ${SALT_ACCEPT_MAX_TIME} с; проверяется, был ли ключ всё же принят")"
+      log "Salt API response timed out after ${SALT_ACCEPT_MAX_TIME}s; checking whether the key was accepted anyway"
       # The MultiDirectory endpoint waits for the accepted minion to appear in
       # Salt. Restarting here forces an immediate authentication attempt instead
       # of waiting for the minion's normal authentication retry interval.

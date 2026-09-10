@@ -45,7 +45,8 @@ is_supported_template_placeholder() {
   case "$1" in
     __DOMAIN__|__REALM__|__KDC__|__KADMIN__|__URI__|\
 __LDAP_SEARCH_BASE__|__LDAP_USER_BASE__|__LDAP_GROUP_BASE__|\
-__HOSTNAME__|__FQDN__|__LDAP_COMPUTER_OU__|__SALT_MASTER__|\
+__HOSTNAME__|__FQDN__|__LDAP_COMPUTER_OU__|__LDAP_SASL_AUTHID__|\
+__SALT_MASTER__|\
 __MD_DNS_SERVER__)
       return 0
       ;;
@@ -76,6 +77,7 @@ validate_template_placeholder_coverage() {
 
 apply_placeholders_to_file() {
   local file="$1"
+  local ldap_sasl_authid="${KEYTAB_HOST_PRINCIPAL:-host/${FQDN}@${REALM}}"
 
   [[ -f "$file" ]] || return 0
 
@@ -88,6 +90,7 @@ apply_placeholders_to_file() {
     -e "s#__LDAP_SEARCH_BASE__#${LDAP_SEARCH_BASE}#g" \
     -e "s#__LDAP_USER_BASE__#${LDAP_USER_BASE}#g" \
     -e "s#__LDAP_GROUP_BASE__#${LDAP_GROUP_BASE}#g" \
+    -e "s#__LDAP_SASL_AUTHID__#${ldap_sasl_authid}#g" \
     -e "s/__HOSTNAME__/${HOSTNAME}/g" \
     -e "s/__FQDN__/${FQDN}/g" \
     -e "s#__LDAP_COMPUTER_OU__#${LDAP_COMPUTER_OU}#g" \
