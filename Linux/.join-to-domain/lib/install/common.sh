@@ -137,8 +137,10 @@ setup_logging() {
   touch "$LOG_FILE" 2>/dev/null || true
   chmod 600 "$LOG_FILE" 2>/dev/null || true
 
-  # Keep colors in the interactive terminal, but persist plain text only.
-  exec > >(tee >(sed -u $'s/\033\\[[0-9;]*[mK]//g' >> "$LOG_FILE")) 2>&1
+  # Keep colors in the interactive terminal, persist plain text only and hide
+  # Astra Linux process-capability diagnostics from the user-facing stream.
+  exec > >(sed -u -E '/Those capabilities aren.t needed and can be removed:|CAP_(DAC_READ_SEARCH|SETGID|SETUID):.*effective[[:space:]]*=/d' \
+    | tee >(sed -u $'s/\033\\[[0-9;]*[mK]//g' >> "$LOG_FILE")) 2>&1
 
   log "Log file: ${LOG_FILE}"
   log "State directory: ${STATE_DIR}"

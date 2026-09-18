@@ -367,6 +367,9 @@ install_static_configs() {
   fi
 
   build_sssd_conf
+  if is_astra_se; then
+    configure_astra_sssd_systemd_override
+  fi
   install_accountsservice_cache_helper
   install_profile_config
   install_pam_config
@@ -396,6 +399,13 @@ install_static_configs() {
   else
     log "Community edition: Salt config files are skipped"
   fi
+}
+
+configure_astra_sssd_systemd_override() {
+  install_local_file "$SSSD_SYSTEMD_OVERRIDE_SRC" "$SSSD_SYSTEMD_OVERRIDE_DST" 0644
+  systemctl daemon-reload >> "$LOG_FILE" 2>&1 \
+    || die "Failed to reload systemd after installing the SSSD override"
+  log "Configured Astra SSSD capability override: ${SSSD_SYSTEMD_OVERRIDE_DST}"
 }
 
 create_computer_object_if_needed() {

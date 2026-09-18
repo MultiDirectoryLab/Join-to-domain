@@ -34,6 +34,8 @@ SALT_SCHEDULE_SRC="${SALT_SRC}/schedule.conf"
 SALT_SCHEDULE_DST="/etc/salt/minion.d/schedule.conf"
 SALT_SYSTEMD_OVERRIDE_SRC="${FILES_DIR}/systemd/salt-minion.service.d/override.conf"
 SALT_SYSTEMD_OVERRIDE_DST="/etc/systemd/system/salt-minion.service.d/override.conf"
+SSSD_SYSTEMD_OVERRIDE_SRC="${FILES_DIR}/systemd/sssd.service.d/override.conf"
+SSSD_SYSTEMD_OVERRIDE_DST="/etc/systemd/system/sssd.service.d/90-multidirectory-capabilities.conf"
 MD_GPUPDATE_SRC="${FILES_DIR}/md-gpupdate"
 MD_GPUPDATE_DST="/usr/local/libexec/multidirectory/md-gpupdate"
 MD_GPUPDATE_LINK="/usr/local/bin/md-gpupdate"
@@ -221,6 +223,12 @@ setup_logging() {
   mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
   touch "$LOG_FILE" 2>/dev/null || true
   chmod 600 "$LOG_FILE" 2>/dev/null || true
+
+  # Astra Linux can emit its process capability diagnostics on a command's
+  # standard streams.  They are not actionable join status, so keep them out
+  # of the interactive UI without suppressing any other output.
+  exec > >(sed -u -E '/Those capabilities aren.t needed and can be removed:|CAP_(DAC_READ_SEARCH|SETGID|SETUID):.*effective[[:space:]]*=/d') \
+       2> >(sed -u -E '/Those capabilities aren.t needed and can be removed:|CAP_(DAC_READ_SEARCH|SETGID|SETUID):.*effective[[:space:]]*=/d' >&2)
 
   log "Log file: ${LOG_FILE}"
   log "State directory: ${MD_STATE_DIR}"
@@ -559,7 +567,7 @@ managed_join_paths() {
     /etc/pam.d/common-session /etc/pam.d/common-password \
     /etc/ssh/sshd_config.d/ssh_md.conf /etc/sudoers.d/domain-admins \
     /etc/systemd/resolved.conf.d/MultiDirectory.conf \
-    "$SALT_SYSTEMD_OVERRIDE_DST" \
+    "$SALT_SYSTEMD_OVERRIDE_DST" "$SSSD_SYSTEMD_OVERRIDE_DST" \
     /etc/salt/minion /etc/salt/minion.append /etc/salt/minion_id \
     /etc/salt/pki/minion /etc/profile.d/multidirectory-prompt.sh \
     /usr/local/sbin/md-cache-accountsservice-user /usr/bin/sudo \
