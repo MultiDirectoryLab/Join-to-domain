@@ -190,7 +190,26 @@ run_capability_output_filter_test() {
   printf 'capability output filter test: OK\n'
 }
 
+run_netbios_hostname_validation_tests() (
+  . "$ROOT_DIR/Linux/.join-to-domain/lib/configure/identity_dns.sh"
+
+  valid_hostname a
+  valid_hostname host-01
+  valid_hostname abcdefghijklmno
+
+  ! valid_hostname ''
+  ! valid_hostname abcdefghijklmnop
+  ! valid_hostname 123456
+  ! valid_hostname -host
+  ! valid_hostname host-
+  ! valid_hostname 'host_name'
+  ! valid_hostname 'хост'
+
+  printf 'NetBIOS hostname validation tests: OK\n'
+)
+
 run_keytab_principal_render_tests
 run_recovery_state_tests
 run_capability_output_filter_test
+run_netbios_hostname_validation_tests
 printf 'regression tests: OK\n'

@@ -244,6 +244,8 @@ rejoin_domain_configure() {
   if [[ -z "${HOSTNAME:-}" ]]; then
     HOSTNAME="$(hostname -s | tr '[:upper:]' '[:lower:]')"
   fi
+  valid_hostname "$HOSTNAME" \
+    || die "Invalid saved computer name: ${HOSTNAME}. Use 1-15 letters, digits or hyphens; the name must contain a letter."
   [[ -n "${FQDN:-}" ]] || FQDN="${HOSTNAME}.${DOMAIN}"
   ok "$(ui_text "Directory administrator authentication succeeded" "Аутентификация администратора каталога выполнена")"
   resolve_computer_object

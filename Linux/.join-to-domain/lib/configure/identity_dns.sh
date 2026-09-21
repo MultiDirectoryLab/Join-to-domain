@@ -1,10 +1,17 @@
 valid_hostname() {
   local h="$1"
-  [[ "$h" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]]
+
+  # The short DNS hostname is also used as the NetBIOS computer name.
+  [[ ${#h} -ge 1 && ${#h} -le 15 ]] || return 1
+  [[ "$h" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]] || return 1
+  [[ "$h" =~ [a-z] ]]
 }
 
 apply_hostname() {
   local new_short="$1"
+
+  valid_hostname "$new_short" \
+    || die "Invalid computer name: ${new_short}. Use 1-15 letters, digits or hyphens; the name must contain a letter."
 
   HOSTNAME="$new_short"
   FQDN="${HOSTNAME}.${DOMAIN}"
@@ -34,7 +41,7 @@ apply_hostname() {
 }
 
 prompt_change_hostname() {
-  local actual_current current default_name choice new_name
+  local actual_current current default_name choice new_name current_is_valid=1
 
   actual_current="$(hostname -s | tr '[:upper:]' '[:lower:]')"
   current="$actual_current"
@@ -48,12 +55,17 @@ prompt_change_hostname() {
     default_name="$SAVED_HOSTNAME"
   fi
 
+  if ! valid_hostname "$current"; then
+    current_is_valid=0
+    warn "$(ui_text "The current computer name is not NetBIOS-compatible and must be changed (use 1-15 letters, digits or hyphens; include at least one letter)." "Текущее имя компьютера несовместимо с NetBIOS и должно быть изменено (используйте 1–15 латинских букв, цифр или дефисов; имя должно содержать хотя бы одну букву).")"
+  fi
+
   if env_has_key HOSTNAME; then
     new_name="$(echo "${HOSTNAME:-}" | tr '[:upper:]' '[:lower:]')"
     [[ -n "$new_name" ]] || die "HOSTNAME is empty in environment"
 
     if ! valid_hostname "$new_name"; then
-      die "Invalid HOSTNAME in environment. Use lowercase letters, digits and hyphen."
+      die "Invalid HOSTNAME in environment. Use 1-15 lowercase letters, digits or hyphens; the name must contain a letter."
     fi
 
     if [[ "$new_name" == "$current" ]]; then
@@ -69,13 +81,19 @@ prompt_change_hostname() {
     return 0
   fi
 
-  tty_echo "${YELLOW}$(ui_text "Change PC name?" "Изменить имя компьютера?")${NC}"
-  tty_echo "1. $(ui_text "No" "Нет") (${current})"
-  tty_echo "2. $(ui_text "Yes" "Да")"
+  if [[ "$current_is_valid" -eq 1 ]]; then
+    tty_echo "${YELLOW}$(ui_text "Change PC name?" "Изменить имя компьютера?")${NC}"
+    tty_echo "1. $(ui_text "No" "Нет") (${current})"
+    tty_echo "2. $(ui_text "Yes" "Да")"
+  fi
 
   while true; do
-    read_tty choice "$(ui_text "Select (1/2) [1]:" "Выберите (1/2) [1]:")"
-    choice="${choice:-1}"
+    if [[ "$current_is_valid" -eq 1 ]]; then
+      read_tty choice "$(ui_text "Select (1/2) [1]:" "Выберите (1/2) [1]:")"
+      choice="${choice:-1}"
+    else
+      choice=2
+    fi
 
     case "$choice" in
       1)
@@ -98,7 +116,7 @@ prompt_change_hostname() {
             return 0
           fi
 
-          warn "$(ui_text "Invalid hostname. Use lowercase letters, digits and hyphen." "Некорректное имя. Используйте строчные латинские буквы, цифры и дефис.")"
+          warn "$(ui_text "Invalid computer name. Use 1-15 lowercase letters, digits or hyphens; the name must contain a letter." "Некорректное имя компьютера. Используйте 1–15 строчных латинских букв, цифр или дефисов; имя должно содержать хотя бы одну букву.")"
         done
         ;;
       *)
