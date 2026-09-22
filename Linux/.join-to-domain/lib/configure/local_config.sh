@@ -367,9 +367,7 @@ install_static_configs() {
   fi
 
   build_sssd_conf
-  if is_astra_se; then
-    configure_astra_sssd_systemd_override
-  fi
+  remove_legacy_sssd_capability_override
   install_accountsservice_cache_helper
   install_profile_config
   install_pam_config
@@ -401,11 +399,26 @@ install_static_configs() {
   fi
 }
 
-configure_astra_sssd_systemd_override() {
-  install_local_file "$SSSD_SYSTEMD_OVERRIDE_SRC" "$SSSD_SYSTEMD_OVERRIDE_DST" 0644
+remove_legacy_sssd_capability_override() {
+  local override="$SSSD_SYSTEMD_OVERRIDE_DST"
+
+  [[ -f "$override" ]] || return 0
+  grep -Eq '^[[:space:]]*CapabilityBoundingSet=[[:space:]]*$' "$override" || return 0
+
+  md_backup_once "$override"
+  if cmp -s "$override" <(printf '%s\n' \
+      '[Service]' \
+      '# SSSD reports these vendor-unit capabilities as unused with alert priority.' \
+      '# Reset the vendor CapabilityBoundingSet to the empty set as SSSD recommends.' \
+      'CapabilityBoundingSet='); then
+    rm -- "$override"
+  else
+    sed -i '/^[[:space:]]*CapabilityBoundingSet=[[:space:]]*$/d' "$override"
+  fi
+
   systemctl daemon-reload >> "$LOG_FILE" 2>&1 \
-    || die "Failed to reload systemd after installing the SSSD override"
-  log "Configured Astra SSSD capability override: ${SSSD_SYSTEMD_OVERRIDE_DST}"
+    || die "Failed to reload systemd after removing the SSSD capability override"
+  log "Removed empty SSSD CapabilityBoundingSet from ${override}"
 }
 
 create_computer_object_if_needed() {
