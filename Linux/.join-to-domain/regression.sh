@@ -171,7 +171,7 @@ run_recovery_state_tests() (
 )
 
 run_capability_output_filter_test() {
-  local output override
+  local output
   output="$({
     printf '%s\n' \
       'visible before' \
@@ -183,14 +183,44 @@ run_capability_output_filter_test() {
   } | sed -u -E '/Those capabilities aren.t needed and can be removed:|CAP_(DAC_READ_SEARCH|SETGID|SETUID):.*effective[[:space:]]*=/d')"
   [[ "$output" == $'visible before\nvisible after' ]]
 
-  override="$ROOT_DIR/Linux/.join-to-domain/files/systemd/sssd.service.d/override.conf"
-  grep -Fxq '[Service]' "$override"
-  grep -Fxq 'CapabilityBoundingSet=' "$override"
-  ! grep -Eq '^CapabilityBoundingSet=.+$' "$override"
   printf 'capability output filter test: OK\n'
 }
+
+run_sssd_capability_override_cleanup_test() (
+  local tmp_root override reload_count=0
+  tmp_root="$(mktemp -d)"
+  trap 'rm -rf -- "$tmp_root"' EXIT
+
+  . "$ROOT_DIR/Linux/.join-to-domain/lib/configure/local_config.sh"
+  override="$tmp_root/90-multidirectory-capabilities.conf"
+  SSSD_SYSTEMD_OVERRIDE_DST="$override"
+  LOG_FILE="$tmp_root/join.log"
+  log() { :; }
+  md_backup_once() { cp -- "$1" "$tmp_root/backup"; }
+  systemctl() { [[ "$*" == daemon-reload ]] || return 1; reload_count=$((reload_count + 1)); }
+
+  printf '%s\n' \
+    '[Service]' \
+    '# SSSD reports these vendor-unit capabilities as unused with alert priority.' \
+    '# Reset the vendor CapabilityBoundingSet to the empty set as SSSD recommends.' \
+    'CapabilityBoundingSet=' > "$override"
+  remove_legacy_sssd_capability_override
+  [[ ! -e "$override" && "$reload_count" -eq 1 ]]
+  grep -Fxq 'CapabilityBoundingSet=' "$tmp_root/backup"
+
+  printf '%s\n' '[Service]' 'CapabilityBoundingSet=' 'Restart=on-failure' > "$override"
+  remove_legacy_sssd_capability_override
+  [[ "$reload_count" -eq 2 ]]
+  grep -Fxq 'Restart=on-failure' "$override"
+  ! grep -Fq 'CapabilityBoundingSet=' "$override"
+
+  remove_legacy_sssd_capability_override
+  [[ "$reload_count" -eq 2 ]]
+  printf 'SSSD capability override cleanup test: OK\n'
+)
 
 run_keytab_principal_render_tests
 run_recovery_state_tests
 run_capability_output_filter_test
+run_sssd_capability_override_cleanup_test
 printf 'regression tests: OK\n'
