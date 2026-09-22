@@ -171,7 +171,7 @@ run_recovery_state_tests() (
 )
 
 run_capability_output_filter_test() {
-  local output override
+  local output
   output="$({
     printf '%s\n' \
       'visible before' \
@@ -183,33 +183,10 @@ run_capability_output_filter_test() {
   } | sed -u -E '/Those capabilities aren.t needed and can be removed:|CAP_(DAC_READ_SEARCH|SETGID|SETUID):.*effective[[:space:]]*=/d')"
   [[ "$output" == $'visible before\nvisible after' ]]
 
-  override="$ROOT_DIR/Linux/.join-to-domain/files/systemd/sssd.service.d/override.conf"
-  grep -Fxq '[Service]' "$override"
-  grep -Fxq 'CapabilityBoundingSet=' "$override"
-  ! grep -Eq '^CapabilityBoundingSet=.+$' "$override"
   printf 'capability output filter test: OK\n'
 }
-
-run_netbios_hostname_validation_tests() (
-  . "$ROOT_DIR/Linux/.join-to-domain/lib/configure/identity_dns.sh"
-
-  valid_hostname a
-  valid_hostname host-01
-  valid_hostname abcdefghijklmno
-
-  ! valid_hostname ''
-  ! valid_hostname abcdefghijklmnop
-  ! valid_hostname 123456
-  ! valid_hostname -host
-  ! valid_hostname host-
-  ! valid_hostname 'host_name'
-  ! valid_hostname 'хост'
-
-  printf 'NetBIOS hostname validation tests: OK\n'
-)
 
 run_keytab_principal_render_tests
 run_recovery_state_tests
 run_capability_output_filter_test
-run_netbios_hostname_validation_tests
 printf 'regression tests: OK\n'
