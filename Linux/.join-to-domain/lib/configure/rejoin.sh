@@ -125,6 +125,7 @@ on_recovery_rejoin_signal() {
 
 recovery_rejoin_domain() {
   remove_legacy_sssd_capability_override
+  configure_sssd_capability_logging
   activity_start "$(ui_text "Refreshing computer domain membership" "Обновление членства компьютера в домене")"
   case "${REMOTE_COMPUTER_STATE:-unknown}" in
     exists)

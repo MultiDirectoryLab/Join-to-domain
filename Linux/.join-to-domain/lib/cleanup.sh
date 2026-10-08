@@ -315,6 +315,9 @@ reload_services_after_cleanup() {
   fi
 
   systemctl daemon-reload 2>/dev/null || true
+  if have_cmd syslog-ng && syslog-ng --syntax-only >/dev/null 2>&1; then
+    systemctl reload syslog-ng 2>/dev/null || true
+  fi
   systemctl restart systemd-resolved.service 2>/dev/null || true
   if validate_ssh_safety; then
     systemctl reload ssh.service 2>/dev/null || systemctl restart ssh.service 2>/dev/null || true

@@ -368,6 +368,7 @@ install_static_configs() {
 
   build_sssd_conf
   remove_legacy_sssd_capability_override
+  configure_sssd_capability_logging
   install_accountsservice_cache_helper
   install_profile_config
   install_pam_config
@@ -397,6 +398,56 @@ install_static_configs() {
   else
     log "Community edition: Salt config files are skipped"
   fi
+}
+
+configure_sssd_capability_logging() {
+  local conf="$MD_SYSLOG_NG_CONF" dropin="$MD_SYSLOG_NG_CAPABILITIES_CONF"
+  local tmp filter
+
+  is_astra_se || return 0
+  have_cmd syslog-ng || return 0
+  [[ -f "$conf" ]] || return 0
+  # Astra's syslog-ng sends SSSD alert messages directly to root's TTY,
+  # bypassing stdout/stderr. Exclude only this diagnostic from console routes.
+  filter='filter { not (program("^sssd$") and message("^Those capabilities aren.t needed and can be removed:")); };'
+  if ! grep -Eq '^[[:space:]]*source s_src[[:space:]]*\{' "$conf" \
+    || ! grep -Fq '@include "/etc/syslog-ng/conf.d/*.conf"' "$conf"; then
+    warn "Custom syslog-ng configuration detected; SSSD capability routing was skipped"
+    return 0
+  fi
+
+  tmp="$(mktemp)" || die "Cannot create syslog-ng configuration draft"
+  awk -v filter="$filter" '
+    /^[[:space:]]*log[[:space:]]*\{/ && /destination\(d_(console|console_all|xconsole)\)/ {
+      if (index($0, filter) == 0) sub(/destination\(/, filter " destination(")
+    }
+    { print }
+  ' "$conf" > "$tmp"
+
+  md_backup_once "$conf"
+  md_backup_once "$dropin"
+  cat "$tmp" > "$conf"
+  rm -f "$tmp"
+  mkdir -p "$(dirname "$dropin")"
+  cat > "$dropin" <<'EOF'
+# MultiDirectory: preserve SSSD's multiline capability diagnostic in the join log.
+destination d_md_sssd_capabilities {
+  file("/var/log/multidirectory-join.log" owner("root") group("root") perm(0600));
+};
+log {
+  source(s_src);
+  filter { program("^sssd$") and message("^Those capabilities aren.t needed and can be removed:"); };
+  destination(d_md_sssd_capabilities);
+};
+EOF
+  chmod 0644 "$dropin"
+  md_track "$conf"
+  md_track "$dropin"
+  syslog-ng --syntax-only >> "$LOG_FILE" 2>&1 \
+    || die "Invalid syslog-ng configuration after configuring SSSD capability logging"
+  systemctl reload syslog-ng >> "$LOG_FILE" 2>&1 \
+    || die "Failed to reload syslog-ng after configuring SSSD capability logging"
+  log "SSSD capability diagnostics routed to ${LOG_FILE} instead of root consoles"
 }
 
 remove_legacy_sssd_capability_override() {

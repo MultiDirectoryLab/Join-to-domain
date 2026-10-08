@@ -61,6 +61,8 @@ INSTALL_STATE_DIR="/var/lib/MultiDirectory/install"
 INSTALL_ENV="${INSTALL_STATE_DIR}/install.env"
 
 LOG_FILE="/var/log/multidirectory-join.log"
+MD_SYSLOG_NG_CONF="/etc/syslog-ng/syslog-ng.conf"
+MD_SYSLOG_NG_CAPABILITIES_CONF="/etc/syslog-ng/conf.d/90-multidirectory-capabilities.conf"
 API_CONNECT_TIMEOUT=10
 API_MAX_TIME=30
 SALT_ACCEPT_CONNECT_TIMEOUT=5

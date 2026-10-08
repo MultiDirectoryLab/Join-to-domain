@@ -330,6 +330,9 @@ recover_incomplete_join_state() {
 
 restart_after_leave() {
   systemctl daemon-reload || true
+  if have_cmd syslog-ng && syslog-ng --syntax-only >> "$LOG_FILE" 2>&1; then
+    systemctl reload syslog-ng >> "$LOG_FILE" 2>&1 || true
+  fi
   systemctl restart systemd-resolved.service 2>/dev/null || true
   systemctl restart ssh.service 2>/dev/null || true
   systemctl restart sshd.service 2>/dev/null || true

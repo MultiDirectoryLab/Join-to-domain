@@ -186,6 +186,52 @@ run_capability_output_filter_test() {
   printf 'capability output filter test: OK\n'
 }
 
+run_sssd_capability_logging_test() (
+  local tmp_root reload_count=0
+  tmp_root="$(mktemp -d)"
+  trap 'rm -rf -- "$tmp_root"' EXIT
+  . "$ROOT_DIR/Linux/.join-to-domain/lib/configure/local_config.sh"
+  MD_SYSLOG_NG_CONF="$tmp_root/syslog-ng.conf"
+  MD_SYSLOG_NG_CAPABILITIES_CONF="$tmp_root/conf.d/90-multidirectory-capabilities.conf"
+  LOG_FILE="$tmp_root/join.log"
+  is_astra_se() { return 0; }
+  have_cmd() { return 0; }
+  log() { :; }
+  warn() { :; }
+  die() { printf '%s\n' "$*" >&2; exit 1; }
+  md_track() { :; }
+  md_backup_once() {
+    [[ ! -f "$1" || -f "$1.backup" ]] || cp -a "$1" "$1.backup"
+    return 0
+  }
+  syslog-ng() { [[ "$*" == --syntax-only ]]; }
+  systemctl() { [[ "$*" == 'reload syslog-ng' ]] || return 1; reload_count=$((reload_count + 1)); }
+
+  printf '%s\n' \
+    'source s_src { system(); internal(); };' \
+    'log { source(s_src); filter(f_error); destination(d_error); };' \
+    'log { source(s_src); filter(f_console); destination(d_console_all); destination(d_xconsole); };' \
+    'log { source(s_src); filter(f_crit); destination(d_console); };' \
+    '#log { source(s_src); destination(d_console); };' \
+    '@include "/etc/syslog-ng/conf.d/*.conf"' > "$MD_SYSLOG_NG_CONF"
+  configure_sssd_capability_logging
+  [[ "$reload_count" -eq 1 ]]
+  [[ "$(grep -c 'filter { not (program' "$MD_SYSLOG_NG_CONF")" -eq 2 ]]
+  grep -Fxq 'log { source(s_src); filter(f_error); destination(d_error); };' "$MD_SYSLOG_NG_CONF"
+  grep -Fxq '#log { source(s_src); destination(d_console); };' "$MD_SYSLOG_NG_CONF"
+  ! grep -q 'filter { not (program' "$MD_SYSLOG_NG_CONF.backup"
+  grep -Fq 'perm(0600)' "$MD_SYSLOG_NG_CAPABILITIES_CONF"
+  cp "$MD_SYSLOG_NG_CONF" "$tmp_root/first-pass"
+  configure_sssd_capability_logging
+  cmp "$MD_SYSLOG_NG_CONF" "$tmp_root/first-pass"
+  [[ "$reload_count" -eq 2 ]]
+
+  printf 'source custom { system(); };\n' > "$MD_SYSLOG_NG_CONF"
+  configure_sssd_capability_logging
+  [[ "$reload_count" -eq 2 ]]
+  printf 'SSSD capability syslog routing tests: OK\n'
+)
+
 run_sssd_capability_override_cleanup_test() (
   local tmp_root override reload_count=0
   tmp_root="$(mktemp -d)"
@@ -241,6 +287,7 @@ run_netbios_hostname_validation_tests() (
 run_keytab_principal_render_tests
 run_recovery_state_tests
 run_capability_output_filter_test
+run_sssd_capability_logging_test
 run_sssd_capability_override_cleanup_test
 run_netbios_hostname_validation_tests
 printf 'regression tests: OK\n'
