@@ -1,2 +1,0 @@
-master: __SALT_MASTER__
-master_finger: __SALT_MASTER_FINGER__
