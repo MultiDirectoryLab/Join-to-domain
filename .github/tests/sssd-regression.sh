@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-TEST_LIB_DIR="${SCRIPT_DIR}/../linux/.join-to-domain/lib"
+TEST_LIB_DIR="${SCRIPT_DIR}/../../linux/.join-to-domain/lib"
 tmp_root="$(mktemp -d)"
 trap 'rm -rf -- "$tmp_root"' EXIT
 

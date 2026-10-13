@@ -24,15 +24,20 @@ jobs:
       - name: Install ShellCheck
         run: sudo apt-get update && sudo apt-get install -y shellcheck
       - name: Check Bash syntax
-        run: find linux tests -type f -name '*.sh' -print0 | xargs -0 -r -n1 bash -n
+        run: find linux .github/tests -type f -name '*.sh' -print0 | xargs -0 -r -n1 bash -n
       - name: Check Bash errors
-        run: find linux tests -type f -name '*.sh' -print0 | xargs -0 -r shellcheck --shell=bash --severity=error --format=gcc
+        run: find linux .github/tests -type f -name '*.sh' -print0 | xargs -0 -r shellcheck --shell=bash --severity=error --format=gcc
       - name: Run regression tests
         run: |
-          bash tests/regression.sh
-          bash tests/sssd-regression.sh
-          bash tests/alt_dns_test.sh
-          bash tests/alt_packages_test.sh
+          mapfile -d '' test_files < <(find .github/tests -type f -name '*.sh' -print0 | sort -z)
+          if (( ${#test_files[@]} == 0 )); then
+            echo 'No regression tests found' >&2
+            exit 1
+          fi
+          for test_file in "${test_files[@]}"; do
+            echo "Running $test_file"
+            bash "$test_file"
+          done
 
   windows:
     name: Windows PowerShell checks

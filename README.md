@@ -50,37 +50,6 @@ sudo ./join-to-domain.sh --dry-run
 
 Рекомендуемый порядок первого подключения: установить пакеты пунктом 1, затем выполнить Join пунктом 2. Rejoin предназначен для восстановления или обновления уже существующего членства компьютера в домене.
 
-## Автоматические проверки (CI)
-
-Workflow `.github/workflows/ci.yml` запускается в GitHub Actions при push,
-pull request и вручную через вкладку Actions. Он проверяет:
-
-- синтаксис всех Bash-скриптов и ошибки ShellCheck (с явно заданным Bash);
-- четыре набора регрессионных тестов из `tests/`;
-- синтаксис Windows-скриптов через парсер Windows PowerShell 5.1;
-- ошибки PSScriptAnalyzer; предупреждения выводятся в журнал, но не блокируют CI.
-
-CI не выполняет присоединение к домену и не требует доменных учётных данных.
-Тесты используют временные каталоги и подменяют системные команды. Проверка
-реального Join/Rejoin/Leave требует отдельного стенда с MultiDirectory и VM.
-
-Для включения CI отправьте workflow, `tests/` и все внутренние модули
-`linux/.join-to-domain/lib/` в GitHub-репозиторий и разрешите GitHub Actions
-в его настройках. Дополнительные secrets и собственный runner не нужны.
-После первого успешного запуска можно сделать проверки `Linux checks` и
-`Windows PowerShell checks` обязательными для слияния в правилах ветки.
-
-Локальная проверка в Linux/WSL (нужны Bash и ShellCheck):
-
-```bash
-find linux tests -type f -name '*.sh' -print0 | xargs -0 -r -n1 bash -n
-find linux tests -type f -name '*.sh' -print0 | xargs -0 -r shellcheck --shell=bash --severity=error --format=gcc
-bash tests/regression.sh
-bash tests/sssd-regression.sh
-bash tests/alt_dns_test.sh
-bash tests/alt_packages_test.sh
-```
-
 ## Журналы
 
 Скрипт записывает диагностическую информацию в следующие файлы:
