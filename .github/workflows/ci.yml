@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    name: Linux checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Install ShellCheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: Check Bash syntax
+        run: find linux tests -type f -name '*.sh' -print0 | xargs -0 -r -n1 bash -n
+      - name: Check Bash errors
+        run: find linux tests -type f -name '*.sh' -print0 | xargs -0 -r shellcheck --shell=bash --severity=error --format=gcc
+      - name: Run regression tests
+        run: |
+          bash tests/regression.sh
+          bash tests/sssd-regression.sh
+          bash tests/alt_dns_test.sh
+          bash tests/alt_packages_test.sh
+
+  windows:
+    name: Windows PowerShell checks
+    runs-on: windows-2022
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Check PowerShell syntax without executing scripts
+        run: |
+          $files = @(Get-ChildItem -LiteralPath windows -Filter *.ps1 -Recurse)
+          if ($files.Count -eq 0) { throw 'No PowerShell scripts found' }
+          foreach ($file in $files) {
+            $tokens = $null
+            $parseErrors = $null
+            $null = [System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$tokens, [ref]$parseErrors)
+            if ($parseErrors.Count -gt 0) {
+              $parseErrors | Format-List
+              throw "PowerShell syntax errors: $($file.Name)"
+            }
+          }
+      - name: Install PSScriptAnalyzer
+        run: Install-Module PSScriptAnalyzer -Scope CurrentUser -Force -Repository PSGallery
+      - name: Analyze PowerShell
+        run: |
+          $results = @(Invoke-ScriptAnalyzer -Path windows -Recurse -Severity Error,Warning,ParseError)
+          $results | Format-Table -AutoSize
+          $failures = @($results | Where-Object { $_.Severity -in 'Error', 'ParseError' })
+          if ($failures.Count -gt 0) { throw 'PSScriptAnalyzer found errors' }

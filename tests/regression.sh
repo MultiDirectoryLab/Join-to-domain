@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
+ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 
 run_keytab_principal_render_tests() (
   local tmp_root rendered template
@@ -13,9 +13,9 @@ run_keytab_principal_render_tests() (
   log() { :; }
 
   # shellcheck source=/dev/null
-  . "$ROOT_DIR/Linux/.join-to-domain/lib/configure/templates.sh"
+  . "$ROOT_DIR/linux/.join-to-domain/lib/configure/templates.sh"
   # shellcheck source=/dev/null
-  . "$ROOT_DIR/Linux/.join-to-domain/lib/configure/local_config.sh"
+  . "$ROOT_DIR/linux/.join-to-domain/lib/configure/local_config.sh"
 
   DOMAIN=md.loc
   REALM=MD.LOC
@@ -45,7 +45,7 @@ run_keytab_principal_render_tests() (
 
   for template in default-sssd.conf astra-se-parsec-sssd.conf; do
     rendered="$tmp_root/$template"
-    cp "$ROOT_DIR/Linux/.join-to-domain/files/sssd.conf.d/$template" "$rendered"
+    cp "$ROOT_DIR/linux/.join-to-domain/files/sssd.conf.d/$template" "$rendered"
     apply_placeholders_to_file "$rendered"
     grep -Fxq 'ldap_sasl_authid = HOST/astra-27030.md.loc@MD.LOC' "$rendered"
     ! grep -Eq '__[A-Z0-9_]+__' "$rendered"
@@ -53,7 +53,7 @@ run_keytab_principal_render_tests() (
 
   unset KEYTAB_HOST_PRINCIPAL
   rendered="$tmp_root/pre-keytab.conf"
-  cp "$ROOT_DIR/Linux/.join-to-domain/files/sssd.conf.d/default-sssd.conf" "$rendered"
+  cp "$ROOT_DIR/linux/.join-to-domain/files/sssd.conf.d/default-sssd.conf" "$rendered"
   apply_placeholders_to_file "$rendered"
   grep -Fxq 'ldap_sasl_authid = host/astra-27030.md.loc@MD.LOC' "$rendered"
   is_supported_template_placeholder __LDAP_SASL_AUTHID__
@@ -66,11 +66,11 @@ run_recovery_state_tests() (
   tmp_root="$(mktemp -d)"
   trap 'rm -rf -- "$tmp_root"' EXIT
 
-  . "$ROOT_DIR/Linux/.join-to-domain/lib/configure/common.sh"
-  . "$ROOT_DIR/Linux/.join-to-domain/lib/configure/state.sh"
-  . "$ROOT_DIR/Linux/.join-to-domain/lib/configure/leave.sh"
-  . "$ROOT_DIR/Linux/.join-to-domain/lib/domain_state.sh"
-  . "$ROOT_DIR/Linux/.join-to-domain/lib/cleanup.sh"
+  . "$ROOT_DIR/linux/.join-to-domain/lib/configure/common.sh"
+  . "$ROOT_DIR/linux/.join-to-domain/lib/configure/state.sh"
+  . "$ROOT_DIR/linux/.join-to-domain/lib/configure/leave.sh"
+  . "$ROOT_DIR/linux/.join-to-domain/lib/domain_state.sh"
+  . "$ROOT_DIR/linux/.join-to-domain/lib/cleanup.sh"
 
   MD_ETC_DIR="$tmp_root/etc/MultiDirectory"
   MD_STATE_DIR="$MD_ETC_DIR/state"
@@ -190,7 +190,7 @@ run_sssd_capability_logging_test() (
   local tmp_root reload_count=0
   tmp_root="$(mktemp -d)"
   trap 'rm -rf -- "$tmp_root"' EXIT
-  . "$ROOT_DIR/Linux/.join-to-domain/lib/configure/local_config.sh"
+  . "$ROOT_DIR/linux/.join-to-domain/lib/configure/local_config.sh"
   MD_SYSLOG_NG_CONF="$tmp_root/syslog-ng.conf"
   MD_SYSLOG_NG_CAPABILITIES_CONF="$tmp_root/conf.d/90-multidirectory-capabilities.conf"
   LOG_FILE="$tmp_root/join.log"
@@ -237,7 +237,7 @@ run_sssd_capability_override_cleanup_test() (
   tmp_root="$(mktemp -d)"
   trap 'rm -rf -- "$tmp_root"' EXIT
 
-  . "$ROOT_DIR/Linux/.join-to-domain/lib/configure/local_config.sh"
+  . "$ROOT_DIR/linux/.join-to-domain/lib/configure/local_config.sh"
   override="$tmp_root/90-multidirectory-capabilities.conf"
   SSSD_SYSTEMD_OVERRIDE_DST="$override"
   LOG_FILE="$tmp_root/join.log"
@@ -267,7 +267,7 @@ run_sssd_capability_override_cleanup_test() (
 
 
 run_netbios_hostname_validation_tests() (
-  . "$ROOT_DIR/Linux/.join-to-domain/lib/configure/identity_dns.sh"
+  . "$ROOT_DIR/linux/.join-to-domain/lib/configure/identity_dns.sh"
 
   valid_hostname a
   valid_hostname host-01
