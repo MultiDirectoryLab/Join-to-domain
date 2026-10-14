@@ -12,17 +12,41 @@ refresh_md_trust_store() {
 }
 
 verify_md_server_tls() {
-  # ALT must also validate its generated system trust, independent of the
-  # per-operation certificate pin used by the API client.
-  if is_altlinux; then
-    env -u CURL_CA_BUNDLE -u SSL_CERT_FILE -u SSL_CERT_DIR curl -sS \
-      "${API_CURL_RESOLVE[@]}" --connect-timeout "${API_CONNECT_TIMEOUT}" \
-      --max-time "${API_MAX_TIME}" "https://${API_HOST}/api/" -o /dev/null \
-      || die "TLS verification failed with the ALT system trust store"
+  local tls_error tls_rc
+  [[ -n "${CURL_CA_BUNDLE:-}" && -s "$CURL_CA_BUNDLE" ]] \
+    || die "TLS verification failed: MultiDirectory certificate bundle is missing"
+  tls_error="$(mktemp)"
+  # The accepted certificate is the trust source for every API request.
+  # Validate it first; a system-store diagnostic must never bypass this check.
+  if curl -sS "${API_CURL_RESOLVE[@]}" --cacert "$CURL_CA_BUNDLE" \
+      --connect-timeout "${API_CONNECT_TIMEOUT}" --max-time "${API_MAX_TIME}" \
+      "https://${API_HOST}/" -o /dev/null 2>"$tls_error"; then
+    log "TLS verification: host=${API_HOST}; endpoint=${API_RESOLVED_IP:-${API_HOST}}; trust=accepted_certificate; status=ok"
+  else
+    tls_rc=$?
+    log "TLS verification: host=${API_HOST}; endpoint=${API_RESOLVED_IP:-${API_HOST}}; trust=accepted_certificate; curl_exit=${tls_rc}; detail=$(cat "$tls_error")"
+    rm -f "$tls_error"
+    die "$(ui_text "TLS verification failed with the accepted MultiDirectory certificate (curl ${tls_rc})" "Проверка TLS по принятому сертификату MultiDirectory не пройдена (curl ${tls_rc})")"
   fi
-  curl -sS "${API_CURL_RESOLVE[@]}" --connect-timeout "${API_CONNECT_TIMEOUT}" \
-    --max-time "${API_MAX_TIME}" "https://${API_HOST}/" -o /dev/null \
-    || die "TLS verification failed with the installed MultiDirectory certificate"
+  # ALT's generated bundle can omit a self-signed server certificate without
+  # CA constraints. API calls still verify TLS using CURL_CA_BUNDLE above.
+  if is_altlinux; then
+    if env -u CURL_CA_BUNDLE -u SSL_CERT_FILE -u SSL_CERT_DIR curl -sS \
+      "${API_CURL_RESOLVE[@]}" --connect-timeout "${API_CONNECT_TIMEOUT}" \
+      --max-time "${API_MAX_TIME}" "https://${API_HOST}/" -o /dev/null 2>"$tls_error"; then
+      log "TLS verification: host=${API_HOST}; trust=ALT_system_store; status=ok"
+    else
+      tls_rc=$?
+      log "TLS verification: host=${API_HOST}; trust=ALT_system_store; curl_exit=${tls_rc}; detail=$(cat "$tls_error")"
+      rm -f "$tls_error"
+      if [[ "$tls_rc" -eq 60 ]]; then
+        warn "$(ui_text "ALT system trust store does not validate this certificate; API TLS verification uses the accepted MultiDirectory certificate" "Системное хранилище ALT не подтверждает сертификат; TLS запросов API проверяется по принятому сертификату MultiDirectory")"
+        return 0
+      fi
+      die "$(ui_text "TLS system trust check failed (curl ${tls_rc}); see the log for transport details" "Проверка TLS через системное хранилище завершилась ошибкой (curl ${tls_rc}); подробности подключения в журнале")"
+    fi
+  fi
+  rm -f "$tls_error"
 }
 
 install_md_server_certificate() {
@@ -103,6 +127,7 @@ install_md_server_certificate() {
     CURL_CA_BUNDLE="$MD_EPHEMERAL_CA_BUNDLE"
     export CURL_CA_BUNDLE MD_EPHEMERAL_CA_BUNDLE
     trap 'rm -f "${MD_EPHEMERAL_CA_BUNDLE:-}"' EXIT
+    verify_md_server_tls
     warn "Existing join state has no usable pre-join backup; the certificate is trusted only for this non-destructive check"
     return 0
   fi
