@@ -1,4 +1,17 @@
+prepare_dns_probe_packages() {
+  # Resolve this optional package at installation/listing time, not when
+  # common settings are sourced. Keep an existing dig from any provider.
+  command -v dig >/dev/null 2>&1 && return 0
+
+  [[ " ${DEB_REQUIRED_PACKAGES[*]} " == *' dnsutils '* ]] || DEB_REQUIRED_PACKAGES+=(dnsutils)
+  [[ " ${RPM_REQUIRED_PACKAGES[*]} " == *' bind-utils '* ]] || RPM_REQUIRED_PACKAGES+=(bind-utils)
+  [[ " ${RPM_APT_REQUIRED_PACKAGES[*]} " == *' bind-utils '* ]] || RPM_APT_REQUIRED_PACKAGES+=(bind-utils)
+  [[ " ${ALT_REQUIRED_PACKAGES[*]} " == *' bind-utils '* ]] || ALT_REQUIRED_PACKAGES+=(bind-utils)
+  return 0
+}
+
 install_deb_packages() {
+  prepare_dns_probe_packages
   local packages=("${DEB_REQUIRED_PACKAGES[@]}")
 
   log "Detected DEB-based system: ${OS_NAME}"
@@ -25,6 +38,7 @@ install_rpm_packages() {
   log "Detected RPM-based system: ${OS_NAME}"
 
   detect_package_manager
+  prepare_dns_probe_packages
 
   if [[ "${PM}" == "apt-get" ]]; then
     if is_altlinux; then
@@ -62,6 +76,7 @@ list_required_packages() {
 
   load_os_release
   detect_package_manager
+  prepare_dns_probe_packages
 
   if is_deb_based; then
     if is_astra_se; then

@@ -46,7 +46,7 @@ validate_admin_credentials() {
 }
 
 discover_and_validate_domain() {
-  local rootdse_response="" rootdse_dns_host=""
+  local rootdse_response="" rootdse_dns_host="" service_domain="${DOMAIN:-}"
 
   log "Detecting domain via RootDSE"
 
@@ -66,6 +66,9 @@ discover_and_validate_domain() {
   [[ -n "$LDAP_BASE_DN" ]] || die "$(ui_text "RootDSE response does not contain defaultNamingContext, rootDomainNamingContext, or namingContexts. See ${LOG_FILE}" "Ответ RootDSE не содержит defaultNamingContext, rootDomainNamingContext или namingContexts. Подробности записаны в ${LOG_FILE}")"
 
   DOMAIN="$(echo "$DOMAIN" | tr '[:upper:]' '[:lower:]')"
+  if [[ -n "$service_domain" && "$DOMAIN" != "$service_domain" ]]; then
+    die "Domain from RootDSE does not match service_info: ${DOMAIN} != ${service_domain}"
+  fi
   rootdse_dns_host="$(printf '%s' "$rootdse_response" | api_response_attribute "dnsHostName")"
 
   log "Detected domain: ${DOMAIN}"

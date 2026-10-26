@@ -30,6 +30,7 @@ source_configure_module identity_dns
 source_configure_module state
 source_configure_module trust
 source_configure_module api
+source_configure_module service_info
 source_configure_module validation
 source_configure_module local_config
 source_configure_module salt

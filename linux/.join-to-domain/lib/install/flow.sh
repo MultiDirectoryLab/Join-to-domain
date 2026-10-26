@@ -77,6 +77,7 @@ join_packages() {
 
   save_packages_after
   calculate_installed_by_script
+  need_cmd dig
 
   systemctl daemon-reload || true
   require_salt_minion_installed

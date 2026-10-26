@@ -198,6 +198,9 @@ rejoin_domain_configure() {
   need_root
   setup_logging
   load_os_release
+  need_cmd curl
+  need_cmd jq
+  need_cmd dig
   user_info "$(ui_text "Starting domain rejoin" "Начинается повторное присоединение к домену")"
 
   if recoverable_incomplete_join_detected; then
@@ -241,7 +244,13 @@ rejoin_domain_configure() {
   info "$(ui_text "Existing domain configuration is valid and will be reused" "Существующая доменная конфигурация корректна и будет использована повторно")"
 
   start_rejoin_transaction
-  validate_leave_credentials state-loaded
+  prepare_service_info || die "$(ui_text "Failed to obtain domain settings from MultiDirectory" "Не удалось получить параметры домена от MultiDirectory")"
+  [[ "$DOMAIN" == "$SAVED_DOMAIN" ]] || die "Domain from service_info does not match saved domain"
+  [[ "$EDITION" == "$SAVED_EDITION" ]] || die "$(ui_text "MultiDirectory edition has changed; use Join to rebuild domain configuration" "Редакция MultiDirectory изменилась; используйте Join для перестройки доменной конфигурации")"
+  validate_files_structure
+  require_salt_minion_ready
+  prompt_configure_dns
+  validate_leave_credentials service-ready
   discover_and_validate_domain
   if [[ -z "${HOSTNAME:-}" ]]; then
     HOSTNAME="$(hostname -s | tr '[:upper:]' '[:lower:]')"

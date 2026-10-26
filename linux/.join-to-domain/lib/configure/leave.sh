@@ -28,7 +28,7 @@ load_join_env() {
 }
 
 validate_leave_credentials() {
-  local leave_login leave_password leave_token detected_domain dns_input dns_servers
+  local leave_login leave_password leave_token detected_domain
   local supplied_api_host=""
 
   if env_has_key API_HOST; then
@@ -36,54 +36,25 @@ validate_leave_credentials() {
     [[ -n "$supplied_api_host" ]] || die "API_HOST is empty in environment"
   fi
 
-  if [[ "${1:-load-state}" != "state-loaded" ]]; then
-    load_join_env
-  fi
+  case "${1:-load-state}" in
+    state-loaded|service-ready) ;;
+    *) load_join_env ;;
+  esac
   [[ -z "$supplied_api_host" ]] || API_HOST="$supplied_api_host"
 
-  while true; do
-    if [[ -z "${API_HOST:-}" ]]; then
-      read_tty API_HOST "$(ui_text "Enter MULTIDIRECTORY server IPv4 address or FQDN:" "Введите IPv4-адрес или FQDN сервера MULTIDIRECTORY:")"
-    fi
-    if [[ -z "${API_HOST}" ]]; then
-      warn "$(ui_text "API host must be filled." "Адрес API не может быть пустым.")"
-      continue
-    fi
-    if ! valid_api_host "${API_HOST}"; then
-      warn "$(ui_text "Invalid server address. Enter an IPv4 address or FQDN." "Некорректный адрес сервера. Введите IPv4-адрес или FQDN.")"
-      API_HOST=""
-      continue
-    fi
-    break
-  done
+  if [[ "${1:-}" != "service-ready" ]]; then
+    select_service_api_host || die "$(ui_text "Domain connection cancelled" "Подключение к домену отменено")"
+  fi
 
   read_tty leave_login "$(ui_text "Enter domain administrator login:" "Введите логин администратора домена:")"
   read_secret_tty leave_password "$(ui_text "Enter domain administrator password:" "Введите пароль администратора домена:")"
 
   [[ -n "$leave_login" && -n "$leave_password" ]] || die "Login and password must be filled"
 
-  log "Checking API host address: ${API_HOST}"
-  while ! api_host_resolution_ok "${API_HOST}"; do
-    warn "$(ui_text "DNS resolution failed: ${API_HOST}" "Не удалось разрешить имя через DNS: ${API_HOST}")"
-    read_tty dns_input "$(ui_text "Enter DNS server IP address:" "Введите IP-адрес DNS-сервера:")"
-    dns_servers="$(normalize_dns_servers "${dns_input}" 2>/dev/null || true)"
-    if [[ -z "${dns_servers}" ]]; then
-      warn "$(ui_text "Invalid DNS server address." "Некорректный адрес DNS-сервера.")"
-      continue
-    fi
-    md_set_resolv_first "${dns_servers}" || {
-      warn "$(ui_text "Failed to configure DNS servers." "Не удалось настроить DNS-серверы.")"
-      continue
-    }
-    MD_DNS_SERVER="$dns_servers"
-    log "DNS servers configured: $(dns_servers_csv "${dns_servers}")"
-  done
-
-  pin_api_host "${API_HOST}" \
-    || die "Failed to resolve an IPv4 address for API host ${API_HOST}"
-
   activity_start "$(ui_text "Checking connection to the domain" "Проверка подключения к домену")"
-  install_md_server_certificate
+  if [[ "${1:-}" != "service-ready" ]]; then
+    install_md_server_certificate
+  fi
 
   log "Authenticating domain administrator"
   leave_token="$(api_auth_cookie "$leave_login" "$leave_password")"
@@ -544,6 +515,7 @@ preflight() {
 
   need_cmd curl
   need_cmd jq
+  need_cmd dig
   need_cmd getent
   need_cmd file
   need_cmd sed

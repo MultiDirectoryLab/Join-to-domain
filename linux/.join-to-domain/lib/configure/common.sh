@@ -388,44 +388,6 @@ env_has_key() {
   [[ "${JOIN_TO_DOMAIN_ENV_KEYS:-}" == *" $1 "* ]]
 }
 
-use_env_edition_if_available() {
-  if [[ "${EDITION:-}" == "enterprise" ]]; then
-    WITH_SALT=1
-    log "Using edition from environment: Enterprise"
-    return 0
-  fi
-
-  if [[ "${EDITION:-}" == "community" ]]; then
-    WITH_SALT=0
-    log "Using edition from environment: Community"
-    return 0
-  fi
-
-  if env_has_key WITH_SALT; then
-    case "${WITH_SALT:-}" in
-      1)
-        EDITION="enterprise"
-        log "Using edition from environment: Enterprise"
-        return 0
-        ;;
-      0)
-        EDITION="community"
-        log "Using edition from environment: Community"
-        return 0
-        ;;
-      *)
-        warn "Invalid WITH_SALT in environment. Enter 1 or 0."
-        ;;
-    esac
-  fi
-
-  if env_has_key EDITION; then
-    warn "Invalid EDITION in environment. Enter enterprise or community."
-  fi
-
-  return 1
-}
-
 load_os_release() {
   local saved_edition="${EDITION-}"
   local edition_was_set=0

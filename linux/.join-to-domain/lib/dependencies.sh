@@ -61,6 +61,9 @@ package_binaries() {
     jq)
       printf '%s\n' jq
       ;;
+    dnsutils|bind-utils)
+      printf '%s\n' dig
+      ;;
     file)
       printf '%s\n' file
       ;;
@@ -214,6 +217,7 @@ install_packages() {
 
 check_dependencies() {
   local package binary package_missing missing_binary_count
+  local -a visible_missing_packages=() visible_missing_binaries=()
 
   MISSING_PACKAGES=()
   MISSING_BINARIES=()
@@ -255,16 +259,29 @@ check_dependencies() {
   fi
 
   error "Missing required dependencies"
-  if [[ "${#MISSING_PACKAGES[@]}" -gt 0 ]]; then
+  # DNS probe details belong in the log; keep the dependency failure visible.
+  for package in "${MISSING_PACKAGES[@]}"; do
+    case "$package" in
+      dnsutils|bind-utils) ;;
+      *) visible_missing_packages+=("$package") ;;
+    esac
+  done
+  for binary in "${MISSING_BINARIES[@]}"; do
+    case "$binary" in
+      'dnsutils: dig'|'bind-utils: dig') ;;
+      *) visible_missing_binaries+=("$binary") ;;
+    esac
+  done
+  if [[ "${#visible_missing_packages[@]}" -gt 0 ]]; then
     printf '\n%s:\n' "$(ui_text "Missing packages" "Отсутствующие пакеты")"
-    for package in "${MISSING_PACKAGES[@]}"; do
+    for package in "${visible_missing_packages[@]}"; do
       printf '  - %s\n' "$package"
     done
   fi
 
-  if [[ "${#MISSING_BINARIES[@]}" -gt 0 ]]; then
+  if [[ "${#visible_missing_binaries[@]}" -gt 0 ]]; then
     printf '\n%s:\n' "$(ui_text "Missing commands" "Отсутствующие команды")"
-    for binary in "${MISSING_BINARIES[@]}"; do
+    for binary in "${visible_missing_binaries[@]}"; do
       printf '  - %s\n' "$binary"
     done
   fi

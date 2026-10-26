@@ -185,80 +185,6 @@ prompt_change_hostname() {
   done
 }
 
-prompt_edition() {
-  local choice default_choice default_label
-
-  if use_env_edition_if_available; then
-    return 0
-  fi
-
-  default_choice=1
-  default_label="Enterprise"
-  if [[ "${SAVED_EDITION:-}" == "community" ]]; then
-    default_choice=2
-    default_label="Community"
-  fi
-
-  tty_echo "${YELLOW}$(ui_text "Select MultiDirectory edition:" "Выберите редакцию MultiDirectory:")${NC}"
-  tty_echo "1. Enterprise"
-  tty_echo "2. Community"
-
-  while true; do
-    read_tty choice "$(ui_text "Select (1/2) [${default_choice} - ${default_label}]:" "Выберите (1/2) [${default_choice} - ${default_label}]:")"
-    choice="${choice:-$default_choice}"
-
-    case "$choice" in
-      1)
-        EDITION="enterprise"
-        WITH_SALT=1
-        log "Selected edition: Enterprise"
-        return 0
-        ;;
-      2)
-        EDITION="community"
-        WITH_SALT=0
-        log "Selected edition: Community"
-        return 0
-        ;;
-      *)
-        warn "$(ui_text "Enter 1 or 2." "Введите 1 или 2.")"
-        ;;
-    esac
-  done
-}
-
-load_or_prompt_edition() {
-  if use_env_edition_if_available; then
-    return 0
-  fi
-
-  if [[ -n "${SAVED_EDITION:-}" ]]; then
-    prompt_edition
-    return 0
-  fi
-
-  if [[ -f "$INSTALL_ENV" ]]; then
-    # shellcheck disable=SC1090
-    . "$INSTALL_ENV"
-
-    if [[ "${EDITION:-}" == "enterprise" && "${WITH_SALT:-}" == "1" ]]; then
-      log "Using edition from install state: Enterprise"
-      return 0
-    fi
-
-    if [[ "${EDITION:-}" == "community" && "${WITH_SALT:-}" == "0" ]]; then
-      log "Using edition from install state: Community"
-      return 0
-    fi
-
-    warn "Invalid edition state in ${INSTALL_ENV}, asking again"
-  else
-    warn "Install state file not found: ${INSTALL_ENV}, asking edition manually"
-  fi
-
-  prompt_edition
-}
-
 detect_default_iface() {
   ip route show default 2>/dev/null | awk '{print $5; exit}'
 }
@@ -738,9 +664,7 @@ normalize_dns_servers() {
   [[ "$cleaned" != ,* ]] || return 1
   [[ "$cleaned" != *,,* ]] || return 1
 
-  # .env uses comma-separated values, while join.env stores the normalized
-  # space-separated form. Accept both so a successful Join can always be
-  # loaded by Rejoin and Leave.
+  # Accept interactive comma-separated input and normalized local state.
   cleaned="${cleaned//,/ }"
   read -r -a parts <<< "$cleaned"
   [[ "${#parts[@]}" -ge 1 && "${#parts[@]}" -le "$MAX_DNS_SERVERS" ]] || return 1

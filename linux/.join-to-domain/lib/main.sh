@@ -27,7 +27,6 @@ source_join_module cleanup || { return 1 2>/dev/null || exit 1; }
 source_join_module flow || { return 1 2>/dev/null || exit 1; }
 
 main() {
-  load_env_file
   parse_args "$@"
   setup_logging
   select_ui_language

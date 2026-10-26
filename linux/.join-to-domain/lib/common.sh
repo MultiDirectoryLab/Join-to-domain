@@ -3,7 +3,6 @@ set -uo pipefail
 
 SCRIPT_DIR="${JOIN_TO_DOMAIN_SCRIPT_DIR:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)}"
 INTERNAL_DIR="${JOIN_TO_DOMAIN_INTERNAL_DIR:-${SCRIPT_DIR}/.join-to-domain}"
-ENV_FILE="${SCRIPT_DIR}/.env"
 INSTALL_PACKAGES_SCRIPT="${INTERNAL_DIR}/install_packages.sh"
 CONFIGURE_SCRIPT="${INTERNAL_DIR}/configure.sh"
 LOG_FILE="/var/log/join-to-domain.log"
@@ -101,31 +100,6 @@ debug() {
   fi
 
   log "DEBUG" "$*"
-}
-
-load_env_file() {
-  local keys
-
-  [[ -f "$ENV_FILE" ]] || return 0
-
-  if [[ ! -r "$ENV_FILE" ]]; then
-    error "Environment file is not readable: ${ENV_FILE}"
-    exit 1
-  fi
-
-  keys="$(
-    sed -n -E 's/^[[:space:]]*(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)=.*/\2/p' "$ENV_FILE" |
-      sort -u |
-      tr '\n' ' '
-  )"
-
-  set -a
-  # shellcheck disable=SC1090
-  . "$ENV_FILE"
-  set +a
-
-  export JOIN_TO_DOMAIN_ENV_FILE="$ENV_FILE"
-  export JOIN_TO_DOMAIN_ENV_KEYS=" ${keys} "
 }
 
 setup_logging() {
