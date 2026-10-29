@@ -588,16 +588,13 @@ cleanup_api_rootdse_domain() {
       0
   )"
 
-  dom="$(printf '%s' "$resp" | cleanup_api_response_attribute "dnsHostName")"
+  # dnsHostName identifies the controller, not the directory domain.
+  nc="$(printf '%s' "$resp" | cleanup_api_response_attribute "defaultNamingContext")"
+  [[ -n "$nc" ]] || nc="$(printf '%s' "$resp" | cleanup_api_response_attribute "rootDomainNamingContext")"
+  [[ -n "$nc" ]] || nc="$(printf '%s' "$resp" | cleanup_api_response_attribute "namingContexts")"
+  dom="$(printf '%s' "$nc" | cleanup_dn_to_domain)"
   [[ -n "$dom" ]] || dom="$(printf '%s' "$resp" | cleanup_api_response_attribute "dnsDomainName")"
   [[ -n "$dom" ]] || dom="$(printf '%s' "$resp" | cleanup_api_response_attribute "dnsForestName")"
-
-  if [[ -z "$dom" ]]; then
-    nc="$(printf '%s' "$resp" | cleanup_api_response_attribute "defaultNamingContext")"
-    [[ -n "$nc" ]] || nc="$(printf '%s' "$resp" | cleanup_api_response_attribute "rootDomainNamingContext")"
-    [[ -n "$nc" ]] || nc="$(printf '%s' "$resp" | cleanup_api_response_attribute "namingContexts")"
-    [[ -n "$nc" ]] && dom="$(printf '%s' "$nc" | cleanup_dn_to_domain)"
-  fi
 
   printf '%s' "$dom"
 }

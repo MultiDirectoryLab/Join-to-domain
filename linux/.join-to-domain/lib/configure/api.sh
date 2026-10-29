@@ -288,18 +288,14 @@ api_rootdse_domain() {
     return 1
   fi
 
-  dom="$(printf '%s' "$resp" | api_response_attribute "dnsHostName")"
-
+  # dnsHostName identifies the controller, not the directory domain.
+  nc="$(printf '%s' "$resp" | api_response_attribute "defaultNamingContext")"
+  [[ -n "$nc" ]] || nc="$(printf '%s' "$resp" | api_response_attribute "rootDomainNamingContext")"
+  [[ -n "$nc" ]] || nc="$(printf '%s' "$resp" | api_response_attribute "namingContexts")"
+  dom="$(printf '%s' "$nc" | dn_to_domain)"
   [[ -n "$dom" ]] || dom="$(printf '%s' "$resp" | api_response_attribute "dnsDomainName")"
 
   [[ -n "$dom" ]] || dom="$(printf '%s' "$resp" | api_response_attribute "dnsForestName")"
-
-  if [[ -z "$dom" ]]; then
-    nc="$(printf '%s' "$resp" | api_response_attribute "defaultNamingContext")"
-    [[ -n "$nc" ]] || nc="$(printf '%s' "$resp" | api_response_attribute "rootDomainNamingContext")"
-    [[ -n "$nc" ]] || nc="$(printf '%s' "$resp" | api_response_attribute "namingContexts")"
-    [[ -n "$nc" ]] && dom="$(printf '%s' "$nc" | dn_to_domain)"
-  fi
 
   if [[ -z "$dom" ]]; then
     log "RootDSE response contains no usable domain attributes: $(printf '%s' "$resp" | tr '\r\n' ' ' | cut -c1-1500)"
